@@ -197,7 +197,7 @@ Kling 3.0 video models:
 - Ratio: `16x9` / `9x16`
 - Resolution: `720p`
 - Supports up to 2 frame reference images: 1 image is first frame, 2 images are first frame + last frame
-- Audio defaults to disabled, matching the current official Kling 3.0 request; override with `generate_audio` / `generateAudio`
+- Audio defaults to enabled; override with `generate_audio` / `generateAudio`
 - Upstream model version: `kling_v3_standard_i2v`
 - Examples:
   - `firefly-kling3-5s-16x9`

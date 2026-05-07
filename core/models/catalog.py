@@ -208,6 +208,6 @@ for dur in (5, 10, 15):
             "duration": dur,
             "aspect_ratio": ratio,
             "resolution": "720p",
-            "generate_audio": False,
+            "generate_audio": True,
             "description": f"Firefly Kling 3.0 video model ({dur}s {ratio} 720p)",
         }

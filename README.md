@@ -196,7 +196,7 @@ Kling 3.0 视频模型：
 - 比例：`16x9` / `9x16`
 - 分辨率：`720p`
 - 最多支持 2 张帧参考图：1 张为首帧，2 张为首帧 + 尾帧
-- 默认关闭音频，与官方 Kling 3.0 当前请求一致；可通过 `generate_audio` / `generateAudio` 覆盖
+- 音频默认开启；可通过 `generate_audio` / `generateAudio` 覆盖
 - 上游模型版本：`kling_v3_standard_i2v`
 - 示例：
   - `firefly-kling3-5s-16x9`
