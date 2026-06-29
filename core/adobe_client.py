@@ -72,6 +72,21 @@ def _build_arp_session_id() -> str:
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
 
 
+def _arp_session_id_for_token(token: str) -> str:
+    try:
+        from core.refresh_mgr import refresh_manager
+        from core.token_mgr import token_manager
+
+        meta = token_manager.get_meta_by_value(token)
+        profile_id = str(meta.get("refresh_profile_id") or "").strip()
+        if not profile_id:
+            return ""
+        firefly_headers = refresh_manager.get_firefly_headers_for_profile(profile_id)
+        return str(firefly_headers.get("x-arp-session-id") or "").strip()
+    except Exception:
+        return ""
+
+
 class AdobeRequestError(Exception):
     def __init__(
         self,
@@ -118,7 +133,7 @@ class AdobeClient:
     platform_cs_base = "https://platform-cs-va6.adobe.io/composite/component/path"
 
     def __init__(self) -> None:
-        self.api_key = "clio-playground-web"
+        self.api_key = "projectx_webapp"
         self.impersonate = "chrome124"
         self.proxy = ""
         self.generate_timeout = 300
@@ -291,13 +306,13 @@ class AdobeClient:
     def _browser_headers(self) -> dict:
         return {
             "user-agent": self.user_agent,
-            "origin": "https://firefly.adobe.com",
-            "referer": "https://firefly.adobe.com/",
+            "origin": "https://new.express.adobe.com",
+            "referer": "https://new.express.adobe.com/",
             "accept-language": "en-US,en;q=0.9",
             "sec-ch-ua": self.sec_ch_ua,
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-site": "same-site",
+            "sec-fetch-site": "cross-site",
             "sec-fetch-mode": "cors",
             "sec-fetch-dest": "empty",
         }
@@ -312,10 +327,6 @@ class AdobeClient:
                 "accept": "*/*",
             }
         )
-        submit_nonce = _build_submit_nonce(token, prompt)
-        if submit_nonce:
-            headers["x-nonce"] = submit_nonce
-        headers["x-arp-session-id"] = _build_arp_session_id()
         return headers
 
     def _submit_headers_minimal(self, token: str) -> dict:
@@ -336,16 +347,17 @@ class AdobeClient:
                 "accept": "*/*",
             }
         )
-        headers["x-arp-session-id"] = _build_arp_session_id()
         return headers
 
     def _poll_headers(self, token: str) -> dict:
         return {
             "Authorization": f"Bearer {token}",
             "accept": "*/*",
-            "referer": "https://firefly.adobe.com/",
-            "origin": "https://firefly.adobe.com",
+            "referer": "https://new.express.adobe.com/",
+            "origin": "https://new.express.adobe.com",
             "user-agent": self.user_agent,
+            "x-api-key": self.api_key,
+            "content-type": "application/json",
         }
 
     def _entity_headers(self, token: str) -> dict:

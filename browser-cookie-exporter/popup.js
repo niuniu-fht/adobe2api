@@ -80,6 +80,52 @@ function getCookies(filter, storeId) {
   });
 }
 
+function getFireflyArpSessionId(tabId) {
+  return new Promise((resolve) => {
+    if (typeof tabId !== "number" || !chrome.scripting) {
+      resolve("");
+      return;
+    }
+
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        func: () => {
+          const readCookie = (name) => {
+            const prefix = `${name}=`;
+            const item = document.cookie
+              .split(";")
+              .map((value) => value.trim())
+              .find((value) => value.startsWith(prefix));
+            return item ? item.slice(prefix.length) : "";
+          };
+
+          const sid = String(sessionStorage.getItem("ff_session_guid") || "").trim();
+          const ftr = String(
+            localStorage.getItem("forterToken") ||
+              readCookie("forterToken") ||
+              readCookie("forter") ||
+              ""
+          ).trim();
+
+          if (!sid || !ftr) {
+            return "";
+          }
+          return btoa(JSON.stringify({ sid, ftr }));
+        },
+      },
+      (results) => {
+        if (chrome.runtime.lastError) {
+          resolve("");
+          return;
+        }
+        const value = Array.isArray(results) && results[0] ? results[0].result : "";
+        resolve(typeof value === "string" ? value : "");
+      }
+    );
+  });
+}
+
 async function collectCookiesByScope(scope) {
   const context = await getCurrentContext();
   const { tab, storeId, incognito } = context;
@@ -153,13 +199,20 @@ function downloadJson(filename, data) {
 
 async function generatePayload() {
   const scope = scopeSelect.value;
+  const { tab } = await getCurrentContext();
   const { cookies, incognito, storeId } = await collectCookiesByScope(scope);
   const normalizedCookies = toPlaywrightLikeCookies(cookies);
   const cookieHeader = buildCookieHeader(normalizedCookies);
+  const arpSessionId = tab && String(tab.url || "").startsWith("https://firefly.adobe.com/")
+    ? await getFireflyArpSessionId(tab.id)
+    : "";
   const now = new Date();
   const fileTs = toTimestampParts(now);
 
   const payload = { cookie: cookieHeader };
+  if (arpSessionId) {
+    payload.headers = { "x-arp-session-id": arpSessionId };
+  }
   const fileName = `cookie_${fileTs}.json`;
   return {
     payload,

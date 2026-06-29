@@ -7,9 +7,15 @@ minimal JSON format required by `adobe2api`.
 
 ```json
 {
-  "cookie": "k1=v1; k2=v2"
+  "cookie": "k1=v1; k2=v2",
+  "headers": {
+    "x-arp-session-id": "base64-json-value"
+  }
 }
 ```
+
+The `headers.x-arp-session-id` field is exported only when the active tab is a
+loaded `https://firefly.adobe.com/` page with Firefly session data available.
 
 ## Install
 
@@ -20,7 +26,7 @@ minimal JSON format required by `adobe2api`.
 
 ## Usage
 
-1. Log in to Adobe or Firefly
+1. Log in to Adobe or Firefly and open `https://firefly.adobe.com/generate/image`
 2. Open the extension popup
 3. Choose an export scope:
    - `Adobe domains (recommended)`

@@ -15,7 +15,7 @@ class ConfigManager:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         # Default config
         self.config = {
-            "api_key": "clio-playground-web",
+            "api_key": "projectx_webapp",
             "admin_username": "admin",
             "admin_password": "admin",
             "admin_session_secret": "adobe2api-change-this-session-secret",

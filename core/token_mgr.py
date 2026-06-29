@@ -183,6 +183,7 @@ class TokenManager:
                     "token_account_name": t.get("refresh_profile_name") or "",
                     "token_account_email": t.get("refresh_profile_email") or "",
                     "token_source": t.get("source") or "manual",
+                    "refresh_profile_id": t.get("refresh_profile_id") or "",
                 }
         return {
             "token_id": "",
@@ -190,6 +191,7 @@ class TokenManager:
             "token_account_name": "",
             "token_account_email": "",
             "token_source": "manual",
+            "refresh_profile_id": "",
         }
 
     def set_status(self, tid: str, status: str):

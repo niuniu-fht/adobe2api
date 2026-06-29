@@ -1034,7 +1034,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           throw new Error(`第 ${idx + 1} 项缺少 cookie`);
         }
         return {
-          name: String(item.name || "").trim() || null,
+          name: String(item.name || item.email || "").trim() || null,
           cookie,
         };
       });
@@ -1043,7 +1043,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (Array.isArray(value.items)) return toCookieBatchItems(value.items);
       const cookie = cookieToHeaderString(value.cookie != null ? value.cookie : value.cookies != null ? value.cookies : value);
       if (!cookie) throw new Error("cookie 内容为空");
-      return [{ name: String(value.name || "").trim() || null, cookie }];
+      return [{ name: String(value.name || value.email || "").trim() || null, cookie }];
     }
     const cookie = cookieToHeaderString(value);
     if (!cookie) throw new Error("cookie 内容为空");

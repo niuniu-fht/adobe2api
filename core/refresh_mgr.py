@@ -19,11 +19,7 @@ PROFILE_FILE = CONFIG_DIR / "refresh_profile.json"
 
 class RefreshManager:
     DEFAULT_REFRESH_URL = "https://adobeid-na1.services.adobe.com/ims/check/v6/token?jslVersion=v2-v0.48.0-1-g1e322cb"
-    DEFAULT_SCOPE = (
-        "AdobeID,firefly_api,openid,pps.read,pps.write,additional_info.projectedProductContext,"
-        "additional_info.ownerOrg,uds_read,uds_write,ab.manage,read_organizations,"
-        "additional_info.roles,account_cluster.read,creative_production,profile"
-    )
+    DEFAULT_SCOPE = "AdobeID,firefly_api,openid"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -102,20 +98,15 @@ class RefreshManager:
                 or "application/x-www-form-urlencoded;charset=UTF-8"
             ),
             "Cookie": str(headers.get("Cookie") or "").strip(),
-            "Origin": str(headers.get("Origin") or "https://firefly.adobe.com"),
-            "Referer": str(headers.get("Referer") or "https://firefly.adobe.com/"),
+            "Origin": "https://new.express.adobe.com",
+            "Referer": "https://new.express.adobe.com/",
             "User-Agent": str(headers.get("User-Agent") or "Mozilla/5.0"),
         }
 
-        scope = str(form.get("scope") or "").strip()
-        scope_parts = [part.strip() for part in scope.split(",") if part.strip()]
-        if "profile" not in scope_parts:
-            scope_parts.append("profile")
-
         normalized_form = {
-            "client_id": str(form.get("client_id") or "").strip(),
+            "client_id": "projectx_webapp",
             "guest_allowed": str(form.get("guest_allowed") or "true").strip() or "true",
-            "scope": ",".join(scope_parts),
+            "scope": RefreshManager.DEFAULT_SCOPE,
         }
 
         return {
@@ -143,12 +134,14 @@ class RefreshManager:
         state = profile.get("state") if isinstance(profile.get("state"), dict) else {}
         account_raw = profile.get("account")
         account = account_raw if isinstance(account_raw, dict) else {}
+        firefly_headers = cls._normalize_firefly_headers(profile.get("firefly_headers"))
         return {
             "id": profile_id,
             "name": profile_name,
             "enabled": bool(profile.get("enabled", True)),
             "imported_at": int(profile.get("imported_at") or now_ts),
             "endpoint": validated["endpoint"],
+            "firefly_headers": firefly_headers,
             "account": {
                 "display_name": str(account.get("display_name") or "").strip(),
                 "email": str(account.get("email") or "").strip(),
@@ -202,6 +195,7 @@ class RefreshManager:
         endpoint = profile.get("endpoint", {})
         form = endpoint.get("form", {})
         state = profile.get("state", {})
+        firefly_headers = self._normalize_firefly_headers(profile.get("firefly_headers"))
         account = (
             profile.get("account") if isinstance(profile.get("account"), dict) else {}
         )
@@ -213,6 +207,11 @@ class RefreshManager:
             "endpoint": {
                 "url": endpoint.get("url", ""),
                 "client_id": form.get("client_id", ""),
+            },
+            "firefly_headers": {
+                "has_x_arp_session_id": bool(
+                    str(firefly_headers.get("x-arp-session-id") or "").strip()
+                ),
             },
             "account": {
                 "display_name": str(account.get("display_name") or "").strip(),
@@ -269,17 +268,75 @@ class RefreshManager:
             return "; ".join(pairs)
         return ""
 
+    @staticmethod
+    def _normalize_firefly_headers(headers_input) -> Dict:
+        headers = headers_input if isinstance(headers_input, dict) else {}
+        value = ""
+        for key, raw in headers.items():
+            if str(key or "").strip().lower() == "x-arp-session-id":
+                value = str(raw or "").strip()
+                break
+        return {"x-arp-session-id": value} if value else {}
+
+    @classmethod
+    def _firefly_headers_from_input(cls, cookie_input) -> Dict:
+        if not isinstance(cookie_input, dict):
+            return {}
+        headers = cls._normalize_firefly_headers(cookie_input.get("headers"))
+        if headers:
+            return headers
+        return cls._normalize_firefly_headers(cookie_input.get("firefly_headers"))
+
+    @staticmethod
+    def _normalize_email(email_value: str) -> str:
+        return str(email_value or "").strip().lower()
+
+    @classmethod
+    def _account_from_cookie_input(cls, cookie_input) -> Dict:
+        if not isinstance(cookie_input, dict):
+            return {}
+        email = str(cookie_input.get("email") or "").strip()
+        display_name = str(
+            cookie_input.get("name") or cookie_input.get("display_name") or ""
+        ).strip()
+        if not email and not display_name:
+            return {}
+        return {
+            "display_name": display_name or email,
+            "email": email,
+            "user_id": "",
+            "source": "cookie_import",
+            "updated_at": int(time.time()),
+        }
+
+    @classmethod
+    def _account_from_import_name(cls, name: Optional[str]) -> Dict:
+        value = str(name or "").strip()
+        if not value or "@" not in value:
+            return {}
+        return {
+            "display_name": value,
+            "email": value,
+            "user_id": "",
+            "source": "import_name",
+            "updated_at": int(time.time()),
+        }
+
     def import_cookie(self, cookie_input, name: Optional[str] = None) -> Dict:
         cookie = self._cookie_string_from_input(cookie_input)
         if not cookie:
             raise ValueError("cookie is required")
+        firefly_headers = self._firefly_headers_from_input(cookie_input)
+        account = self._account_from_cookie_input(
+            cookie_input
+        ) or self._account_from_import_name(name)
         validated = self._validate_bundle(
             {
                 "endpoint": {
                     "url": self.DEFAULT_REFRESH_URL,
                     "method": "POST",
                     "form": {
-                        "client_id": "clio-playground-web",
+                        "client_id": "projectx_webapp",
                         "guest_allowed": "true",
                         "scope": self.DEFAULT_SCOPE,
                     },
@@ -288,8 +345,8 @@ class RefreshManager:
                         "Accept-Language": "zh-CN,zh;q=0.9",
                         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
                         "Cookie": cookie,
-                        "Origin": "https://firefly.adobe.com",
-                        "Referer": "https://firefly.adobe.com/",
+                        "Origin": "https://new.express.adobe.com",
+                        "Referer": "https://new.express.adobe.com/",
                         "User-Agent": "Mozilla/5.0",
                     },
                 }
@@ -310,12 +367,13 @@ class RefreshManager:
             "enabled": True,
             "imported_at": now_ts,
             "endpoint": validated["endpoint"],
+            "firefly_headers": firefly_headers,
             "account": {
-                "display_name": "",
-                "email": "",
-                "user_id": "",
-                "source": "",
-                "updated_at": None,
+                "display_name": str(account.get("display_name") or "").strip(),
+                "email": str(account.get("email") or "").strip(),
+                "user_id": str(account.get("user_id") or "").strip(),
+                "source": str(account.get("source") or "").strip(),
+                "updated_at": account.get("updated_at"),
             },
             "state": {
                 "last_attempt_at": None,
@@ -352,14 +410,28 @@ class RefreshManager:
                     else {}
                 )
                 cookie = str(headers.get("Cookie") or "").strip()
-                out.append(
-                    {
-                        "id": pid,
-                        "name": str(p.get("name") or "").strip(),
-                        "cookie": cookie,
-                    }
+                item = {
+                    "id": pid,
+                    "name": str(p.get("name") or "").strip(),
+                    "cookie": cookie,
+                }
+                firefly_headers = self._normalize_firefly_headers(
+                    p.get("firefly_headers")
                 )
+                if firefly_headers:
+                    item["headers"] = firefly_headers
+                out.append(item)
             return out
+
+    def get_firefly_headers_for_profile(self, profile_id: str) -> Dict:
+        pid = str(profile_id or "").strip()
+        if not pid:
+            return {}
+        with self._lock:
+            target = self._find_profile_locked(pid)
+            if not target:
+                return {}
+            return self._normalize_firefly_headers(target.get("firefly_headers"))
 
     def is_profile_enabled(self, profile_id: str) -> Optional[bool]:
         pid = str(profile_id or "").strip()
@@ -527,6 +599,8 @@ class RefreshManager:
                 "Authorization": f"Bearer {token}",
                 "x-api-key": "SunbreakWebUI1",
                 "x-account-id": aid,
+                "Origin": "https://new.express.adobe.com",
+                "Referer": "https://new.express.adobe.com/",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             },
