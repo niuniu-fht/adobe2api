@@ -939,6 +939,7 @@ class AdobeClient:
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
+        requested_size: Optional[dict] = None,
     ) -> list[dict]:
         return build_image_payload_candidates(
             prompt=prompt,
@@ -949,6 +950,7 @@ class AdobeClient:
             quality_level=quality_level,
             detail_level=detail_level,
             source_image_ids=source_image_ids,
+            requested_size=requested_size,
         )
 
     @staticmethod
@@ -1478,6 +1480,7 @@ class AdobeClient:
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
+        requested_size: Optional[dict] = None,
         timeout: int = 180,
         out_path: Optional[Path] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
@@ -1493,6 +1496,7 @@ class AdobeClient:
             quality_level=quality_level,
             detail_level=detail_level,
             source_image_ids=source_image_ids,
+            requested_size=requested_size,
         ):
             submit_resp = self._post_json(
                 self.submit_url,

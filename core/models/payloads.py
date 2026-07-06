@@ -122,6 +122,7 @@ def build_image_payload_candidates(
     quality_level: Optional[str] = None,
     detail_level: Optional[int] = None,
     source_image_ids: Optional[list[str]] = None,
+    requested_size: Optional[dict] = None,
 ) -> list[dict]:
     normalized_ratio = str(aspect_ratio or "").strip().lower()
     effective_ratio = normalized_ratio or "1:1"
@@ -129,7 +130,9 @@ def build_image_payload_candidates(
         effective_detail_level = detail_level
         if effective_detail_level is None:
             effective_detail_level = gpt_image_detail_level_from_quality(quality_level)
-        pixel_size = gpt_image_pixels_from_ratio(effective_ratio, output_resolution)
+        pixel_size = requested_size or gpt_image_pixels_from_ratio(
+            effective_ratio, output_resolution
+        )
         if pixel_size is None:
             raise ValueError(f"unsupported gpt-image ratio: {effective_ratio}")
         base_payload = {

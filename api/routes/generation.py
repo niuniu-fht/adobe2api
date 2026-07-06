@@ -12,6 +12,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.schemas import GenerateRequest
 from core.entity_store import entity_store
+from core.models.openai_images import (
+    OpenAIImageRequestError,
+    build_legacy_image_options,
+    build_native_gpt_image_options,
+    encode_image_response_item,
+    is_native_gpt_image_model,
+)
 
 
 def build_generation_router(
@@ -208,13 +215,21 @@ def build_generation_router(
                     "description": conf["description"],
                 }
             )
+        data.append(
+            {
+                "id": "gpt-image-2",
+                "object": "model",
+                "owned_by": "adobe2api",
+                "description": "OpenAI Images compatible alias for Firefly GPT Image 2",
+            }
+        )
         return {"object": "list", "data": data}
 
     @router.post("/v1/images/generations")
     def openai_generate(data: dict, request: Request):
         require_service_api_key(request)
 
-        prompt = data.get("prompt", "").strip()
+        prompt = str(data.get("prompt") or "").strip()
         if not prompt:
             return JSONResponse(
                 status_code=400,
@@ -226,8 +241,8 @@ def build_generation_router(
                 },
             )
 
-        model_id = data.get("model")
-        if str(model_id or "").strip() in video_model_catalog:
+        model_id = str(data.get("model") or "").strip()
+        if model_id in video_model_catalog:
             return JSONResponse(
                 status_code=400,
                 content={
@@ -237,10 +252,33 @@ def build_generation_router(
                     }
                 },
             )
-        ratio, output_resolution, resolved_model_id = resolve_ratio_and_resolution(
-            data, model_id
-        )
-        model_conf = resolve_model(resolved_model_id)
+        try:
+            if is_native_gpt_image_model(model_id):
+                image_options = build_native_gpt_image_options(data)
+                model_conf = {
+                    "upstream_model_id": image_options.upstream_model_id,
+                    "upstream_model_version": image_options.upstream_model_version,
+                }
+                resolved_model_id = image_options.response_model
+            else:
+                ratio, output_resolution, resolved_model_id = (
+                    resolve_ratio_and_resolution(data, model_id or None)
+                )
+                model_conf = resolve_model(resolved_model_id)
+                image_options = build_legacy_image_options(
+                    data,
+                    ratio=ratio,
+                    output_resolution=output_resolution,
+                    resolved_model_id=resolved_model_id,
+                )
+        except OpenAIImageRequestError as exc:
+            error_payload = {
+                "message": str(exc),
+                "type": "invalid_request_error",
+            }
+            if exc.param:
+                error_payload["param"] = exc.param
+            return JSONResponse(status_code=400, content={"error": error_payload})
 
         try:
             set_request_task_progress(
@@ -258,47 +296,68 @@ def build_generation_router(
                         error=update.get("error"),
                     )
 
-                job_id = uuid.uuid4().hex
-                out_path = generated_dir / f"{job_id}.png"
-                old_size = 0
-                try:
-                    if out_path.exists():
-                        old_size = int(out_path.stat().st_size)
-                except Exception:
+                response_items = []
+                for _idx in range(image_options.n):
+                    job_id = uuid.uuid4().hex
+                    out_path = generated_dir / f"{job_id}.png"
                     old_size = 0
+                    try:
+                        if out_path.exists():
+                            old_size = int(out_path.stat().st_size)
+                    except Exception:
+                        old_size = 0
 
-                image_bytes, _meta = client.generate(
-                    token=token,
-                    prompt=prompt,
-                    aspect_ratio=ratio,
-                    output_resolution=output_resolution,
-                    upstream_model_id=str(
-                        model_conf.get("upstream_model_id") or "gemini-flash"
-                    ),
-                    upstream_model_version=str(
-                        model_conf.get("upstream_model_version") or "nano-banana-2"
-                    ),
-                    quality_level=(
-                        client.gpt_image_quality
-                        if str(model_conf.get("upstream_model_id") or "") == "gpt-image"
-                        else None
-                    ),
-                    detail_level=model_conf.get("detail_level"),
-                    timeout=client.generate_timeout,
-                    out_path=out_path,
-                    progress_cb=_image_progress_cb,
-                )
-                if image_bytes is not None:
-                    out_path.write_bytes(image_bytes)
-                new_size = int(out_path.stat().st_size) if out_path.exists() else 0
-                on_generated_file_written(out_path, old_size, new_size)
-                image_url = public_image_url(request, job_id)
-                set_request_preview(request, image_url, kind="image")
-                return {
+                    image_bytes, _meta = client.generate(
+                        token=token,
+                        prompt=prompt,
+                        aspect_ratio=image_options.aspect_ratio,
+                        output_resolution=image_options.output_resolution,
+                        upstream_model_id=str(
+                            model_conf.get("upstream_model_id") or "gemini-flash"
+                        ),
+                        upstream_model_version=str(
+                            model_conf.get("upstream_model_version") or "nano-banana-2"
+                        ),
+                        quality_level=(
+                            client.gpt_image_quality
+                            if str(model_conf.get("upstream_model_id") or "")
+                            == "gpt-image"
+                            else None
+                        ),
+                        detail_level=model_conf.get("detail_level"),
+                        requested_size=image_options.requested_size,
+                        timeout=client.generate_timeout,
+                        out_path=out_path,
+                        progress_cb=_image_progress_cb,
+                    )
+                    if image_bytes is not None:
+                        out_path.write_bytes(image_bytes)
+                    new_size = int(out_path.stat().st_size) if out_path.exists() else 0
+                    on_generated_file_written(out_path, old_size, new_size)
+                    image_url = public_image_url(request, job_id)
+                    set_request_preview(request, image_url, kind="image")
+                    image_file_bytes = (
+                        out_path.read_bytes()
+                        if image_options.response_format == "b64_json"
+                        else b""
+                    )
+                    response_items.append(
+                        encode_image_response_item(
+                            image_file_bytes,
+                            image_url=image_url,
+                            response_format=image_options.response_format,
+                            output_format=image_options.output_format,
+                            output_compression=image_options.output_compression,
+                        )
+                    )
+
+                response_payload = {
                     "created": int(time.time()),
-                    "model": resolved_model_id,
-                    "data": [{"url": image_url}],
+                    "data": response_items,
                 }
+                if not image_options.is_native_gpt_image:
+                    response_payload["model"] = resolved_model_id
+                return response_payload
 
             return run_with_token_retries(
                 request=request,
