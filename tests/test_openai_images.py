@@ -4,6 +4,7 @@ from core.models.openai_images import (
     build_native_gpt_image_options,
     encode_image_response_item,
     gpt_image_model_id_from_size,
+    image_generation_batch_sizes,
 )
 from core.models.payloads import build_image_payload_candidates
 
@@ -59,3 +60,11 @@ def test_b64_json_response_item_matches_openai_images_shape():
 
     assert "url" not in item
     assert base64.b64decode(item["b64_json"].encode("ascii")) == b"fake-image-bytes"
+
+
+def test_image_generation_batch_sizes_limit_each_worker_to_two_images():
+    assert image_generation_batch_sizes(1) == [1]
+    assert image_generation_batch_sizes(2) == [2]
+    assert image_generation_batch_sizes(3) == [1, 2]
+    assert image_generation_batch_sizes(4) == [2, 2]
+    assert image_generation_batch_sizes(5) == [1, 2, 2]

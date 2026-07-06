@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import secrets
 import threading
@@ -17,6 +18,7 @@ from core.models.openai_images import (
     build_legacy_image_options,
     build_native_gpt_image_options,
     encode_image_response_item,
+    image_generation_batch_sizes,
     is_native_gpt_image_model,
 )
 
@@ -296,8 +298,7 @@ def build_generation_router(
                         error=update.get("error"),
                     )
 
-                response_items = []
-                for _idx in range(image_options.n):
+                def _generate_response_item(response_index: int) -> tuple[int, dict]:
                     job_id = uuid.uuid4().hex
                     out_path = generated_dir / f"{job_id}.png"
                     old_size = 0
@@ -341,15 +342,51 @@ def build_generation_router(
                         if image_options.response_format == "b64_json"
                         else b""
                     )
-                    response_items.append(
-                        encode_image_response_item(
-                            image_file_bytes,
-                            image_url=image_url,
-                            response_format=image_options.response_format,
-                            output_format=image_options.output_format,
-                            output_compression=image_options.output_compression,
-                        )
+                    item = encode_image_response_item(
+                        image_file_bytes,
+                        image_url=image_url,
+                        response_format=image_options.response_format,
+                        output_format=image_options.output_format,
+                        output_compression=image_options.output_compression,
                     )
+                    return response_index, item
+
+                def _generate_response_batch(
+                    start_index: int, batch_size: int
+                ) -> list[tuple[int, dict]]:
+                    return [
+                        _generate_response_item(start_index + offset)
+                        for offset in range(batch_size)
+                    ]
+
+                batch_sizes = image_generation_batch_sizes(image_options.n)
+                response_pairs: list[tuple[int, dict]] = []
+                if len(batch_sizes) <= 1:
+                    response_pairs = _generate_response_batch(
+                        0, batch_sizes[0] if batch_sizes else 0
+                    )
+                else:
+                    with ThreadPoolExecutor(max_workers=len(batch_sizes)) as executor:
+                        futures = []
+                        start_index = 0
+                        for batch_size in batch_sizes:
+                            futures.append(
+                                executor.submit(
+                                    _generate_response_batch,
+                                    start_index,
+                                    batch_size,
+                                )
+                            )
+                            start_index += batch_size
+                        for future in as_completed(futures):
+                            response_pairs.extend(future.result())
+
+                response_items = [
+                    item
+                    for _idx, item in sorted(
+                        response_pairs, key=lambda pair: pair[0]
+                    )
+                ]
 
                 response_payload = {
                     "created": int(time.time()),

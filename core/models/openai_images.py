@@ -65,6 +65,20 @@ def parse_image_count(raw_n: object) -> int:
     return count
 
 
+def image_generation_batch_sizes(image_count: int) -> list[int]:
+    if image_count <= 0:
+        return []
+    if image_count <= 2:
+        return [image_count]
+    remaining = image_count
+    batches: list[int] = []
+    if remaining % 2 == 1:
+        batches.append(1)
+        remaining -= 1
+    batches.extend([2] * (remaining // 2))
+    return batches
+
+
 def parse_response_format(raw_format: object, *, force_b64_json: bool) -> str:
     if force_b64_json:
         return "b64_json"
