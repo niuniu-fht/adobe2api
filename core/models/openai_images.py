@@ -22,6 +22,8 @@ SUPPORTED_RESPONSE_FORMATS = {"url", "b64_json", "base64"}
 SUPPORTED_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
 DEFAULT_OUTPUT_FORMAT = "png"
 MAX_IMAGE_COUNT = 10
+MAX_GPT_IMAGE_LONG_EDGE = 3840
+MAX_GPT_IMAGE_PIXELS = 8_294_400
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 
 
@@ -139,6 +141,24 @@ def parse_requested_size(raw_size: object) -> Optional[dict[str, int]]:
     height = int(match.group(2))
     if width <= 0 or height <= 0:
         raise OpenAIImageRequestError("size dimensions must be positive", "size")
+    longest_edge = max(width, height)
+    total_pixels = width * height
+    if longest_edge > MAX_GPT_IMAGE_LONG_EDGE:
+        raise OpenAIImageRequestError(
+            (
+                f"Invalid image size {width}x{height}: longest edge must not exceed "
+                f"{MAX_GPT_IMAGE_LONG_EDGE}px"
+            ),
+            "size",
+        )
+    if total_pixels > MAX_GPT_IMAGE_PIXELS:
+        raise OpenAIImageRequestError(
+            (
+                f"Invalid image size {width}x{height}: total pixels must not exceed "
+                f"{MAX_GPT_IMAGE_PIXELS}"
+            ),
+            "size",
+        )
     return {"width": width, "height": height}
 
 

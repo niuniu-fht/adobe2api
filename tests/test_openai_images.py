@@ -1,10 +1,12 @@
 import base64
 
 from core.models.openai_images import (
+    OpenAIImageRequestError,
     build_native_gpt_image_options,
     encode_image_response_item,
     gpt_image_model_id_from_size,
     image_generation_batch_sizes,
+    parse_requested_size,
     parse_response_format,
 )
 from core.models.payloads import build_image_payload_candidates
@@ -48,6 +50,27 @@ def test_native_gpt_image_size_can_map_to_internal_model_alias():
         gpt_image_model_id_from_size({"width": 2560, "height": 1440})
         == "firefly-gpt-image-2k-16x9"
     )
+
+
+def test_gpt_image_rejects_sizes_above_upstream_limits():
+    try:
+        parse_requested_size("4096x4096")
+    except OpenAIImageRequestError as exc:
+        assert exc.param == "size"
+        assert "longest edge" in str(exc)
+    else:
+        raise AssertionError("expected 4096x4096 to be rejected")
+
+    try:
+        parse_requested_size("3840x3840")
+    except OpenAIImageRequestError as exc:
+        assert exc.param == "size"
+        assert "total pixels" in str(exc)
+    else:
+        raise AssertionError("expected 3840x3840 to be rejected")
+
+    assert parse_requested_size("3840x2160") == {"width": 3840, "height": 2160}
+    assert parse_requested_size("2880x2880") == {"width": 2880, "height": 2880}
 
 
 def test_b64_json_response_item_matches_openai_images_shape():
