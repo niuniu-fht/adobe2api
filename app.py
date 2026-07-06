@@ -214,6 +214,7 @@ def _set_request_error_detail(
     op_map = {
         "/v1/chat/completions": "chat.completions",
         "/v1/images/generations": "images.generations",
+        "/v1/images/edits": "images.edits",
         "/api/v1/generate": "api.generate",
     }
     path = str(getattr(getattr(request, "url", None), "path", "") or "")

@@ -18,7 +18,7 @@ from .catalog import GPT_IMAGE_RATIO_SUFFIX_MAP
 OPENAI_GPT_IMAGE_MODEL_VERSIONS = {
     "gpt-image-2": "2",
 }
-SUPPORTED_RESPONSE_FORMATS = {"url", "b64_json"}
+SUPPORTED_RESPONSE_FORMATS = {"url", "b64_json", "base64"}
 SUPPORTED_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
 DEFAULT_OUTPUT_FORMAT = "png"
 MAX_IMAGE_COUNT = 10
@@ -82,10 +82,12 @@ def image_generation_batch_sizes(image_count: int) -> list[int]:
 def parse_response_format(raw_format: object, *, force_b64_json: bool) -> str:
     if force_b64_json:
         return "b64_json"
-    response_format = str(raw_format or "url").strip()
+    response_format = str(raw_format or "url").strip().lower()
+    if response_format == "base64":
+        response_format = "b64_json"
     if response_format not in SUPPORTED_RESPONSE_FORMATS:
         raise OpenAIImageRequestError(
-            "response_format must be one of url or b64_json",
+            "response_format must be one of url, b64_json, or base64",
             "response_format",
         )
     return response_format
@@ -182,7 +184,7 @@ def build_native_gpt_image_options(data: dict) -> OpenAIImageGenerationOptions:
         response_model=model_id,
         response_format=parse_response_format(
             data.get("response_format"),
-            force_b64_json=True,
+            force_b64_json=False,
         ),
         output_format=output_format,
         output_compression=parse_output_compression(data.get("output_compression")),
