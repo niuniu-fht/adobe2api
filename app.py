@@ -432,25 +432,30 @@ async def request_logger(request: Request, call_next):
     op_map = {
         "/v1/chat/completions": "chat.completions",
         "/v1/images/generations": "images.generations",
+        "/v1/images/edits": "images.edits",
         "/v1/entities": "entities.create" if method == "POST" else "",
     }
     operation = op_map.get(path, "")
     should_log = bool(operation)
 
     if method in {"POST", "PUT", "PATCH"} and should_log:
+        request.state.log_id = uuid.uuid4().hex[:12]
         try:
-            raw_body = await request.body()
-            request._body = raw_body
-            if path in {
-                "/v1/images/generations",
-                "/v1/chat/completions",
-                "/v1/entities",
-                "/api/v1/generate",
-            }:
-                body_meta = _extract_logging_fields(raw_body)
-                request.state.log_model = body_meta.get("model")
-                request.state.log_prompt_preview = body_meta.get("prompt_preview")
-            request.state.log_id = uuid.uuid4().hex[:12]
+            # /v1/images/edits is often multipart and may contain large images.
+            # Do not pre-read/cache its request body in middleware; let the route
+            # stream/parse it once, then fill log_model/log_prompt_preview itself.
+            if path != "/v1/images/edits":
+                raw_body = await request.body()
+                request._body = raw_body
+                if path in {
+                    "/v1/images/generations",
+                    "/v1/chat/completions",
+                    "/v1/entities",
+                    "/api/v1/generate",
+                }:
+                    body_meta = _extract_logging_fields(raw_body)
+                    request.state.log_model = body_meta.get("model")
+                    request.state.log_prompt_preview = body_meta.get("prompt_preview")
             log_id = str(getattr(request.state, "log_id", "") or "")
             if log_id:
                 live_log_store.upsert(
@@ -556,8 +561,12 @@ async def request_logger(request: Request, call_next):
                             operation=operation,
                             preview_url=preview_url,
                             preview_kind=preview_kind,
-                            model=body_meta.get("model"),
-                            prompt_preview=body_meta.get("prompt_preview"),
+                            model=getattr(request.state, "log_model", None)
+                            or body_meta.get("model"),
+                            prompt_preview=getattr(
+                                request.state, "log_prompt_preview", None
+                            )
+                            or body_meta.get("prompt_preview"),
                             error=error_final,
                             error_code=error_code,
                             task_status=task_status,

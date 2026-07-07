@@ -774,6 +774,13 @@ def build_generation_router(
             )
 
         model_id = str(data.get("model") or "gpt-image-2").strip()
+        try:
+            request.state.log_model = model_id or "gpt-image-2"
+            request.state.log_prompt_preview = (
+                prompt.replace("\r", " ").replace("\n", " ").strip()[:180] or None
+            )
+        except Exception:
+            pass
         if model_id in video_model_catalog:
             return JSONResponse(
                 status_code=400,
