@@ -13,6 +13,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import requests
+from starlette.concurrency import run_in_threadpool
 
 from api.schemas import GenerateRequest
 from core.entity_store import entity_store
@@ -239,6 +240,21 @@ def build_generation_router(
             error_payload["param"] = exc.param
         return JSONResponse(status_code=400, content={"error": error_payload})
 
+    def _validate_openai_edit_content_length(request: Request) -> None:
+        raw_content_length = str(request.headers.get("content-length") or "").strip()
+        if not raw_content_length:
+            return
+        try:
+            content_length = int(raw_content_length)
+        except ValueError:
+            return
+        max_body_bytes = 80 * 1024 * 1024
+        if content_length > max_body_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail="request body too large, max 80MB",
+            )
+
     def _normalize_edit_image_mime(mime_type: str) -> str:
         normalized = str(mime_type or "").split(";", 1)[0].strip().lower()
         if normalized == "image/jpg":
@@ -314,6 +330,7 @@ def build_generation_router(
     async def _parse_openai_edit_request(
         request: Request,
     ) -> tuple[dict, list[tuple[bytes, str]]]:
+        _validate_openai_edit_content_length(request)
         content_type = str(request.headers.get("content-type") or "").lower()
         if "application/json" in content_type:
             try:
@@ -329,9 +346,11 @@ def build_generation_router(
                 or data.get("image_urls")
             )
             image_values = raw_images if isinstance(raw_images, list) else [raw_images]
-            input_images = [
-                _load_edit_image_value(value) for value in image_values if value
-            ]
+            input_images = await run_in_threadpool(
+                lambda: [
+                    _load_edit_image_value(value) for value in image_values if value
+                ]
+            )
             if len(input_images) > 6:
                 raise HTTPException(
                     status_code=400,
@@ -371,7 +390,9 @@ def build_generation_router(
                     (image_bytes, _normalize_edit_image_mime(str(mime_type)))
                 )
             else:
-                input_images.append(_load_edit_image_value(value))
+                input_images.append(
+                    await run_in_threadpool(lambda: _load_edit_image_value(value))
+                )
             if len(input_images) > 6:
                 raise HTTPException(
                     status_code=400,
@@ -487,6 +508,41 @@ def build_generation_router(
         return [
             item
             for _idx, item in sorted(response_pairs, key=lambda pair: pair[0])
+        ]
+
+    def _upload_edit_source_images(
+        token: str,
+        input_images: list[tuple[bytes, str]],
+    ) -> list[str]:
+        if not input_images:
+            return []
+        max_workers = min(3, len(input_images))
+        if max_workers <= 1:
+            return [
+                client.upload_image(token, image_bytes, image_mime or "image/jpeg")
+                for image_bytes, image_mime in input_images
+            ]
+        indexed_images = list(enumerate(input_images))
+        source_pairs: list[tuple[int, str]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    lambda idx=idx, item=item: (
+                        idx,
+                        client.upload_image(
+                            token,
+                            item[0],
+                            item[1] or "image/jpeg",
+                        ),
+                    )
+                )
+                for idx, item in indexed_images
+            ]
+            for future in as_completed(futures):
+                source_pairs.append(future.result())
+        return [
+            image_id
+            for _idx, image_id in sorted(source_pairs, key=lambda pair: pair[0])
         ]
 
     @router.post("/v1/images/generations")
@@ -758,10 +814,7 @@ def build_generation_router(
             )
 
             def _run_once(token: str):
-                source_image_ids = [
-                    client.upload_image(token, image_bytes, image_mime or "image/jpeg")
-                    for image_bytes, image_mime in input_images
-                ]
+                source_image_ids = _upload_edit_source_images(token, input_images)
                 response_items = _generate_openai_image_items(
                     request=request,
                     token=token,
@@ -778,10 +831,12 @@ def build_generation_router(
                     response_payload["model"] = resolved_model_id
                 return response_payload
 
-            return run_with_token_retries(
-                request=request,
-                operation_name="images.edits",
-                run_once=_run_once,
+            return await run_in_threadpool(
+                lambda: run_with_token_retries(
+                    request=request,
+                    operation_name="images.edits",
+                    run_once=_run_once,
+                )
             )
 
         except quota_error_cls:
