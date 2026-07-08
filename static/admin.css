@@ -486,10 +486,18 @@ table {
 #logsTable td:nth-child(4),
 #runningLogsTable th:nth-child(4),
 #runningLogsTable td:nth-child(4),
+#logsTable th:nth-child(7),
+#logsTable td:nth-child(7),
+#runningLogsTable th:nth-child(7),
+#runningLogsTable td:nth-child(7),
 #logsTable th:nth-child(8),
 #logsTable td:nth-child(8),
 #runningLogsTable th:nth-child(8),
-#runningLogsTable td:nth-child(8) {
+#runningLogsTable td:nth-child(8),
+#logsTable th:nth-child(11),
+#logsTable td:nth-child(11),
+#runningLogsTable th:nth-child(11),
+#runningLogsTable td:nth-child(11) {
   width: auto;
   white-space: nowrap;
 }
@@ -506,22 +514,30 @@ table {
 #logsTable td:nth-child(5),
 #runningLogsTable th:nth-child(5),
 #runningLogsTable td:nth-child(5) {
-  width: 500px;
+  width: 180px;
 }
 
 #logsTable th:nth-child(6),
 #logsTable td:nth-child(6),
 #runningLogsTable th:nth-child(6),
 #runningLogsTable td:nth-child(6) {
-  width: 190px;
+  width: 130px;
 }
 
-#logsTable th:nth-child(7),
-#logsTable td:nth-child(7),
-#runningLogsTable th:nth-child(7),
-#runningLogsTable td:nth-child(7) {
+#logsTable th:nth-child(9),
+#logsTable td:nth-child(9),
+#runningLogsTable th:nth-child(9),
+#runningLogsTable td:nth-child(9) {
   min-width: 220px;
-  width: 35%;
+  width: 25%;
+}
+
+#logsTable th:nth-child(10),
+#logsTable td:nth-child(10),
+#runningLogsTable th:nth-child(10),
+#runningLogsTable td:nth-child(10) {
+  min-width: 220px;
+  width: 30%;
 }
 
 #logsTable td,
@@ -561,6 +577,22 @@ table {
   font-size: 12px;
   color: #8fb0d3;
   word-break: break-word;
+}
+
+.log-resolution-cell,
+.log-type-cell {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+  color: #9fc0e2;
+  white-space: nowrap;
+}
+
+.log-params-cell {
+  color: #a8bfd8;
+  line-height: 1.35;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .log-prompt-cell {

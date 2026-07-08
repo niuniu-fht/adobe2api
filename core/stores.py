@@ -74,6 +74,9 @@ class RequestLogRecord:
     preview_kind: Optional[str] = None
     model: Optional[str] = None
     prompt_preview: Optional[str] = None
+    resolution: Optional[str] = None
+    request_type: Optional[str] = None
+    request_params: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
     task_status: Optional[str] = None

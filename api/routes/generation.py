@@ -25,6 +25,7 @@ from core.models.openai_images import (
     image_generation_batch_sizes,
     is_native_gpt_image_model,
 )
+from core.models.payloads import gpt_image_pixels_from_ratio, size_from_ratio
 
 
 def build_generation_router(
@@ -545,6 +546,90 @@ def build_generation_router(
             for _idx, image_id in sorted(source_pairs, key=lambda pair: pair[0])
         ]
 
+    def _log_resolution_from_image_options(image_options: Any) -> str | None:
+        requested_size = getattr(image_options, "requested_size", None)
+        if isinstance(requested_size, dict):
+            width = int(requested_size.get("width") or 0)
+            height = int(requested_size.get("height") or 0)
+            if width > 0 and height > 0:
+                return f"{width}x{height}"
+
+        ratio = str(getattr(image_options, "aspect_ratio", "") or "").strip()
+        output_resolution = str(
+            getattr(image_options, "output_resolution", "") or ""
+        ).strip()
+        try:
+            if bool(getattr(image_options, "is_native_gpt_image", False)):
+                pixel_size = gpt_image_pixels_from_ratio(ratio, output_resolution)
+            else:
+                pixel_size = size_from_ratio(ratio, output_resolution)
+            if isinstance(pixel_size, dict):
+                width = int(pixel_size.get("width") or 0)
+                height = int(pixel_size.get("height") or 0)
+                if width > 0 and height > 0:
+                    return f"{width}x{height}"
+        except Exception:
+            pass
+        if output_resolution and ratio:
+            return f"{output_resolution} {ratio}"
+        return output_resolution or ratio or None
+
+    def _compact_image_request_params(
+        data: dict,
+        image_options: Any,
+        *,
+        input_image_count: int = 0,
+    ) -> str | None:
+        params = {
+            "n": getattr(image_options, "n", data.get("n", 1)),
+            "size": data.get("size") or _log_resolution_from_image_options(image_options),
+            "ratio": getattr(image_options, "aspect_ratio", None),
+            "response_format": getattr(image_options, "response_format", None),
+            "output_format": getattr(image_options, "output_format", None),
+        }
+        for key in ("quality", "output_compression"):
+            if data.get(key) not in (None, ""):
+                params[key] = data.get(key)
+        if input_image_count > 0:
+            params["images"] = input_image_count
+        parts = [
+            f"{key}={value}"
+            for key, value in params.items()
+            if value is not None and value != ""
+        ]
+        return ", ".join(parts)[:240] or None
+
+    def _set_image_log_context(
+        request: Request,
+        *,
+        data: dict,
+        prompt: str,
+        image_options: Any,
+        request_type: str,
+        input_image_count: int = 0,
+    ) -> None:
+        try:
+            request.state.log_model = (
+                str(getattr(image_options, "response_model", "") or "").strip()
+                or str(data.get("model") or "").strip()
+                or None
+            )
+            request.state.log_prompt_preview = (
+                str(prompt or "").replace("\r", " ").replace("\n", " ").strip()[:180]
+                or None
+            )
+            request.state.log_resolution = _log_resolution_from_image_options(
+                image_options
+            )
+            request.state.log_request_type = request_type
+            request.state.log_request_params = _compact_image_request_params(
+                data,
+                image_options,
+                input_image_count=input_image_count,
+            )
+        except Exception:
+            pass
+
     @router.post("/v1/images/generations")
     def openai_generate(data: dict, request: Request):
         require_service_api_key(request)
@@ -599,6 +684,14 @@ def build_generation_router(
             if exc.param:
                 error_payload["param"] = exc.param
             return JSONResponse(status_code=400, content={"error": error_payload})
+
+        _set_image_log_context(
+            request,
+            data=data,
+            prompt=prompt,
+            image_options=image_options,
+            request_type="generation",
+        )
 
         try:
             set_request_task_progress(
@@ -814,6 +907,15 @@ def build_generation_router(
                 )
         except OpenAIImageRequestError as exc:
             return _openai_image_error_response(exc)
+
+        _set_image_log_context(
+            request,
+            data=data,
+            prompt=prompt,
+            image_options=image_options,
+            request_type="edits",
+            input_image_count=len(input_images),
+        )
 
         try:
             set_request_task_progress(

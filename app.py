@@ -128,18 +128,46 @@ client = AdobeClient()
 refresh_manager.start()
 
 
+def _compact_request_params(data: dict[str, Any]) -> Optional[str]:
+    parts: list[str] = []
+    for key in (
+        "n",
+        "size",
+        "aspect_ratio",
+        "output_resolution",
+        "response_format",
+        "output_format",
+        "quality",
+        "output_compression",
+    ):
+        value = data.get(key)
+        if value is None or value == "":
+            continue
+        parts.append(f"{key}={value}")
+    return ", ".join(parts)[:240] or None
+
+
 def _extract_logging_fields(raw_body: bytes) -> dict[str, Optional[str]]:
+    empty = {
+        "model": None,
+        "prompt_preview": None,
+        "resolution": None,
+        "request_type": None,
+        "request_params": None,
+    }
     if not raw_body:
-        return {"model": None, "prompt_preview": None}
+        return empty
     try:
         import json
 
         data: Any = json.loads(raw_body.decode("utf-8"))
         if not isinstance(data, dict):
-            return {"model": None, "prompt_preview": None}
+            return empty
 
         model = str(data.get("model") or "").strip() or None
         prompt = str(data.get("prompt") or "").strip()
+        size = data.get("size")
+        resolution = str(size or data.get("output_resolution") or "").strip() or None
         entity_name = str(data.get("name") or data.get("displayName") or "").strip()
         if entity_name:
             entity_type = str(data.get("type") or data.get("entityType") or "object").strip()
@@ -153,9 +181,15 @@ def _extract_logging_fields(raw_body: bytes) -> dict[str, Optional[str]]:
         if prompt:
             prompt = prompt.replace("\r", " ").replace("\n", " ").strip()
             prompt = prompt[:180]
-        return {"model": model, "prompt_preview": prompt or None}
+        return {
+            "model": model,
+            "prompt_preview": prompt or None,
+            "resolution": resolution,
+            "request_type": None,
+            "request_params": _compact_request_params(data),
+        }
     except Exception:
-        return {"model": None, "prompt_preview": None}
+        return empty
 
 
 def _upsert_live_request(request: Request, patch: dict) -> None:
@@ -312,6 +346,9 @@ def _set_request_task_progress(
                 "error_code": getattr(request.state, "log_error_code", None),
                 "model": getattr(request.state, "log_model", None),
                 "prompt_preview": getattr(request.state, "log_prompt_preview", None),
+                "resolution": getattr(request.state, "log_resolution", None),
+                "request_type": getattr(request.state, "log_request_type", None),
+                "request_params": getattr(request.state, "log_request_params", None),
                 "ts": time.time(),
             },
         )
@@ -367,6 +404,9 @@ def _append_attempt_log(
         path = str(getattr(getattr(request, "url", None), "path", "") or "")
         model = getattr(request.state, "log_model", None)
         prompt_preview = getattr(request.state, "log_prompt_preview", None)
+        resolution = getattr(request.state, "log_resolution", None)
+        request_type = getattr(request.state, "log_request_type", None)
+        request_params = getattr(request.state, "log_request_params", None)
         preview_url = getattr(request.state, "log_preview_url", None)
         preview_kind = getattr(request.state, "log_preview_kind", None)
         task_status = task_status_override
@@ -390,6 +430,9 @@ def _append_attempt_log(
                 preview_kind=preview_kind,
                 model=model,
                 prompt_preview=prompt_preview,
+                resolution=resolution,
+                request_type=request_type,
+                request_params=request_params,
                 error=(str(error)[:240] if error else None),
                 error_code=(str(error_code or "") or None),
                 task_status=task_status,
@@ -456,6 +499,20 @@ async def request_logger(request: Request, call_next):
                     body_meta = _extract_logging_fields(raw_body)
                     request.state.log_model = body_meta.get("model")
                     request.state.log_prompt_preview = body_meta.get("prompt_preview")
+                    request.state.log_resolution = body_meta.get("resolution")
+                    request.state.log_request_type = body_meta.get("request_type")
+                    request.state.log_request_params = body_meta.get("request_params")
+            request.state.log_request_type = getattr(
+                request.state, "log_request_type", None
+            ) or (
+                "edits"
+                if path == "/v1/images/edits"
+                else (
+                    "generation"
+                    if path == "/v1/images/generations"
+                    else operation
+                )
+            )
             log_id = str(getattr(request.state, "log_id", "") or "")
             if log_id:
                 live_log_store.upsert(
@@ -468,8 +525,22 @@ async def request_logger(request: Request, call_next):
                         "status_code": 102,
                         "duration_sec": 0,
                         "operation": operation,
-                        "model": body_meta.get("model"),
-                        "prompt_preview": body_meta.get("prompt_preview"),
+                        "model": getattr(request.state, "log_model", None)
+                        or body_meta.get("model"),
+                        "prompt_preview": getattr(
+                            request.state, "log_prompt_preview", None
+                        )
+                        or body_meta.get("prompt_preview"),
+                        "resolution": getattr(request.state, "log_resolution", None)
+                        or body_meta.get("resolution"),
+                        "request_type": getattr(
+                            request.state, "log_request_type", None
+                        )
+                        or body_meta.get("request_type"),
+                        "request_params": getattr(
+                            request.state, "log_request_params", None
+                        )
+                        or body_meta.get("request_params"),
                         "task_status": "IN_PROGRESS",
                         "task_progress": 0.0,
                     },
@@ -567,6 +638,25 @@ async def request_logger(request: Request, call_next):
                                 request.state, "log_prompt_preview", None
                             )
                             or body_meta.get("prompt_preview"),
+                            resolution=getattr(request.state, "log_resolution", None)
+                            or body_meta.get("resolution"),
+                            request_type=getattr(
+                                request.state, "log_request_type", None
+                            )
+                            or body_meta.get("request_type")
+                            or (
+                                "edits"
+                                if path == "/v1/images/edits"
+                                else (
+                                    "generation"
+                                    if path == "/v1/images/generations"
+                                    else operation
+                                )
+                            ),
+                            request_params=getattr(
+                                request.state, "log_request_params", None
+                            )
+                            or body_meta.get("request_params"),
                             error=error_final,
                             error_code=error_code,
                             task_status=task_status,
