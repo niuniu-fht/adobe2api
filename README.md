@@ -425,3 +425,18 @@ curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=leik1000/adobe2api&type=Date)](https://star-history.com/#leik1000/adobe2api&Date)
+
+### TempMail.lol real inbox registration
+
+The Adobe account console can create real TempMail.lol inboxes instead of local placeholder emails. Configure `config/config.json` (git-ignored) or environment variables:
+
+```json
+{
+  "adobe_register_email_provider": "tempmail_lol",
+  "tempmail_lol_api_key": "your-tempmail-lol-api-key",
+  "use_proxy": true,
+  "proxy": "http://127.0.0.1:7890"
+}
+```
+
+`POST /api/v1/adobe/register` now defaults to `tempmail_lol`, creates a real inbox through `https://api.tempmail.lol/v2/inbox/create`, stores the returned email/token, and the UI “收信” action polls `GET /api/v1/adobe/accounts/{account_id}/emails` to capture verification codes or links.

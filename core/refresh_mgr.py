@@ -20,6 +20,13 @@ PROFILE_FILE = CONFIG_DIR / "refresh_profile.json"
 class RefreshManager:
     DEFAULT_REFRESH_URL = "https://adobeid-na1.services.adobe.com/ims/check/v6/token?jslVersion=v2-v0.48.0-1-g1e322cb"
     DEFAULT_SCOPE = "AdobeID,firefly_api,openid"
+    CLIO_CLIENT_ID = "clio-playground-web"
+    CLIO_SCOPE = (
+        "AdobeID,firefly_api,openid,pps.read,pps.write,"
+        "additional_info.projectedProductContext,additional_info.ownerOrg,"
+        "uds_read,uds_write,ab.manage,read_organizations,additional_info.roles,"
+        "account_cluster.read,creative_production,tk_platform,tk_platform_sync,profile"
+    )
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -668,8 +675,17 @@ class RefreshManager:
                 target["name"] = display_name or email
             self._save_profiles()
 
-    def refresh_once(self, profile_id: str) -> Dict:
+    def refresh_once(self, profile_id: str, client_id: Optional[str] = None) -> Dict:
         snapshot = self._prepare_refresh(profile_id)
+        refresh_client_id = str(
+            client_id or (snapshot.get("form") or {}).get("client_id") or "projectx_webapp"
+        ).strip()
+        if refresh_client_id:
+            snapshot["form"]["client_id"] = refresh_client_id
+        if refresh_client_id == self.CLIO_CLIENT_ID:
+            snapshot["form"]["scope"] = self.CLIO_SCOPE
+            snapshot["headers"]["Origin"] = "https://firefly.adobe.com"
+            snapshot["headers"]["Referer"] = "https://firefly.adobe.com/"
         resp = requests.post(
             snapshot["url"],
             headers=snapshot["headers"],
@@ -724,6 +740,7 @@ class RefreshManager:
             profile_id=snapshot["id"],
             profile_name=profile_name,
             profile_email=profile_email,
+            refresh_client_id=refresh_client_id,
         )
 
         credits_error = ""
@@ -742,6 +759,7 @@ class RefreshManager:
             "profile_id": snapshot["id"],
             "profile_name": profile_name,
             "profile_email": profile_email,
+            "client_id": refresh_client_id,
             "expires_in": data.get("expires_in"),
             "credits_error": credits_error,
         }
@@ -779,6 +797,10 @@ class RefreshManager:
                         continue
                     try:
                         self.refresh_once(pid)
+                    except Exception:
+                        pass
+                    try:
+                        self.refresh_once(pid, client_id=self.CLIO_CLIENT_ID)
                     except Exception:
                         pass
             except Exception:

@@ -35,12 +35,14 @@ def test_native_gpt_image_2_request_uses_requested_size():
         output_resolution=options.output_resolution,
         upstream_model_id=options.upstream_model_id or "",
         upstream_model_version=options.upstream_model_version or "",
+        upstream_model="openai:firefly:gpt-image",
         quality_level="low",
         requested_size=options.requested_size,
     )[0]
 
     assert payload["modelId"] == "gpt-image"
     assert payload["modelVersion"] == "2"
+    assert payload["model"] == "openai:firefly:gpt-image"
     assert payload["size"] == {"width": 1536, "height": 1024}
     assert payload["modelSpecificPayload"]["size"] == "1536x1024"
 

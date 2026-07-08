@@ -119,6 +119,7 @@ def build_image_payload_candidates(
     output_resolution: str,
     upstream_model_id: str,
     upstream_model_version: str,
+    upstream_model: Optional[str] = None,
     quality_level: Optional[str] = None,
     detail_level: Optional[int] = None,
     source_image_ids: Optional[list[str]] = None,
@@ -138,6 +139,7 @@ def build_image_payload_candidates(
         base_payload = {
             "modelId": upstream_model_id,
             "modelVersion": upstream_model_version,
+            "model": str(upstream_model or "openai:firefly:gpt-image"),
             "n": 1,
             "prompt": prompt,
             "seeds": [int(time.time()) % 999999],
@@ -184,6 +186,7 @@ def build_image_payload_candidates(
     base_payload = {
         "modelId": upstream_model_id,
         "modelVersion": upstream_model_version,
+        "model": str(upstream_model or "google:firefly:colligo:nano-banana-pro"),
         "n": 1,
         "prompt": prompt,
         "size": size_from_ratio(effective_ratio, output_resolution),

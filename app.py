@@ -645,6 +645,7 @@ def _run_with_token_retries(
         token_meta = _set_request_token_context(request, token, attempt)
         attempt_started = time.time()
         retryable = False
+        allow_same_token_retry = False
         retry_reason = ""
         delay = 0.0
         retry_error_text = ""
@@ -652,6 +653,13 @@ def _run_with_token_retries(
         try:
             result = run_once(token)
             token_manager.report_success(token)
+            try:
+                request.state.log_error = None
+                request.state.log_error_code = None
+                request.state.log_task_status = "COMPLETED"
+                request.state.log_task_progress = 100.0
+            except Exception:
+                pass
             _append_attempt_log(
                 request=request,
                 operation=operation_name,
@@ -739,10 +747,15 @@ def _run_with_token_retries(
             retryable = limited_retry_attempts < max_attempts and client.should_retry_temporary_error(
                 exc
             )
+            allow_same_token_retry = bool(retryable)
             status_part = f"status={exc.status_code}" if exc.status_code else "status=?"
             type_part = f"type={exc.error_type or 'temporary'}"
             retry_reason = f"upstream_temporary {status_part} {type_part}"
             delay = client._retry_delay_for_attempt(limited_retry_attempts)
+            try:
+                request.state.log_task_status = "RETRYING" if retryable else "FAILED"
+            except Exception:
+                pass
             err_code = report_error(
                 request,
                 error=exc,
@@ -759,7 +772,7 @@ def _run_with_token_retries(
                 status_code=int(exc.status_code or 503),
                 error=str(exc),
                 error_code=err_code,
-                task_status_override="FAILED",
+                task_status_override="RETRYING" if retryable else "FAILED",
             )
             retry_error_text = str(exc)
         except AdobeRequestError as exc:
@@ -835,6 +848,8 @@ def _run_with_token_retries(
             raise
 
         if retryable:
+            if allow_same_token_retry:
+                tried_tokens.discard(token)
             logger.warning(
                 "retrying operation=%s attempt=%s reason=%s delay=%.2fs strategy=%s",
                 operation_name,
@@ -845,7 +860,7 @@ def _run_with_token_retries(
             )
             _set_request_task_progress(
                 request,
-                task_status="IN_PROGRESS",
+                task_status="RETRYING",
                 error=retry_error_text or f"retry attempt {attempt}: {retry_reason}",
             )
             if delay > 0:

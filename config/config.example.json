@@ -10,7 +10,17 @@
   "retry_enabled": true,
   "retry_max_attempts": 3,
   "retry_backoff_seconds": 1.0,
-  "retry_on_status_codes": [429, 451, 500, 502, 503, 504],
+  "retry_on_status_codes": [408, 429, 451, 500, 502, 503, 504],
   "retry_on_error_types": ["timeout", "connection", "proxy"],
-  "token_rotation_strategy": "round_robin"
+  "token_rotation_strategy": "round_robin",
+  "adobe_register_email_provider": "tempmail_lol",
+  "tempmail_lol_api_key": "",
+  "cloak_browser_headless": false,
+  "cloak_browser_timeout_seconds": 900,
+  "cloak_browser_binary_path": "",
+  "cloak_browser_license_key": "",
+  "cloak_browser_version": "",
+  "cloak_register_test_image": true,
+  "cloak_register_test_model": "firefly-nano-banana-1k-1x1",
+  "cloak_register_image_timeout_seconds": 360
 }

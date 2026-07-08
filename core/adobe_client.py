@@ -87,6 +87,31 @@ def _arp_session_id_for_token(token: str) -> str:
         return ""
 
 
+def _cookie_for_token(token: str) -> str:
+    try:
+        from core.refresh_mgr import refresh_manager
+        from core.token_mgr import token_manager
+
+        meta = token_manager.get_meta_by_value(token)
+        profile_id = str(meta.get("refresh_profile_id") or "").strip()
+        if not profile_id:
+            return ""
+        items = refresh_manager.export_cookies([profile_id])
+        if not items:
+            return ""
+        return str((items[0] or {}).get("cookie") or "").strip()
+    except Exception:
+        return ""
+
+
+def _session_headers_for_token(token: str) -> dict:
+    headers: dict[str, str] = {}
+    arp = _arp_session_id_for_token(token) or _build_arp_session_id()
+    if arp:
+        headers["x-arp-session-id"] = arp
+    return headers
+
+
 class AdobeRequestError(Exception):
     def __init__(
         self,
@@ -126,6 +151,7 @@ class UpstreamTemporaryError(AdobeRequestError):
 
 class AdobeClient:
     submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-images/generate-async"
+    clio_submit_url = "https://firefly-clio-imaging.adobe.io/v2/images/generate-async"
     video_submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async"
     upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/image"
     entity_api_base = "https://firefly-entity.adobe.io/api/entities/"
@@ -140,7 +166,7 @@ class AdobeClient:
         self.retry_enabled = True
         self.retry_max_attempts = 3
         self.retry_backoff_seconds = 1.0
-        self.retry_on_status_codes = [429, 451, 500, 502, 503, 504]
+        self.retry_on_status_codes = [408, 429, 451, 500, 502, 503, 504]
         self.retry_on_error_types = {"timeout", "connection", "proxy"}
         self.token_rotation_strategy = "round_robin"
         self.gpt_image_quality = "low"
@@ -204,7 +230,7 @@ class AdobeClient:
         self.retry_backoff_seconds = max(0.0, min(backoff, 30.0))
 
         status_codes_raw = cfg.get(
-            "retry_on_status_codes", [429, 451, 500, 502, 503, 504]
+            "retry_on_status_codes", [408, 429, 451, 500, 502, 503, 504]
         )
         parsed_status_codes: list[int] = []
         if isinstance(status_codes_raw, list):
@@ -216,6 +242,7 @@ class AdobeClient:
                 if 100 <= val <= 599:
                     parsed_status_codes.append(val)
         self.retry_on_status_codes = sorted(set(parsed_status_codes)) or [
+            408,
             429,
             451,
             500,
@@ -327,6 +354,7 @@ class AdobeClient:
                 "accept": "*/*",
             }
         )
+        headers.update(_session_headers_for_token(token))
         return headers
 
     def _submit_headers_minimal(self, token: str) -> dict:
@@ -350,7 +378,7 @@ class AdobeClient:
         return headers
 
     def _poll_headers(self, token: str) -> dict:
-        return {
+        headers = {
             "Authorization": f"Bearer {token}",
             "accept": "*/*",
             "referer": "https://new.express.adobe.com/",
@@ -359,6 +387,24 @@ class AdobeClient:
             "x-api-key": self.api_key,
             "content-type": "application/json",
         }
+        headers.update(_session_headers_for_token(token))
+        return headers
+
+    def _clio_headers(self, token: str) -> dict:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "x-api-key": "clio-playground-web",
+            "content-type": "application/json",
+            "accept": "application/json",
+            "origin": "https://firefly.adobe.com",
+            "referer": "https://firefly.adobe.com/",
+            "user-agent": self.user_agent.replace("Chrome/145.0.0.0", "Chrome/146.0.0.0"),
+            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        }
+        headers.update(_session_headers_for_token(token))
+        return headers
 
     def _entity_headers(self, token: str) -> dict:
         return {
@@ -585,7 +631,7 @@ class AdobeClient:
         if resp.status_code in (401, 403):
             raise AuthError("Token invalid or expired")
         if resp.status_code != 200:
-            if resp.status_code in (429, 451) or resp.status_code >= 500:
+            if resp.status_code in (408, 429, 451) or resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"upstream get failed: {resp.status_code} {resp.text[:300]}",
                     status_code=resp.status_code,
@@ -655,7 +701,7 @@ class AdobeClient:
         if resp.status_code in (401, 403):
             raise AuthError("Token invalid or expired")
         if resp.status_code != 200:
-            if resp.status_code in (429, 451) or resp.status_code >= 500:
+            if resp.status_code in (408, 429, 451) or resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"upload image failed: {resp.status_code} {resp.text[:300]}",
                     status_code=resp.status_code,
@@ -718,7 +764,7 @@ class AdobeClient:
         if resp.status_code in (401, 403):
             raise AuthError("Token invalid or expired")
         if resp.status_code not in (200, 201):
-            if resp.status_code in (429, 451) or resp.status_code >= 500:
+            if resp.status_code in (408, 429, 451) or resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"create entity failed: {resp.status_code} {resp.text[:300]}",
                     status_code=resp.status_code,
@@ -773,7 +819,7 @@ class AdobeClient:
         if resp.status_code in (401, 403):
             raise AuthError("Token invalid or expired")
         if resp.status_code not in (200, 201):
-            if resp.status_code in (429, 451) or resp.status_code >= 500:
+            if resp.status_code in (408, 429, 451) or resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"upload entity image failed: {resp.status_code} {resp.text[:300]}",
                     status_code=resp.status_code,
@@ -847,7 +893,7 @@ class AdobeClient:
         if resp.status_code in (401, 403):
             raise AuthError("Token invalid or expired")
         if resp.status_code not in (200, 201):
-            if resp.status_code in (429, 451) or resp.status_code >= 500:
+            if resp.status_code in (408, 429, 451) or resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"register entity resources failed: {resp.status_code} {resp.text[:300]}",
                     status_code=resp.status_code,
@@ -919,7 +965,7 @@ class AdobeClient:
             raise AuthError("Token invalid or expired")
         if resp.status_code in (200, 202, 204):
             return True
-        if resp.status_code in (429, 451) or resp.status_code >= 500:
+        if resp.status_code in (408, 429, 451) or resp.status_code >= 500:
             raise UpstreamTemporaryError(
                 f"delete entity failed: {resp.status_code} {resp.text[:300]}",
                 status_code=resp.status_code,
@@ -936,6 +982,7 @@ class AdobeClient:
         output_resolution: str,
         upstream_model_id: str,
         upstream_model_version: str,
+        upstream_model: Optional[str] = None,
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
@@ -947,6 +994,7 @@ class AdobeClient:
             output_resolution=output_resolution,
             upstream_model_id=upstream_model_id,
             upstream_model_version=upstream_model_version,
+            upstream_model=upstream_model,
             quality_level=quality_level,
             detail_level=detail_level,
             source_image_ids=source_image_ids,
@@ -1329,7 +1377,7 @@ class AdobeClient:
             raise AuthError("Token invalid or expired")
 
         if submit_resp.status_code != 200:
-            if submit_resp.status_code in (429, 451) or submit_resp.status_code >= 500:
+            if submit_resp.status_code in (408, 429, 451) or submit_resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"video submit failed: {submit_resp.status_code} {submit_resp.text[:300]}",
                     status_code=submit_resp.status_code,
@@ -1367,7 +1415,7 @@ class AdobeClient:
             if poll_resp.status_code in (401, 403):
                 raise AuthError("Token invalid or expired")
             if poll_resp.status_code != 200:
-                if poll_resp.status_code in (429, 451) or poll_resp.status_code >= 500:
+                if poll_resp.status_code in (408, 429, 451) or poll_resp.status_code >= 500:
                     raise UpstreamTemporaryError(
                         f"video poll failed: {poll_resp.status_code} {poll_resp.text[:300]}",
                         status_code=poll_resp.status_code,
@@ -1469,6 +1517,177 @@ class AdobeClient:
                 raise AdobeRequestError("video generation timed out")
             time.sleep(3.0)
 
+    @staticmethod
+    def _is_clio_token(token: str) -> bool:
+        claims = _decode_jwt_payload(token)
+        return str(claims.get("client_id") or "").strip() == "clio-playground-web"
+
+    @staticmethod
+    def _clio_size(aspect_ratio: str, output_resolution: str, requested_size: Optional[dict]) -> dict:
+        if isinstance(requested_size, dict):
+            try:
+                width = int(requested_size.get("width") or 0)
+                height = int(requested_size.get("height") or 0)
+                if width > 0 and height > 0:
+                    return {"width": width, "height": height}
+            except Exception:
+                pass
+        res = str(output_resolution or "2K").upper()
+        long_side = 1024 if res == "1K" else 2048
+        ratio = str(aspect_ratio or "1:1").strip()
+        if ratio == "16:9":
+            return {"width": long_side, "height": int(long_side * 9 / 16)}
+        if ratio == "9:16":
+            return {"width": int(long_side * 9 / 16), "height": long_side}
+        if ratio == "4:3":
+            return {"width": long_side, "height": int(long_side * 3 / 4)}
+        if ratio == "3:4":
+            return {"width": int(long_side * 3 / 4), "height": long_side}
+        return {"width": long_side, "height": long_side}
+
+    @staticmethod
+    def _clio_seeds() -> list[int]:
+        return [int.from_bytes(os.urandom(2), "big") % 100000 for _ in range(4)]
+
+    def _generate_clio(
+        self,
+        *,
+        token: str,
+        prompt: str,
+        aspect_ratio: str,
+        output_resolution: str,
+        requested_size: Optional[dict],
+        timeout: int,
+        out_path: Optional[Path],
+        progress_cb: Optional[Callable[[dict], None]],
+    ) -> tuple[Optional[bytes], dict]:
+        payload = {
+            "prompt": prompt,
+            "seeds": self._clio_seeds(),
+            "size": self._clio_size(aspect_ratio, output_resolution, requested_size),
+            "visualIntensity": 6,
+            "locale": "ja-JP",
+            "detailLevel": "preview",
+            "modelVersion": "image3_fast",
+            "output": {"storeInputs": True},
+        }
+        submit_resp = self._post_json(
+            self.clio_submit_url,
+            headers=self._clio_headers(token),
+            payload=payload,
+        )
+        if submit_resp.status_code in (401, 403):
+            access_error = submit_resp.headers.get("x-access-error")
+            if access_error == "taste_exhausted":
+                raise QuotaExhaustedError("Adobe quota exhausted for this account")
+            raise AuthError("Token invalid or expired")
+        if submit_resp.status_code != 200:
+            if submit_resp.status_code in (408, 429, 451) or submit_resp.status_code >= 500:
+                raise UpstreamTemporaryError(
+                    f"clio submit failed: {submit_resp.status_code} {submit_resp.text[:300]}",
+                    status_code=submit_resp.status_code,
+                    error_type="status",
+                )
+            raise AdobeRequestError(
+                f"clio submit failed: {submit_resp.status_code} {submit_resp.text[:300]}"
+            )
+
+        submit_data = submit_resp.json()
+        poll_url = self._extract_result_link(submit_resp, submit_data)
+        if not poll_url:
+            raise AdobeRequestError("clio submit succeeded but no poll url returned")
+        upstream_job_id = self._extract_job_id(poll_url)
+        if progress_cb:
+            try:
+                progress_cb(
+                    {
+                        "task_status": "IN_PROGRESS",
+                        "task_progress": 0.0,
+                        "upstream_job_id": upstream_job_id,
+                        "retry_after": int(submit_resp.headers.get("retry-after") or 5),
+                    }
+                )
+            except Exception:
+                pass
+
+        deadline = time.time() + max(30, int(timeout or self.generate_timeout))
+        last_status = ""
+        while time.time() < deadline:
+            poll_resp = self._get(poll_url, headers=self._clio_headers(token), timeout=60)
+            if poll_resp.status_code in (401, 403):
+                raise AuthError("Token invalid or expired")
+            if poll_resp.status_code != 200:
+                if poll_resp.status_code in (408, 429, 451) or poll_resp.status_code >= 500:
+                    raise UpstreamTemporaryError(
+                        f"clio poll failed: {poll_resp.status_code} {poll_resp.text[:300]}",
+                        status_code=poll_resp.status_code,
+                        error_type="status",
+                    )
+                raise AdobeRequestError(
+                    f"clio poll failed: {poll_resp.status_code} {poll_resp.text[:300]}"
+                )
+            latest = poll_resp.json()
+            status_header = str(poll_resp.headers.get("x-task-status") or "").upper()
+            status_val = str(latest.get("status") or "").upper() or status_header
+            last_status = status_val or last_status
+            progress_val = self._extract_progress_percent(latest, poll_resp)
+            if progress_cb:
+                try:
+                    progress_cb(
+                        {
+                            "task_status": status_val or "IN_PROGRESS",
+                            "task_progress": progress_val,
+                            "upstream_job_id": upstream_job_id,
+                            "retry_after": int(poll_resp.headers.get("retry-after") or 5),
+                        }
+                    )
+                except Exception:
+                    pass
+
+            outputs = latest.get("outputs") or []
+            if outputs:
+                image_url = ((outputs[0] or {}).get("image") or {}).get("presignedUrl")
+                if not image_url:
+                    raise AdobeRequestError("clio job finished without image url")
+                if out_path is not None:
+                    self._download_to_file(
+                        image_url,
+                        headers={"accept": "*/*"},
+                        out_path=out_path,
+                        timeout=120,
+                    )
+                    image_bytes = None
+                else:
+                    img_resp = self._get(image_url, headers={"accept": "*/*"}, timeout=60)
+                    img_resp.raise_for_status()
+                    image_bytes = img_resp.content
+                if progress_cb:
+                    try:
+                        progress_cb(
+                            {
+                                "task_status": "COMPLETED",
+                                "task_progress": 100.0,
+                                "upstream_job_id": upstream_job_id,
+                            }
+                        )
+                    except Exception:
+                        pass
+                latest["clio"] = True
+                return image_bytes, latest
+
+            if status_val in {"FAILED", "CANCELLED", "ERROR"}:
+                raise AdobeRequestError(f"clio job failed: {json.dumps(latest)[:500]}")
+            retry_after = poll_resp.headers.get("retry-after")
+            try:
+                wait_s = min(max(float(retry_after or 5), 2.0), 10.0)
+            except Exception:
+                wait_s = 5.0
+            time.sleep(wait_s)
+        raise UpstreamTemporaryError(
+            f"clio generation timed out status={last_status or 'unknown'}",
+            error_type="timeout",
+        )
+
     def generate(
         self,
         token: str,
@@ -1477,6 +1696,7 @@ class AdobeClient:
         output_resolution: str = "2K",
         upstream_model_id: str = "gemini-flash",
         upstream_model_version: str = "nano-banana-2",
+        upstream_model: Optional[str] = None,
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
@@ -1485,6 +1705,18 @@ class AdobeClient:
         out_path: Optional[Path] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
     ) -> tuple[Optional[bytes], dict]:
+        if self._is_clio_token(token):
+            return self._generate_clio(
+                token=token,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                output_resolution=output_resolution,
+                requested_size=requested_size,
+                timeout=timeout,
+                out_path=out_path,
+                progress_cb=progress_cb,
+            )
+
         submit_resp = None
         last_error = ""
         for payload in self._build_payload_candidates(
@@ -1493,6 +1725,7 @@ class AdobeClient:
             output_resolution=output_resolution,
             upstream_model_id=upstream_model_id,
             upstream_model_version=upstream_model_version,
+            upstream_model=upstream_model,
             quality_level=quality_level,
             detail_level=detail_level,
             source_image_ids=source_image_ids,
@@ -1532,7 +1765,7 @@ class AdobeClient:
                 submit_resp.status_code,
                 submit_resp.text[:500],
             )
-            if submit_resp.status_code in (429, 451) or submit_resp.status_code >= 500:
+            if submit_resp.status_code in (408, 429, 451) or submit_resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"submit failed: {submit_resp.status_code} {submit_resp.text[:300]}",
                     status_code=submit_resp.status_code,
@@ -1579,7 +1812,7 @@ class AdobeClient:
                     poll_resp.status_code,
                     poll_resp.text[:500],
                 )
-                if poll_resp.status_code in (429, 451) or poll_resp.status_code >= 500:
+                if poll_resp.status_code in (408, 429, 451) or poll_resp.status_code >= 500:
                     raise UpstreamTemporaryError(
                         f"poll failed: {poll_resp.status_code} {poll_resp.text[:300]}",
                         status_code=poll_resp.status_code,
@@ -1679,3 +1912,4 @@ class AdobeClient:
                         pass
                 raise AdobeRequestError("generation timed out")
             time.sleep(sleep_time)
+

@@ -545,6 +545,83 @@ def build_generation_router(
             for _idx, image_id in sorted(source_pairs, key=lambda pair: pair[0])
         ]
 
+    def _select_image_generation_token() -> str | None:
+        """Prefer Firefly browser-native Clio tokens for text-to-image.
+
+        Fresh accounts captured from the browser expose client_id=clio-playground-web.
+        Those tokens match the browser request path used by the Clio adapter in
+        AdobeClient, while older projectx tokens remain the fallback.
+        """
+        return token_manager.get_available_for_client_id(
+            "clio-playground-web", strategy=client.token_rotation_strategy
+        ) or token_manager.get_available(strategy=client.token_rotation_strategy)
+
+    def _requested_token_id(
+        request: Request,
+        data: dict,
+        *,
+        required_client_id: str = "",
+    ) -> str:
+        """Resolve an optional explicit token id for per-account acceptance tests."""
+        requested_id = str(
+            request.headers.get("x-adobe-token-id")
+            or request.headers.get("x-token-id")
+            or data.get("adobe_token_id")
+            or data.get("adobeTokenId")
+            or data.get("token_id")
+            or ""
+        ).strip()
+        if not requested_id:
+            return ""
+
+        item = token_manager.get_by_id(requested_id)
+        if not item:
+            raise HTTPException(status_code=400, detail=f"token not found: {requested_id}")
+        if str(item.get("status") or "").strip() != "active":
+            raise HTTPException(
+                status_code=400,
+                detail=f"token is not active: {requested_id}",
+            )
+        token_value = str(item.get("value") or "").strip()
+        if not token_value:
+            raise HTTPException(status_code=400, detail=f"token is empty: {requested_id}")
+
+        client_id = str(item.get("refresh_client_id") or "").strip()
+        if not client_id:
+            try:
+                payload = token_manager._decode_jwt_payload(token_value)
+                client_id = str(payload.get("client_id") or payload.get("cid") or "").strip()
+            except Exception:
+                client_id = ""
+        expected = str(required_client_id or "").strip()
+        if expected and client_id and client_id != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"token {requested_id} client_id={client_id} cannot be used for "
+                    f"this request; required {expected}"
+                ),
+            )
+        try:
+            request.state.log_forced_token_id = requested_id
+        except Exception:
+            pass
+        return requested_id
+
+    def _token_value_for_requested_id(requested_id: str) -> str | None:
+        token_id = str(requested_id or "").strip()
+        if not token_id:
+            return None
+        item = token_manager.get_by_id(token_id)
+        if not item:
+            return None
+        if str(item.get("status") or "").strip() != "active":
+            return None
+        token_value = str(item.get("value") or "").strip()
+        if not token_value:
+            return None
+        return token_value
+
     @router.post("/v1/images/generations")
     def openai_generate(data: dict, request: Request):
         require_service_api_key(request)
@@ -578,6 +655,7 @@ def build_generation_router(
                 model_conf = {
                     "upstream_model_id": image_options.upstream_model_id,
                     "upstream_model_version": image_options.upstream_model_version,
+                    "upstream_model": "openai:firefly:gpt-image",
                 }
                 resolved_model_id = image_options.response_model
             else:
@@ -601,6 +679,13 @@ def build_generation_router(
             return JSONResponse(status_code=400, content={"error": error_payload})
 
         try:
+            requested_token_id = _requested_token_id(
+                request,
+                data,
+                required_client_id=(
+                    "projectx_webapp" if image_options.is_native_gpt_image else ""
+                ),
+            )
             set_request_task_progress(
                 request, task_status="IN_PROGRESS", task_progress=0.0
             )
@@ -622,10 +707,20 @@ def build_generation_router(
                     response_payload["model"] = resolved_model_id
                 return response_payload
 
+            def _select_openai_images_token() -> str | None:
+                if requested_token_id:
+                    return _token_value_for_requested_id(requested_token_id)
+                if image_options.is_native_gpt_image:
+                    return token_manager.get_available_for_client_id(
+                        "projectx_webapp", strategy=client.token_rotation_strategy
+                    )
+                return _select_image_generation_token()
+
             return run_with_token_retries(
                 request=request,
                 operation_name="images.generations",
                 run_once=_run_once,
+                token_selector=_select_openai_images_token,
             )
 
         except quota_error_cls:
@@ -702,6 +797,36 @@ def build_generation_router(
                     "error": {
                         "message": str(exc),
                         "type": "server_error",
+                        "code": error_code,
+                    }
+                },
+            )
+        except HTTPException as exc:
+            status_code = int(exc.status_code or 500)
+            err_type = (
+                "invalid_request_error" if 400 <= status_code < 500 else "server_error"
+            )
+            error_code = str(
+                getattr(request.state, "log_error_code", "") or ""
+            ) or set_request_error_detail(
+                request,
+                error=str(exc.detail),
+                status_code=status_code,
+                error_type=err_type,
+                include_traceback=False,
+            )
+            set_request_task_progress(
+                request,
+                task_status="FAILED",
+                task_progress=0.0,
+                error=str(exc.detail),
+            )
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "error": {
+                        "message": str(exc.detail),
+                        "type": err_type,
                         "code": error_code,
                     }
                 },
@@ -799,6 +924,7 @@ def build_generation_router(
                 model_conf = {
                     "upstream_model_id": image_options.upstream_model_id,
                     "upstream_model_version": image_options.upstream_model_version,
+                    "upstream_model": "openai:firefly:gpt-image",
                 }
                 resolved_model_id = image_options.response_model
             else:
@@ -816,6 +942,13 @@ def build_generation_router(
             return _openai_image_error_response(exc)
 
         try:
+            requested_token_id = _requested_token_id(
+                request,
+                data,
+                required_client_id=(
+                    "projectx_webapp" if image_options.is_native_gpt_image else ""
+                ),
+            )
             set_request_task_progress(
                 request, task_status="IN_PROGRESS", task_progress=0.0
             )
@@ -838,11 +971,21 @@ def build_generation_router(
                     response_payload["model"] = resolved_model_id
                 return response_payload
 
+            def _select_openai_edits_token() -> str | None:
+                if requested_token_id:
+                    return _token_value_for_requested_id(requested_token_id)
+                if image_options.is_native_gpt_image:
+                    return token_manager.get_available_for_client_id(
+                        "projectx_webapp", strategy=client.token_rotation_strategy
+                    )
+                return _select_image_generation_token()
+
             return await run_in_threadpool(
                 lambda: run_with_token_retries(
                     request=request,
                     operation_name="images.edits",
                     run_once=_run_once,
+                    token_selector=_select_openai_edits_token,
                 )
             )
 
@@ -924,6 +1067,36 @@ def build_generation_router(
                     }
                 },
             )
+        except HTTPException as exc:
+            status_code = int(exc.status_code or 500)
+            err_type = (
+                "invalid_request_error" if 400 <= status_code < 500 else "server_error"
+            )
+            error_code = str(
+                getattr(request.state, "log_error_code", "") or ""
+            ) or set_request_error_detail(
+                request,
+                error=str(exc.detail),
+                status_code=status_code,
+                error_type=err_type,
+                include_traceback=False,
+            )
+            set_request_task_progress(
+                request,
+                task_status="FAILED",
+                task_progress=0.0,
+                error=str(exc.detail),
+            )
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "error": {
+                        "message": str(exc.detail),
+                        "type": err_type,
+                        "code": error_code,
+                    }
+                },
+            )
         except Exception as exc:
             logger.exception("Unhandled error in /v1/images/edits")
             error_code = str(
@@ -981,9 +1154,7 @@ def build_generation_router(
             last_error = "No active tokens available in the pool"
 
             for attempt in range(1, max_attempts + 1):
-                token = token_manager.get_available(
-                    strategy=client.token_rotation_strategy
-                )
+                token = _select_image_generation_token()
                 if not token:
                     break
 
@@ -1007,6 +1178,7 @@ def build_generation_router(
                         upstream_model_version=str(
                             model_conf.get("upstream_model_version") or "nano-banana-2"
                         ),
+                        upstream_model=str(model_conf.get("upstream_model") or ""),
                         quality_level=(
                             client.gpt_image_quality
                             if str(model_conf.get("upstream_model_id") or "") == "gpt-image"
@@ -1279,6 +1451,7 @@ def build_generation_router(
                             image_model_conf.get("upstream_model_version")
                             or "nano-banana-2"
                         ),
+                        upstream_model=str(image_model_conf.get("upstream_model") or ""),
                         quality_level=(
                             client.gpt_image_quality
                             if str(image_model_conf.get("upstream_model_id") or "")

@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ADOBE 协议支付</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/adobe-pay/styles.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">⚡</span>
+      <span>ADOBE协议支付</span>
+    </div>
+    <nav class="nav" aria-label="主导航">
+      <button class="nav-item active" type="button" data-view="dashboard">仪表盘</button>
+      <button class="nav-item" type="button" data-view="accounts">账号管理</button>
+      <button class="nav-item" type="button" data-view="adobe">ADOBE管理</button>
+      <button class="nav-item" type="button" data-view="cards">卡片管理</button>
+      <button class="nav-item" type="button" data-view="records">开通记录</button>
+      <button class="nav-item" type="button" data-view="settings">系统设置</button>
+    </nav>
+  </aside>
+
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1 id="pageTitle">ADOBE 管理</h1>
+        <p id="pageSubtitle">批量创建账号、测试出图、查询试用资格并记录开通结果。</p>
+      </div>
+      <div class="top-actions">
+        <button id="seedBtn" class="btn ghost" type="button">填充示例</button>
+        <button id="registerBtn" class="btn primary" type="button">一键注册</button>
+        <button id="openTrialBtn" class="btn accent" type="button">批量开通套餐</button>
+      </div>
+    </header>
+
+    <section class="view active" id="view-dashboard">
+      <div class="metric-grid">
+        <article class="metric">
+          <span class="metric-label">账号总数</span>
+          <strong id="metricAccounts">0</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">可开通账号</span>
+          <strong id="metricEligible">0</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">卡片数量</span>
+          <strong id="metricCards">0</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">成功开通</span>
+          <strong id="metricOpened">0</strong>
+        </article>
+      </div>
+
+      <div class="split-grid">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>快速任务</h2>
+            <span class="pill">Queue</span>
+          </div>
+          <div class="task-list">
+            <button class="task-item" type="button" data-task="register">
+              <span>01</span>
+              <strong>生成账号资料</strong>
+              <small>创建本地账号记录并等待资格查询</small>
+            </button>
+            <button class="task-item" type="button" data-task="image">
+              <span>02</span>
+              <strong>测试能否出图</strong>
+              <small>调用本项目图片接口，失败时写入日志</small>
+            </button>
+            <button class="task-item" type="button" data-task="trial">
+              <span>03</span>
+              <strong>查询并开通试用</strong>
+              <small>选择卡片、套餐和账号后执行批量流程</small>
+            </button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>运行日志</h2>
+            <button id="clearLiveLogBtn" class="btn small ghost" type="button">清空</button>
+          </div>
+          <pre id="liveLog" class="terminal"></pre>
+        </section>
+      </div>
+    </section>
+
+    <section class="view" id="view-accounts">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>账号管理</h2>
+          <div class="inline-actions">
+            <button id="addAccountBtn" class="btn ghost" type="button">新增账号</button>
+            <button id="importAccountsBtn" class="btn ghost" type="button">批量导入</button>
+            <button id="exportAccountsBtn" class="btn ghost" type="button">导出账号</button>
+            <button id="queryEligibilityBtn" class="btn primary" type="button">查询资格</button>
+            <button id="testImagesBtn" class="btn accent" type="button">测试出图</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><input id="selectAllAccounts" type="checkbox" /></th>
+                <th>账号</th>
+                <th>状态</th>
+                <th>资格</th>
+                <th>套餐</th>
+                <th>出图测试</th>
+                <th>IP</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="accountRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section class="view" id="view-adobe">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>ADOBE管理</h2>
+          <div class="inline-actions">
+            <button id="adobeRegisterBtn" class="btn primary" type="button">一键注册</button>
+            <button id="adobeTrialBtn" class="btn accent" type="button">批量开通套餐</button>
+          </div>
+        </div>
+        <div class="adobe-layout">
+          <div class="run-card">
+            <span class="run-icon">$</span>
+            <h3>试用资格开通</h3>
+            <p>选择套餐、账号和卡片后会生成开通任务，日志实时刷新，结果进入开通记录。</p>
+            <button id="adobeOpenWizardBtn" class="btn primary" type="button">打开批量开通</button>
+          </div>
+          <div class="run-card browser-card">
+            <span class="run-icon">URL</span>
+            <h3>真实注册页测试</h3>
+            <p>先创建一个 TempMail.lol 真实邮箱，再把 Adobe 注册页默认填入地址栏并打开；也可以直接调用 CloakBrowser 走代理自动注册。</p>
+            <label class="address-label">
+              <span>注册地址栏</span>
+              <div class="address-bar">
+                <input id="registerUrlInput" type="url" value="https://account.adobe.com/" />
+                <button id="openRegisterUrlBtn" class="btn ghost" type="button">打开</button>
+              </div>
+            </label>
+            <button id="realRegisterTestBtn" class="btn primary" type="button">创建真实邮箱并打开注册页</button>
+            <button id="cloakRegisterBtn" class="btn secondary" type="button">CloakBrowser 代理自动注册</button>
+          </div>
+          <div class="run-card slate">
+            <span class="run-icon">IMG</span>
+            <h3>图片生成测试</h3>
+            <p>对选中账号执行一次出图请求，用于判断当前 Token 池和服务配置是否可用。</p>
+            <button id="adobeImageTestBtn" class="btn ghost" type="button">开始测试</button>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>账号列表</h2>
+          <span id="accountCountLabel" class="hint">共 0 个账号</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><input id="selectAllAdobeAccounts" type="checkbox" /></th>
+                <th>账号</th>
+                <th>资格</th>
+                <th>开通状态</th>
+                <th>测试结果</th>
+                <th>最近操作</th>
+              </tr>
+            </thead>
+            <tbody id="adobeAccountRows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>底部脚本执行输出</h2>
+          <span class="hint">点击 “CloakBrowser 代理自动注册” 后自动运行 tools/cloak_adobe_register.py</span>
+        </div>
+        <pre id="scriptOutput" class="terminal script-terminal"></pre>
+      </section>
+    </section>
+
+    <section class="view" id="view-cards">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>卡片管理</h2>
+          <div class="inline-actions">
+            <button id="importCardsBtn" class="btn ghost" type="button">批量导入</button>
+            <button id="exportCardsBtn" class="btn ghost" type="button">导出卡片</button>
+            <button id="addCardBtn" class="btn primary" type="button">添加卡片</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>卡片</th>
+                <th>地区</th>
+                <th>类型</th>
+                <th>余额</th>
+                <th>成功率</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="cardRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section class="view" id="view-records">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>开通记录</h2>
+          <div class="inline-actions">
+            <button id="exportRecordsBtn" class="btn ghost" type="button">导出记录</button>
+            <button id="clearRecordsBtn" class="btn danger" type="button">清空记录</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>账号</th>
+                <th>套餐</th>
+                <th>卡片</th>
+                <th>状态</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="recordRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
+    <section class="view" id="view-settings">
+      <section class="panel settings-panel">
+        <div class="panel-head">
+          <h2>系统设置</h2>
+          <button id="saveSettingsBtn" class="btn primary" type="button">保存设置</button>
+        </div>
+        <div class="form-grid">
+          <label>
+            <span>服务 API Key</span>
+            <input id="serviceApiKey" type="password" placeholder="用于调用本项目 /v1/images/generations" />
+          </label>
+          <label>
+            <span>图片测试模型</span>
+            <input id="imageModel" type="text" value="firefly-nano-banana-1k-1x1" />
+          </label>
+          <label>
+            <span>默认注册数量</span>
+            <input id="registerCount" type="number" min="1" max="50" value="4" />
+          </label>
+          <label>
+            <span>任务并发数</span>
+            <input id="concurrency" type="number" min="1" max="10" value="2" />
+          </label>
+          <label>
+            <span>Adobe 注册页地址</span>
+            <input id="registerUrlSetting" type="url" value="https://account.adobe.com/" />
+          </label>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="trialModal" class="modal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="批量开通套餐">
+      <div class="modal-head">
+        <h2>批量开通套餐（试用）</h2>
+        <button id="closeTrialModalBtn" class="icon-btn" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="explain">选择套餐、卡片和账号后执行任务；每一步都会记录到开通记录。</p>
+        <div class="package-grid" id="packageGrid"></div>
+        <div class="wizard-row">
+          <label>
+            <span>开通方式</span>
+            <select id="openMode">
+              <option value="trial">纯协议（快-可调试，成功率看卡/IP）</option>
+              <option value="browser">浏览器辅助（适合需要人工确认）</option>
+            </select>
+          </label>
+          <label>
+            <span>开通账号来源</span>
+            <select id="accountSource">
+              <option value="selected">仅勾选的账号</option>
+              <option value="eligible">全部可试用账号</option>
+              <option value="all">全部账号</option>
+            </select>
+          </label>
+          <label>
+            <span>支付卡片</span>
+            <select id="cardSelect"></select>
+          </label>
+          <span id="willOpenCount" class="will-open">将开通 0 个账号</span>
+        </div>
+        <label class="wide-label">
+          <span>运行日志</span>
+          <pre id="modalLog" class="terminal modal-terminal"></pre>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button id="viewRecordsBtn" class="btn ghost" type="button">开通记录</button>
+        <button id="stopJobBtn" class="btn danger" type="button" disabled>停止</button>
+        <button id="startTrialBtn" class="btn accent" type="button">开始开通</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="editModal" class="modal" aria-hidden="true">
+    <div class="modal-card small-modal" role="dialog" aria-modal="true" aria-label="编辑数据">
+      <div class="modal-head">
+        <h2 id="editTitle">编辑</h2>
+        <button id="closeEditModalBtn" class="icon-btn" type="button" aria-label="关闭">×</button>
+      </div>
+      <form id="editForm" class="edit-form"></form>
+      <div class="modal-foot">
+        <button id="deleteEditBtn" class="btn danger" type="button">删除</button>
+        <button id="saveEditBtn" class="btn primary" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="importModal" class="modal" aria-hidden="true">
+    <div class="modal-card small-modal" role="dialog" aria-modal="true" aria-label="批量导入">
+      <div class="modal-head">
+        <h2 id="importTitle">批量导入</h2>
+        <button id="closeImportModalBtn" class="icon-btn" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="import-body">
+        <p id="importHelp" class="explain"></p>
+        <label>
+          <span>导入内容</span>
+          <textarea id="importText" class="import-text" spellcheck="false"></textarea>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button id="loadImportExampleBtn" class="btn ghost" type="button">填充示例</button>
+        <button id="saveImportBtn" class="btn primary" type="button">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="/static/adobe-pay/app.js"></script>
+</body>
+</html>

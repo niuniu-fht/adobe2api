@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>注册机 - Adobe2API</title>
+  <link rel="stylesheet" href="/static/registrar/styles.css?v=20260707-10" />
+</head>
+<body>
+  <aside class="side">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <div><strong>注册机</strong><small>Auto Register + Account Manager</small></div>
+    </div>
+    <nav>
+      <a class="active" href="/registrar">注册机</a>
+      <a href="/">Token 控制台</a>
+    </nav>
+  </aside>
+
+  <main class="app">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">只保留：自动注册脚本 + 账号管理 + 导出 + 接码</p>
+        <h1>Adobe 注册机</h1>
+        <p class="sub">启动后执行自动注册脚本；下方实时打印日志。账号列表支持获取验证码、导出单个 cookie、导出全部账号和全部 cookie。</p>
+      </div>
+      <div class="hero-actions">
+        <a class="ghost" href="/api/v1/registrar/accounts/export?format=json" target="_blank">导出账号 JSON</a>
+        <a class="ghost" href="/api/v1/registrar/accounts/export?format=csv" target="_blank">导出账号 CSV</a>
+        <a class="ghost" href="/api/v1/registrar/accounts/cookies-export?download=true" target="_blank">导出全部 Cookie</a>
+        <button id="refreshAccountsBtn" class="ghost" type="button">刷新账号</button>
+      </div>
+    </header>
+
+    <section class="controls card">
+      <label><span>本次注册数量</span><input id="countInput" type="number" min="1" max="50" value="1" /></label>
+      <label><span>注册模式</span><select id="registerMode"><option value="http_request">HTTP请求脚本</option><option value="cloakbrowser">CloakBrowser页面</option></select></label>
+      <button id="startBtn" class="primary" type="button">启动自动注册脚本</button>
+      <button id="refreshJobsBtn" class="ghost" type="button">刷新任务</button>
+      <button id="diagGptBtn" class="ghost" type="button" data-busy-key="gptDiag">诊断 gpt-image-2</button>
+      <div class="state-pill" id="statePill">READY</div>
+    </section>
+
+    <section class="metrics">
+      <article class="metric card"><span>计划数量</span><strong id="metricTotal">0</strong></article>
+      <article class="metric card good"><span>注册成功</span><strong id="metricSuccess">0</strong></article>
+      <article class="metric card warn"><span>验证/挑战</span><strong id="metricChallenge">0</strong></article>
+      <article class="metric card cyan"><span>网页出图成功</span><strong id="metricWebImage">0</strong></article>
+      <article class="metric card blue"><span>6001出图成功</span><strong id="metricImage">0</strong></article>
+      <article class="metric card bad"><span>失败</span><strong id="metricFailed">0</strong></article>
+    </section>
+
+    <section class="card log-card">
+      <div class="card-head">
+        <div><h2>脚本执行反馈</h2><p id="jobInfo">尚未启动</p></div>
+        <button id="clearLogBtn" class="ghost small" type="button">清空显示</button>
+      </div>
+      <pre id="logBox" class="terminal">等待启动注册机...</pre>
+    </section>
+
+    <section class="card account-card">
+      <div class="card-head">
+        <div><h2>账号管理</h2><p>获取验证码用于人工页面；Cookie 导出格式可直接给本项目 /api/v1/refresh-profiles/import-cookie 使用。</p></div>
+        <div class="head-actions">
+          <button id="planImageTestBtn" class="ghost small" type="button" data-busy-key="planImage">预检批量测试</button>
+          <button id="batchRefreshClioBtn" class="ghost small" type="button" data-busy-key="batchClio">批量刷新Clio</button>
+          <button id="batchImageTestBtn" class="ghost small" type="button" data-busy-key="batchImage">批量测试未通过账号</button>
+          <span id="accountSummary" class="muted">-</span>
+        </div>
+      </div>
+      <div id="accountTokenSummary" class="summary-strip">账号 token 摘要加载中...</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>邮箱/密码</th>
+              <th>状态</th>
+              <th>验证码</th>
+              <th>Cookie</th>
+              <th>出图测试</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="accountRows"><tr><td colspan="6" class="empty">加载中...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card history-card">
+      <div class="card-head"><div><h2>最近任务</h2><p>任务摘要保存到 data/registrar_jobs。</p></div></div>
+      <div id="historyList" class="history-list"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/registrar/app.js?v=20260707-10"></script>
+</body>
+</html>

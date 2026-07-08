@@ -88,6 +88,7 @@ class TokenManager:
         profile_id: str,
         profile_name: Optional[str] = None,
         profile_email: Optional[str] = None,
+        refresh_client_id: Optional[str] = None,
     ):
         with self._lock:
             value = value.strip()
@@ -97,14 +98,28 @@ class TokenManager:
             now_ts = time.time()
             pid = str(profile_id or "").strip()
             account_id = self.account_id_from_token(value)
+            decoded = self._decode_jwt_payload(value) or {}
+            wanted_client_id = str(
+                refresh_client_id
+                or decoded.get("client_id")
+                or decoded.get("cid")
+                or "projectx_webapp"
+            ).strip()
             if not pid:
                 raise ValueError("profile_id is required")
 
             target = None
             for t in self.tokens:
+                existing_client_id = str(
+                    t.get("refresh_client_id")
+                    or (self._decode_jwt_payload(t.get("value") or "") or {}).get("client_id")
+                    or (self._decode_jwt_payload(t.get("value") or "") or {}).get("cid")
+                    or "projectx_webapp"
+                ).strip()
                 if (
                     t.get("auto_refresh") is True
                     and str(t.get("refresh_profile_id") or "").strip() == pid
+                    and existing_client_id == wanted_client_id
                 ):
                     target = t
                     break
@@ -120,6 +135,7 @@ class TokenManager:
                 target["refresh_profile_id"] = pid
                 target["refresh_profile_name"] = str(profile_name or "").strip() or pid
                 target["refresh_profile_email"] = str(profile_email or "").strip()
+                target["refresh_client_id"] = wanted_client_id
                 if account_id:
                     target["account_id"] = account_id
                 self.save()
@@ -138,6 +154,7 @@ class TokenManager:
                 "refresh_profile_id": pid,
                 "refresh_profile_name": str(profile_name or "").strip() or pid,
                 "refresh_profile_email": str(profile_email or "").strip(),
+                "refresh_client_id": wanted_client_id,
                 "account_id": account_id,
             }
             self.tokens.append(new_token)
@@ -292,6 +309,33 @@ class TokenManager:
             self._rr_index = (self._rr_index + 1) % max(1, len(self.tokens))
             return active[idx]["value"]
 
+    def get_available_for_client_id(
+        self, client_id: str, strategy: str = "round_robin"
+    ) -> Optional[str]:
+        cid = str(client_id or "").strip()
+        if not cid:
+            return None
+        with self._lock:
+            active = []
+            for t in self.tokens:
+                if t.get("status") not in {"active", "error"}:
+                    continue
+                value = str(t.get("value") or "").strip()
+                if not value:
+                    continue
+                payload = self._decode_jwt_payload(value) or {}
+                token_client_id = str(payload.get("client_id") or payload.get("cid") or "").strip()
+                if token_client_id == cid:
+                    active.append(t)
+            if not active:
+                return None
+            mode = str(strategy or "round_robin").strip().lower()
+            if mode == "random":
+                return random.choice(active)["value"]
+            idx = self._rr_index % len(active)
+            self._rr_index = (self._rr_index + 1) % max(1, len(self.tokens))
+            return active[idx]["value"]
+
     def list_active_account_tokens(self) -> List[Dict]:
         with self._lock:
             items = []
@@ -334,6 +378,7 @@ class TokenManager:
         token_value = str(value or "").strip()
         linked_profile_id = ""
         linked_auto_refresh = False
+        linked_client_id = ""
 
         with self._lock:
             for t in self.tokens:
@@ -341,6 +386,7 @@ class TokenManager:
                     continue
                 linked_profile_id = str(t.get("refresh_profile_id") or "").strip()
                 linked_auto_refresh = bool(t.get("auto_refresh"))
+                linked_client_id = str(t.get("refresh_client_id") or "").strip()
                 break
 
         if not linked_auto_refresh or not linked_profile_id:
@@ -355,7 +401,10 @@ class TokenManager:
         try:
             from core.refresh_mgr import refresh_manager
 
-            refresh_result = refresh_manager.refresh_once(linked_profile_id)
+            refresh_result = refresh_manager.refresh_once(
+                linked_profile_id,
+                client_id=linked_client_id or None,
+            )
         except Exception as exc:
             self.report_error(token_value)
             return {
@@ -470,6 +519,7 @@ class TokenManager:
                         "refresh_profile_id": t.get("refresh_profile_id"),
                         "refresh_profile_name": t.get("refresh_profile_name"),
                         "refresh_profile_email": t.get("refresh_profile_email"),
+                        "refresh_client_id": t.get("refresh_client_id"),
                         "credits_total": t.get("credits_total"),
                         "credits_used": t.get("credits_used"),
                         "credits_available": t.get("credits_available"),
@@ -509,6 +559,7 @@ class TokenManager:
                         "refresh_profile_id": t.get("refresh_profile_id"),
                         "refresh_profile_name": t.get("refresh_profile_name"),
                         "refresh_profile_email": t.get("refresh_profile_email"),
+                        "refresh_client_id": t.get("refresh_client_id"),
                         "added_at": t.get("added_at"),
                     }
                 )
