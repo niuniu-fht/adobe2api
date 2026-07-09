@@ -83,6 +83,42 @@ def build_generation_router(
             return _entity_urn(entity)
         return ""
 
+    def _is_gpt_image_model_or_alias(model_id: str | None) -> bool:
+        model_id = str(model_id or "").strip()
+        if is_native_gpt_image_model(model_id):
+            return True
+        return bool(
+            model_id
+            and model_id not in model_catalog
+            and client.is_gpt_image_model_alias(model_id)
+        )
+
+    def _gpt_image_quality_for_model(
+        model_conf: dict, model_id: str | None
+    ) -> str | None:
+        if str(model_conf.get("upstream_model_id") or "") != "gpt-image":
+            return None
+        return str(
+            model_conf.get("gpt_image_quality")
+            or client.get_gpt_image_quality(model_id)
+            or client.gpt_image_quality
+        )
+
+    def _build_gpt_image_alias_options(data: dict, model_id: str | None):
+        response_model = str(model_id or "gpt-image-2").strip() or "gpt-image-2"
+        image_options = build_native_gpt_image_options(
+            data,
+            model_id_override="gpt-image-2",
+            response_model=response_model,
+            upstream_model_version="2",
+        )
+        model_conf = {
+            "upstream_model_id": image_options.upstream_model_id,
+            "upstream_model_version": image_options.upstream_model_version,
+            "gpt_image_quality": client.get_gpt_image_quality(response_model),
+        }
+        return image_options, model_conf, response_model
+
     def _entity_names_from_prompt(raw_prompt: str) -> list[str]:
         matches = list(entity_ref_re.finditer(raw_prompt or ""))
         names: list[str] = []
@@ -230,6 +266,17 @@ def build_generation_router(
                 "description": "OpenAI Images compatible alias for Firefly GPT Image 2",
             }
         )
+        for model_id, quality in client.gpt_image_model_qualities.items():
+            if model_id == "gpt-image-2":
+                continue
+            data.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "owned_by": "adobe2api",
+                    "description": f"Custom OpenAI Images alias for gpt-image-2 ({quality})",
+                }
+            )
         return {"object": "list", "data": data}
 
     def _openai_image_error_response(exc: OpenAIImageRequestError) -> JSONResponse:
@@ -444,11 +491,7 @@ def build_generation_router(
                 upstream_model_version=str(
                     model_conf.get("upstream_model_version") or "nano-banana-2"
                 ),
-                quality_level=(
-                    client.gpt_image_quality
-                    if str(model_conf.get("upstream_model_id") or "") == "gpt-image"
-                    else None
-                ),
+                quality_level=_gpt_image_quality_for_model(model_conf, image_options.response_model),
                 detail_level=model_conf.get("detail_level"),
                 source_image_ids=source_image_ids,
                 requested_size=image_options.requested_size,
@@ -658,13 +701,10 @@ def build_generation_router(
                 },
             )
         try:
-            if is_native_gpt_image_model(model_id):
-                image_options = build_native_gpt_image_options(data)
-                model_conf = {
-                    "upstream_model_id": image_options.upstream_model_id,
-                    "upstream_model_version": image_options.upstream_model_version,
-                }
-                resolved_model_id = image_options.response_model
+            if _is_gpt_image_model_or_alias(model_id):
+                image_options, model_conf, resolved_model_id = (
+                    _build_gpt_image_alias_options(data, model_id or "gpt-image-2")
+                )
             else:
                 ratio, output_resolution, resolved_model_id = (
                     resolve_ratio_and_resolution(data, model_id or None)
@@ -886,14 +926,11 @@ def build_generation_router(
             )
 
         try:
-            if is_native_gpt_image_model(model_id):
+            if _is_gpt_image_model_or_alias(model_id):
                 data["model"] = model_id
-                image_options = build_native_gpt_image_options(data)
-                model_conf = {
-                    "upstream_model_id": image_options.upstream_model_id,
-                    "upstream_model_version": image_options.upstream_model_version,
-                }
-                resolved_model_id = image_options.response_model
+                image_options, model_conf, resolved_model_id = (
+                    _build_gpt_image_alias_options(data, model_id or "gpt-image-2")
+                )
             else:
                 ratio, output_resolution, resolved_model_id = (
                     resolve_ratio_and_resolution(data, model_id or None)
@@ -1109,11 +1146,7 @@ def build_generation_router(
                         upstream_model_version=str(
                             model_conf.get("upstream_model_version") or "nano-banana-2"
                         ),
-                        quality_level=(
-                            client.gpt_image_quality
-                            if str(model_conf.get("upstream_model_id") or "") == "gpt-image"
-                            else None
-                        ),
+                        quality_level=_gpt_image_quality_for_model(model_conf, data.model),
                         detail_level=model_conf.get("detail_level"),
                         out_path=out_path,
                     )
@@ -1206,9 +1239,14 @@ def build_generation_router(
             )
         video_conf = video_model_catalog.get(model_id)
         is_video_model = video_conf is not None
+        is_gpt_image_alias_model = (
+            not is_video_model and _is_gpt_image_model_or_alias(model_id)
+        )
         resolved_model_id = model_id if is_video_model else None
         ratio = "9:16"
         output_resolution = "2K"
+        image_options = None
+        image_model_conf: dict = {}
         duration = int(video_conf["duration"]) if video_conf else 12
         video_resolution = (
             str(video_conf.get("resolution") or "720p") if video_conf else "720p"
@@ -1236,13 +1274,17 @@ def build_generation_router(
                 generate_audio, negative_prompt = resolved_video_options
             if not any(k in data for k in ("generate_audio", "generateAudio")):
                 generate_audio = bool(video_conf.get("generate_audio", generate_audio))
+        elif is_gpt_image_alias_model:
+            image_options, image_model_conf, resolved_model_id = (
+                _build_gpt_image_alias_options(data, model_id or "gpt-image-2")
+            )
+            ratio = image_options.aspect_ratio
+            output_resolution = image_options.output_resolution
         else:
             ratio, output_resolution, resolved_model_id = resolve_ratio_and_resolution(
                 data, model_id or None
             )
-        image_model_conf = (
-            resolve_model(resolved_model_id) if not is_video_model else {}
-        )
+            image_model_conf = resolve_model(resolved_model_id)
 
         try:
             entity_account_id = ""
@@ -1381,14 +1423,12 @@ def build_generation_router(
                             image_model_conf.get("upstream_model_version")
                             or "nano-banana-2"
                         ),
-                        quality_level=(
-                            client.gpt_image_quality
-                            if str(image_model_conf.get("upstream_model_id") or "")
-                            == "gpt-image"
-                            else None
-                        ),
+                        quality_level=_gpt_image_quality_for_model(image_model_conf, resolved_model_id),
                         detail_level=image_model_conf.get("detail_level"),
                         source_image_ids=source_image_ids,
+                        requested_size=(
+                            image_options.requested_size if image_options else None
+                        ),
                         timeout=client.generate_timeout,
                         out_path=out_path,
                         progress_cb=_image_progress_cb,

@@ -592,6 +592,32 @@ def build_admin_router(
                     detail="gpt_image_quality must be one of: low, medium, high",
                 )
             update_data["gpt_image_quality"] = gpt_image_quality
+        if "gpt_image_model_qualities" in incoming:
+            raw_model_qualities = incoming.get("gpt_image_model_qualities") or {}
+            if not isinstance(raw_model_qualities, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="gpt_image_model_qualities must be an object",
+                )
+            model_qualities: dict[str, str] = {}
+            for raw_model_id, raw_quality in raw_model_qualities.items():
+                model_id = str(raw_model_id or "").strip()
+                quality = str(raw_quality or "").strip().lower()
+                if not model_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="gpt_image_model_qualities model id cannot be empty",
+                    )
+                if quality not in {"low", "medium", "high"}:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"gpt_image_model_qualities[{model_id}] must be one of: "
+                            "low, medium, high"
+                        ),
+                    )
+                model_qualities[model_id] = quality
+            update_data["gpt_image_model_qualities"] = model_qualities
         effective_max = int(
             update_data.get(
                 "generated_max_size_mb",

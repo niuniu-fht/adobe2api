@@ -22,6 +22,10 @@ except Exception:
 
 logger = logging.getLogger("adobe2api")
 
+DEFAULT_GPT_IMAGE_MODEL_QUALITIES = {
+    "gpt-image-2-high": "medium",
+}
+
 
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
     raw_token = str(token or "").strip()
@@ -144,6 +148,7 @@ class AdobeClient:
         self.retry_on_error_types = {"timeout", "connection", "proxy"}
         self.token_rotation_strategy = "round_robin"
         self.gpt_image_quality = "low"
+        self.gpt_image_model_qualities: dict[str, str] = {}
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
         self.sec_ch_ua = (
             '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"'
@@ -191,6 +196,19 @@ class AdobeClient:
         if gpt_quality not in {"low", "medium", "high"}:
             gpt_quality = "low"
         self.gpt_image_quality = gpt_quality
+        model_qualities = cfg.get("gpt_image_model_qualities", {})
+        if not isinstance(model_qualities, dict):
+            model_qualities = {}
+        normalized_model_qualities: dict[str, str] = dict(
+            DEFAULT_GPT_IMAGE_MODEL_QUALITIES
+        )
+        for raw_model_id, raw_quality in model_qualities.items():
+            model_id = str(raw_model_id or "").strip()
+            quality = str(raw_quality or "").strip().lower()
+            if not model_id or quality not in {"low", "medium", "high"}:
+                continue
+            normalized_model_qualities[model_id] = quality
+        self.gpt_image_model_qualities = normalized_model_qualities
         try:
             attempts = int(cfg.get("retry_max_attempts", 3))
         except Exception:
@@ -251,6 +269,18 @@ class AdobeClient:
             logger.warning("proxy enabled for upstream requests: %s", self.proxy)
         else:
             logger.warning("proxy disabled for upstream requests")
+
+    def is_gpt_image_model_alias(self, model_id: Optional[str]) -> bool:
+        model_id = str(model_id or "").strip()
+        return bool(model_id and model_id in self.gpt_image_model_qualities)
+
+    def get_gpt_image_quality(self, model_id: Optional[str] = None) -> str:
+        model_id = str(model_id or "").strip()
+        if model_id == "gpt-image-2":
+            return self.gpt_image_quality
+        if model_id and model_id in self.gpt_image_model_qualities:
+            return self.gpt_image_model_qualities[model_id]
+        return self.gpt_image_quality
 
     def _retry_delay_for_attempt(self, attempt: int) -> float:
         base = float(self.retry_backoff_seconds or 0.0)

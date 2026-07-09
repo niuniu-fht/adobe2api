@@ -681,6 +681,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const confProxy = document.getElementById("confProxy");
   const confGenerateTimeout = document.getElementById("confGenerateTimeout");
   const confGptImageQuality = document.getElementById("confGptImageQuality");
+  const confGptImage2HighQuality = document.getElementById("confGptImage2HighQuality");
   const confRetryEnabled = document.getElementById("confRetryEnabled");
   const confRetryMaxAttempts = document.getElementById("confRetryMaxAttempts");
   const confRetryBackoffSeconds = document.getElementById("confRetryBackoffSeconds");
@@ -766,6 +767,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         confProxy.value = data.proxy || "";
         confGenerateTimeout.value = Number(data.generate_timeout || 300);
         confGptImageQuality.value = String(data.gpt_image_quality || "low");
+        if (confGptImage2HighQuality) {
+          const modelQualities = data.gpt_image_model_qualities || {};
+          confGptImage2HighQuality.value = String(modelQualities["gpt-image-2-high"] || "medium");
+        }
         confRetryEnabled.checked = Boolean(data.retry_enabled ?? true);
         confRetryMaxAttempts.value = Number(data.retry_max_attempts || 3);
         confRetryBackoffSeconds.value = Number(data.retry_backoff_seconds ?? 1.0);
@@ -799,6 +804,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const currentRes = await fetch("/api/v1/config");
       const currentData = await currentRes.json();
       
+      const gptImage2HighQuality = String(confGptImage2HighQuality?.value || "medium").trim().toLowerCase() || "medium";
+
       const payload = {
         ...currentData,
         api_key: confApiKey.value.trim(),
@@ -809,6 +816,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         proxy: confProxy.value.trim(),
         generate_timeout: Math.max(1, Number(confGenerateTimeout.value || 300)),
         gpt_image_quality: String(confGptImageQuality.value || "low").trim().toLowerCase() || "low",
+        gpt_image_model_qualities: {
+          "gpt-image-2-high": gptImage2HighQuality
+        },
         retry_enabled: confRetryEnabled.checked,
         retry_max_attempts: Math.max(1, Math.min(10, Number(confRetryMaxAttempts.value || 3))),
         retry_backoff_seconds: Math.max(0, Math.min(30, Number(confRetryBackoffSeconds.value || 1))),
@@ -839,6 +849,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       if (!["low", "medium", "high"].includes(payload.gpt_image_quality)) {
         throw new Error("GPT Image 默认质量必须是 low、medium 或 high");
+      }
+      if (!["low", "medium", "high"].includes(payload.gpt_image_model_qualities["gpt-image-2-high"])) {
+        throw new Error("gpt-image-2-high 默认质量必须是 low、medium 或 high");
       }
       if (!Number.isInteger(payload.batch_concurrency) || payload.batch_concurrency < 1 || payload.batch_concurrency > 100) {
         throw new Error("批量导入/积分并发数必须是 1-100 的整数");

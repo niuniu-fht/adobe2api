@@ -190,18 +190,27 @@ def gpt_image_model_id_from_size(size: Optional[dict[str, int]]) -> Optional[str
     return f"firefly-gpt-image-{output_resolution_from_size(size).lower()}-{suffix}"
 
 
-def build_native_gpt_image_options(data: dict) -> OpenAIImageGenerationOptions:
-    model_id = str(data.get("model") or "").strip()
+def build_native_gpt_image_options(
+    data: dict,
+    *,
+    model_id_override: Optional[str] = None,
+    response_model: Optional[str] = None,
+    upstream_model_version: Optional[str] = None,
+) -> OpenAIImageGenerationOptions:
+    model_id = str(model_id_override or data.get("model") or "").strip()
     if model_id not in OPENAI_GPT_IMAGE_MODEL_VERSIONS:
         raise OpenAIImageRequestError(f"Invalid model: {model_id}", "model")
 
     requested_size = parse_requested_size(data.get("size"))
     output_format = parse_output_format(data.get("output_format"))
+    model_version = str(
+        upstream_model_version or OPENAI_GPT_IMAGE_MODEL_VERSIONS[model_id]
+    )
     return OpenAIImageGenerationOptions(
         n=parse_image_count(data.get("n")),
         aspect_ratio=aspect_ratio_from_size(requested_size),
         output_resolution=output_resolution_from_size(requested_size),
-        response_model=model_id,
+        response_model=str(response_model or model_id).strip() or model_id,
         response_format=parse_response_format(
             data.get("response_format"),
             force_b64_json=False,
@@ -211,7 +220,7 @@ def build_native_gpt_image_options(data: dict) -> OpenAIImageGenerationOptions:
         requested_size=requested_size,
         is_native_gpt_image=True,
         upstream_model_id="gpt-image",
-        upstream_model_version=OPENAI_GPT_IMAGE_MODEL_VERSIONS[model_id],
+        upstream_model_version=model_version,
         resolved_model_id=gpt_image_model_id_from_size(requested_size),
     )
 

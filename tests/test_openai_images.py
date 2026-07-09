@@ -52,6 +52,33 @@ def test_native_gpt_image_size_can_map_to_internal_model_alias():
     )
 
 
+def test_custom_gpt_image_alias_can_keep_requested_model_id_and_quality():
+    options = build_native_gpt_image_options(
+        {
+            "model": "ignored-custom-id",
+            "prompt": "draw a dashboard",
+            "size": "1024x1024",
+        },
+        model_id_override="gpt-image-2",
+        response_model="gpt-image-2-high",
+    )
+
+    payload = build_image_payload_candidates(
+        prompt="draw a dashboard",
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.output_resolution,
+        upstream_model_id=options.upstream_model_id or "",
+        upstream_model_version=options.upstream_model_version or "",
+        quality_level="high",
+        requested_size=options.requested_size,
+    )[0]
+
+    assert options.response_model == "gpt-image-2-high"
+    assert payload["modelId"] == "gpt-image"
+    assert payload["modelVersion"] == "2"
+    assert payload["generationSettings"]["detailLevel"] == 5
+
+
 def test_gpt_image_rejects_sizes_above_upstream_limits():
     try:
         parse_requested_size("4096x4096")

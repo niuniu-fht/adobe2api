@@ -150,7 +150,17 @@
                 <option value="medium">medium</option>
                 <option value="high">high</option>
               </select>
-              <p class="help">仅作用于 GPT Image 模型。默认 low，后续 GPT 生图会自动带上该质量对应的参数。</p>
+              <p class="help">仅作用于 GPT Image 模型。gpt-image-2 默认使用这里的质量。</p>
+            </div>
+
+            <div class="form-group">
+              <label for="confGptImage2HighQuality">gpt-image-2-high 默认质量</label>
+              <select id="confGptImage2HighQuality" class="input-select">
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+              <p class="help">请求模型 ID 为 gpt-image-2-high 时使用此质量；实际仍调用上游 gpt-image / version 2。</p>
             </div>
           </section>
 

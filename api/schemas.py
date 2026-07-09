@@ -45,6 +45,7 @@ class ConfigUpdateRequest(BaseModel):
     generated_max_size_mb: Optional[int] = None
     generated_prune_size_mb: Optional[int] = None
     gpt_image_quality: Optional[str] = None
+    gpt_image_model_qualities: Optional[dict[str, str]] = None
 
 
 class RefreshCookieImportRequest(BaseModel):
