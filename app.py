@@ -395,6 +395,8 @@ def _append_attempt_log(
     status_code: int,
     error: Optional[str] = None,
     error_code: Optional[str] = None,
+    error_type: Optional[str] = None,
+    upstream_error_code: Optional[str] = None,
     task_status_override: Optional[str] = None,
 ) -> None:
     try:
@@ -435,6 +437,8 @@ def _append_attempt_log(
                 request_params=request_params,
                 error=(str(error)[:240] if error else None),
                 error_code=(str(error_code or "") or None),
+                error_type=(str(error_type or "") or None),
+                upstream_error_code=(str(upstream_error_code or "") or None),
                 task_status=task_status,
                 task_progress=task_progress,
                 upstream_job_id=upstream_job_id,
@@ -876,6 +880,8 @@ def _run_with_token_retries(
                 status_code=status_code,
                 error=detail,
                 error_code=err_code,
+                error_type=err_type,
+                upstream_error_code=str(getattr(exc, "upstream_code", "") or ""),
                 task_status_override="FAILED",
             )
             if str(getattr(exc, "error_type", "") or "") == "content_policy_violation":

@@ -273,6 +273,26 @@
             <div id="logsStatsFailCount" class="stat-value">-</div>
           </div>
         </div>
+        <div class="image-monitor">
+          <div class="image-monitor-title">生图请求监控（最近 1h / 6h / 24h）</div>
+          <div class="table-wrapper">
+            <table id="imageStatsTable" class="compact-table">
+              <thead>
+                <tr>
+                  <th>时间窗口</th>
+                  <th>请求数</th>
+                  <th>成功数</th>
+                  <th>失败数</th>
+                  <th>图片安全拦截</th>
+                  <th>成功率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="6" class="empty-state">加载中...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
         <p id="logStatsUpdatedAt" class="help" style="margin: 0 0 16px 0;"></p>
 
         <div class="table-wrapper">

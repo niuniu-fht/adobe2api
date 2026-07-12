@@ -79,6 +79,8 @@ class RequestLogRecord:
     request_params: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
+    error_type: Optional[str] = None
+    upstream_error_code: Optional[str] = None
     task_status: Optional[str] = None
     task_progress: Optional[float] = None
     upstream_job_id: Optional[str] = None
@@ -238,6 +240,123 @@ class RequestLogStore:
             "generated_total": generated_images + generated_videos,
             "in_progress_requests": in_progress_requests,
         }
+
+    @staticmethod
+    def _is_image_generation_request(item: dict) -> bool:
+        path = str(item.get("path") or "").strip().lower()
+        operation = str(item.get("operation") or "").strip().lower()
+        request_type = str(item.get("request_type") or "").strip().lower()
+        preview_kind = str(item.get("preview_kind") or "").strip().lower()
+        model = str(item.get("model") or "").strip().lower()
+
+        if preview_kind == "image":
+            return True
+        if path in {"/v1/images/generations", "/v1/images/edits"}:
+            return True
+        if operation in {"images.generations", "images.edits"}:
+            return True
+        if request_type in {"generation", "edits", "image", "images.generations", "images.edits"}:
+            return True
+
+        # /v1/chat/completions is used for both image and video generation.
+        # Treat non-video generation models as image requests when they go
+        # through the chat completion generation path.
+        if path == "/v1/chat/completions" or operation == "chat.completions":
+            video_prefixes = (
+                "firefly-sora",
+                "firefly-veo",
+                "firefly-kling",
+            )
+            return bool(model) and not model.startswith(video_prefixes)
+
+        return False
+
+    @staticmethod
+    def _is_successful_generation(item: dict) -> bool:
+        try:
+            status_code = int(item.get("status_code") or 0)
+        except Exception:
+            status_code = 0
+        task_status = str(item.get("task_status") or "").strip().upper()
+        if task_status in {"FAILED", "ERROR", "CANCELLED"}:
+            return False
+        return 200 <= status_code < 300
+
+    @staticmethod
+    def _is_image_unsafe_block(item: dict) -> bool:
+        fields = [
+            item.get("error"),
+            item.get("error_code"),
+            item.get("error_type"),
+            item.get("upstream_error_code"),
+        ]
+        text = " ".join(str(x or "") for x in fields).lower()
+        return "image_unsafe" in text or "content_policy_violation" in text
+
+    def image_generation_stats_windows(
+        self,
+        windows: Optional[dict[str, int]] = None,
+        now_ts: Optional[float] = None,
+    ) -> dict:
+        now = float(now_ts if now_ts is not None else time.time())
+        window_map = windows or {"1h": 3600, "6h": 21600, "24h": 86400}
+        stats = {
+            key: {
+                "seconds": int(seconds),
+                "request_count": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "image_unsafe_count": 0,
+                "success_rate": 0.0,
+            }
+            for key, seconds in window_map.items()
+        }
+
+        with self._lock:
+            with self._file_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        item = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    if not self._is_image_generation_request(item):
+                        continue
+
+                    try:
+                        ts_val = float(item.get("ts") or 0)
+                    except Exception:
+                        ts_val = 0.0
+                    if ts_val <= 0:
+                        continue
+
+                    age = now - ts_val
+                    if age < 0:
+                        age = 0
+                    is_success = self._is_successful_generation(item)
+                    is_unsafe = self._is_image_unsafe_block(item)
+
+                    for key, seconds in window_map.items():
+                        if age > float(seconds):
+                            continue
+                        row = stats[key]
+                        row["request_count"] += 1
+                        if is_success:
+                            row["success_count"] += 1
+                        else:
+                            row["failed_count"] += 1
+                        if is_unsafe:
+                            row["image_unsafe_count"] += 1
+
+        for row in stats.values():
+            total = int(row.get("request_count") or 0)
+            success = int(row.get("success_count") or 0)
+            row["success_rate"] = round((success * 100.0 / total), 2) if total else 0.0
+        return stats
 
     def clear(self) -> None:
         with self._lock:

@@ -442,6 +442,23 @@ button.small:hover {
   font-weight: 700;
 }
 
+.image-monitor {
+  margin: 12px 0 14px;
+}
+
+.image-monitor-title {
+  color: #e7f1fd;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.compact-table th,
+.compact-table td {
+  padding: 9px 10px;
+  white-space: nowrap;
+}
+
 .table-wrapper {
   overflow-x: auto;
 }

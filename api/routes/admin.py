@@ -170,6 +170,9 @@ def build_admin_router(
         range_key, start_ts, end_ts = _resolve_logs_stats_range(range)
         payload = log_store.stats(start_ts=start_ts, end_ts=end_ts)
         payload["in_progress_requests"] = live_log_store.count_in_progress()
+        payload["image_generation_windows"] = log_store.image_generation_stats_windows(
+            now_ts=end_ts
+        )
         payload.update({"range": range_key, "start_ts": start_ts, "end_ts": end_ts})
         return payload
 

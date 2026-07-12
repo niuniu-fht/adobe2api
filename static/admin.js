@@ -712,6 +712,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const logsStatsVideoCount = document.getElementById("logsStatsVideoCount");
   const logsStatsTotalCount = document.getElementById("logsStatsTotalCount");
   const logsStatsFailCount = document.getElementById("logsStatsFailCount");
+  const imageStatsTbody = document.querySelector("#imageStatsTable tbody");
   const logsPrevBtn = document.getElementById("logsPrevBtn");
   const logsNextBtn = document.getElementById("logsNextBtn");
   const logsPageInfo = document.getElementById("logsPageInfo");
@@ -1280,6 +1281,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (logsStatsVideoCount) logsStatsVideoCount.textContent = String(videoCount);
     if (logsStatsTotalCount) logsStatsTotalCount.textContent = String(totalCount);
     if (logsStatsFailCount) logsStatsFailCount.textContent = String(failCount);
+    renderImageGenerationStats(stats?.image_generation_windows || null);
 
     if (!logStatsUpdatedAt) return;
     if (!stats) {
@@ -1291,6 +1293,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     const endTs = Number(stats.end_ts || 0);
     const updatedText = endTs > 0 ? new Date(endTs * 1000).toLocaleString() : "-";
     logStatsUpdatedAt.textContent = `${selectedLabel}统计，更新于 ${updatedText}`;
+  }
+
+  function renderImageGenerationStats(windows) {
+    if (!imageStatsTbody) return;
+    const labels = [
+      ["1h", "最近 1 小时"],
+      ["6h", "最近 6 小时"],
+      ["24h", "最近 24 小时"],
+    ];
+    if (!windows || typeof windows !== "object") {
+      imageStatsTbody.innerHTML = `<tr><td colspan="6" class="empty-state">统计信息暂不可用</td></tr>`;
+      return;
+    }
+    imageStatsTbody.innerHTML = labels
+      .map(([key, label]) => {
+        const row = windows[key] || {};
+        const requestCount = Number(row.request_count || 0);
+        const successCount = Number(row.success_count || 0);
+        const failedCount = Number(row.failed_count || 0);
+        const unsafeCount = Number(row.image_unsafe_count || 0);
+        const successRate = Number(row.success_rate || 0);
+        return `
+          <tr>
+            <td>${escapeHtml(label)}</td>
+            <td>${requestCount}</td>
+            <td>${successCount}</td>
+            <td>${failedCount}</td>
+            <td>${unsafeCount}</td>
+            <td>${successRate.toFixed(2)}%</td>
+          </tr>
+        `;
+      })
+      .join("");
   }
 
   function renderLogsPagination() {
