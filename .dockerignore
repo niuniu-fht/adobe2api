@@ -1,0 +1,21 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+
+# Runtime/persistent data is mounted by docker-compose and should not be sent
+# as build context.
+data
+static/generated
+config/*.json
+!config/*.example.json
+
+# Local/editor/temp files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
