@@ -288,6 +288,24 @@ def build_generation_router(
             error_payload["param"] = exc.param
         return JSONResponse(status_code=400, content={"error": error_payload})
 
+    def _openai_http_exception_response(exc: HTTPException) -> JSONResponse | None:
+        detail = exc.detail
+        if not isinstance(detail, dict):
+            return None
+        status_code = int(exc.status_code or 500)
+        if isinstance(detail.get("error"), dict):
+            error_payload = dict(detail["error"])
+        else:
+            error_payload = dict(detail)
+        error_payload["message"] = str(
+            error_payload.get("message") or "Request failed"
+        )
+        error_payload.setdefault(
+            "type",
+            "invalid_request_error" if 400 <= status_code < 500 else "server_error",
+        )
+        return JSONResponse(status_code=status_code, content={"error": error_payload})
+
     def _validate_openai_edit_content_length(request: Request) -> None:
         raw_content_length = str(request.headers.get("content-length") or "").strip()
         if not raw_content_length:
@@ -839,6 +857,29 @@ def build_generation_router(
                     }
                 },
             )
+        except HTTPException as exc:
+            passthrough = _openai_http_exception_response(exc)
+            if passthrough is not None:
+                return passthrough
+            status_code = int(exc.status_code or 500)
+            err_type = (
+                "invalid_request_error" if 400 <= status_code < 500 else "server_error"
+            )
+            set_request_task_progress(
+                request,
+                task_status="FAILED",
+                task_progress=0.0,
+                error=str(exc.detail),
+            )
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "error": {
+                        "message": str(exc.detail),
+                        "type": err_type,
+                    }
+                },
+            )
         except Exception as exc:
             logger.exception("Unhandled error in /v1/images/generations")
             error_code = str(
@@ -873,6 +914,9 @@ def build_generation_router(
         try:
             data, input_images = await _parse_openai_edit_request(request)
         except HTTPException as exc:
+            passthrough = _openai_http_exception_response(exc)
+            if passthrough is not None:
+                return passthrough
             return JSONResponse(
                 status_code=exc.status_code,
                 content={
@@ -1060,6 +1104,29 @@ def build_generation_router(
                         "message": str(exc),
                         "type": "server_error",
                         "code": error_code,
+                    }
+                },
+            )
+        except HTTPException as exc:
+            passthrough = _openai_http_exception_response(exc)
+            if passthrough is not None:
+                return passthrough
+            status_code = int(exc.status_code or 500)
+            err_type = (
+                "invalid_request_error" if 400 <= status_code < 500 else "server_error"
+            )
+            set_request_task_progress(
+                request,
+                task_status="FAILED",
+                task_progress=0.0,
+                error=str(exc.detail),
+            )
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "error": {
+                        "message": str(exc.detail),
+                        "type": err_type,
                     }
                 },
             )
@@ -1556,6 +1623,9 @@ def build_generation_router(
                 },
             )
         except HTTPException as exc:
+            passthrough = _openai_http_exception_response(exc)
+            if passthrough is not None:
+                return passthrough
             err_type = (
                 "invalid_request_error"
                 if 400 <= int(exc.status_code) < 500

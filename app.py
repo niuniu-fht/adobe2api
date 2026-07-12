@@ -878,6 +878,19 @@ def _run_with_token_retries(
                 error_code=err_code,
                 task_status_override="FAILED",
             )
+            if str(getattr(exc, "error_type", "") or "") == "content_policy_violation":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": detail,
+                        "type": "invalid_request_error",
+                        "param": str(getattr(exc, "param", "") or "prompt"),
+                        "code": "content_policy_violation",
+                        "upstream_code": str(
+                            getattr(exc, "upstream_code", "") or "image_unsafe"
+                        ),
+                    },
+                )
             raise HTTPException(status_code=status_code, detail=detail)
         except HTTPException as exc:
             err_code = report_error(

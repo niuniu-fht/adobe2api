@@ -116,6 +116,25 @@ class AuthError(AdobeRequestError):
     pass
 
 
+class ContentPolicyError(AdobeRequestError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        upstream_code: str = "",
+        param: str = "prompt",
+    ):
+        super().__init__(
+            message,
+            status_code=400,
+            error_type="content_policy_violation",
+            user_message=message,
+        )
+        self.error_code = "content_policy_violation"
+        self.upstream_code = str(upstream_code or "").strip()
+        self.param = str(param or "").strip() or "prompt"
+
+
 class UpstreamTemporaryError(AdobeRequestError):
     def __init__(
         self,
@@ -713,6 +732,22 @@ class AdobeClient:
             return resp.json()
         except Exception:
             return {}
+
+    @staticmethod
+    def _raise_if_image_unsafe(resp, *, param: str = "prompt") -> None:
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            return
+        upstream_code = str(data.get("error_code") or data.get("code") or "").strip()
+        if upstream_code != "image_unsafe":
+            return
+        message = str(data.get("message") or "").strip() or (
+            "The generated images appear to be unsafe. Try modifying the prompts or the seeds."
+        )
+        raise ContentPolicyError(message, upstream_code=upstream_code, param=param)
 
     @staticmethod
     def _entity_urn_from_data(data: Any) -> str:
@@ -1562,6 +1597,7 @@ class AdobeClient:
                 submit_resp.status_code,
                 submit_resp.text[:500],
             )
+            self._raise_if_image_unsafe(submit_resp, param="prompt")
             if submit_resp.status_code in (429, 451) or submit_resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"submit failed: {submit_resp.status_code} {submit_resp.text[:300]}",
@@ -1609,6 +1645,7 @@ class AdobeClient:
                     poll_resp.status_code,
                     poll_resp.text[:500],
                 )
+                self._raise_if_image_unsafe(poll_resp, param="prompt")
                 if poll_resp.status_code in (429, 451) or poll_resp.status_code >= 500:
                     raise UpstreamTemporaryError(
                         f"poll failed: {poll_resp.status_code} {poll_resp.text[:300]}",
