@@ -25,6 +25,9 @@ MAX_IMAGE_COUNT = 10
 MAX_GPT_IMAGE_LONG_EDGE = 3840
 MAX_GPT_IMAGE_PIXELS = 8_294_400
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
+DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP = {
+    "16:9": {"width": 2560, "height": 1440},
+}
 
 
 class OpenAIImageRequestError(ValueError):
@@ -131,6 +134,8 @@ def parse_requested_size(raw_size: object) -> Optional[dict[str, int]]:
     size = str(raw_size or "").strip().lower()
     if not size or size == "auto":
         return None
+    if size in DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP:
+        return dict(DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP[size])
     match = SIZE_RE.match(size)
     if not match:
         raise OpenAIImageRequestError(

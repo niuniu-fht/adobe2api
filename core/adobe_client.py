@@ -744,9 +744,13 @@ class AdobeClient:
         upstream_code = str(data.get("error_code") or data.get("code") or "").strip()
         if upstream_code != "image_unsafe":
             return
-        message = str(data.get("message") or "").strip() or (
-            "The generated images appear to be unsafe. Try modifying the prompts or the seeds."
-        )
+        message = str(data.get("message") or "").strip()
+        if (
+            not message
+            or message
+            == "The generated images appear to be unsafe. Try modifying the prompts or the seeds."
+        ):
+            message = "生成的图片可能不安全，请修改提示词或更换随机种子后重试。"
         raise ContentPolicyError(message, upstream_code=upstream_code, param=param)
 
     @staticmethod

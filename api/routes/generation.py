@@ -1274,6 +1274,16 @@ def build_generation_router(
     def chat_completions(data: dict, request: Request):
         require_service_api_key(request)
 
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": "不支持该方式调用，请使用 /v1/images/generations 进行图片生成；图片编辑请使用 /v1/images/edits。",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+
         prompt = extract_prompt_from_messages(data.get("messages") or [])
         if not prompt:
             prompt = str(data.get("prompt") or "").strip()
