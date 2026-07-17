@@ -2,6 +2,7 @@ fastapi==0.109.2
 uvicorn==0.27.1
 pydantic==2.6.1
 requests==2.31.0
+PySocks==1.7.1
 curl_cffi==0.7.4
 itsdangerous==2.2.0
 Pillow==10.4.0
