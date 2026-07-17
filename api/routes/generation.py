@@ -306,6 +306,8 @@ def build_generation_router(
         )
         return JSONResponse(status_code=status_code, content={"error": error_payload})
 
+    max_openai_edit_image_bytes = 30 * 1024 * 1024
+
     def _validate_openai_edit_content_length(request: Request) -> None:
         raw_content_length = str(request.headers.get("content-length") or "").strip()
         if not raw_content_length:
@@ -376,8 +378,8 @@ def build_generation_router(
 
         if not image_bytes:
             raise HTTPException(status_code=400, detail="image is empty")
-        if len(image_bytes) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="image too large, max 10MB")
+        if len(image_bytes) > max_openai_edit_image_bytes:
+            raise HTTPException(status_code=400, detail="image too large, max 30MB")
         return image_bytes, _normalize_edit_image_mime(mime_type)
 
     def _load_edit_image_value(raw_value: Any) -> tuple[bytes, str]:
@@ -447,10 +449,10 @@ def build_generation_router(
                 mime_type = getattr(value, "content_type", None) or "image/jpeg"
                 if not image_bytes:
                     raise HTTPException(status_code=400, detail="image is empty")
-                if len(image_bytes) > 10 * 1024 * 1024:
+                if len(image_bytes) > max_openai_edit_image_bytes:
                     raise HTTPException(
                         status_code=400,
-                        detail="image too large, max 10MB",
+                        detail="image too large, max 30MB",
                     )
                 input_images.append(
                     (image_bytes, _normalize_edit_image_mime(str(mime_type)))
