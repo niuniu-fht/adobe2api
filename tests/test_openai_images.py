@@ -1,5 +1,8 @@
 import base64
 
+import pytest
+from fastapi import HTTPException
+
 from core.models.openai_images import (
     OpenAIImageRequestError,
     build_native_gpt_image_options,
@@ -195,6 +198,54 @@ def test_gpt_image_unsafe_retries_with_new_seeds(monkeypatch):
     assert image_bytes == b"image"
     assert meta["status"] == "succeeded"
     assert attempted_seeds == [101, 202, 303]
+
+
+def test_content_policy_error_keeps_plain_http_detail(monkeypatch):
+    import app
+
+    class TokenManagerStub:
+        def get_available(self, strategy=None):
+            return "TOKEN"
+
+        def get_meta_by_value(self, token):
+            return {}
+
+    class ClientStub:
+        retry_enabled = False
+        retry_max_attempts = 1
+        token_rotation_strategy = "round_robin"
+
+    class RequestState:
+        log_id = "LOG_ID"
+
+    class RequestStub:
+        method = "POST"
+        url = type("Url", (), {"path": "/v1/images/generations"})()
+        state = RequestState()
+
+    monkeypatch.setattr(app, "token_manager", TokenManagerStub())
+    monkeypatch.setattr(app, "client", ClientStub())
+    monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
+
+    def raise_content_policy(_token):
+        raise ContentPolicyError(
+            "生成的图片可能不安全，请修改提示词或更换随机种子后重试。",
+            upstream_code="image_unsafe",
+        )
+
+    with pytest.raises(HTTPException) as error_info:
+        app._run_with_token_retries(
+            request=RequestStub(),
+            operation_name="images.generations",
+            run_once=raise_content_policy,
+            set_request_error_detail=lambda *args, **kwargs: "ERR-CODE",
+        )
+
+    assert error_info.value.status_code == 400
+    assert error_info.value.detail == (
+        "生成的图片可能不安全，请修改提示词或更换随机种子后重试。"
+    )
+    assert isinstance(error_info.value.detail, str)
 
 
 def test_openai_prefixed_gemini_model_is_normalized():
