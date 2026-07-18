@@ -244,6 +244,18 @@
         <div class="list-head">
           <h2>请求日志</h2>
           <div class="actions">
+            <input
+              id="logPromptSearch"
+              class="log-search-input"
+              type="search"
+              placeholder="搜索提示词"
+              aria-label="搜索提示词"
+              autocomplete="off"
+            />
+            <label class="log-error-filter" for="logErrorsOnly">
+              <input id="logErrorsOnly" type="checkbox" />
+              仅错误请求
+            </label>
             <label for="logStatsRange" class="help">统计范围</label>
             <select id="logStatsRange" class="input-select" aria-label="日志统计范围">
               <option value="today">今日</option>
@@ -254,7 +266,7 @@
             <button id="clearLogsBtn" class="danger">清空日志</button>
           </div>
         </div>
-        <p class="help" style="margin-bottom: 16px;">仅展示外部 OpenAI 风格请求日志。失败状态中的状态码可点击查看错误信息。</p>
+        <p class="help" style="margin-bottom: 16px;">支持按提示词摘要搜索及过滤错误请求。失败状态中的状态码可点击查看错误信息。</p>
         <div class="stats-grid" id="logsStatsGrid">
           <div class="stat-card">
             <div class="stat-label">图片生成数</div>

@@ -415,6 +415,40 @@ button.small:hover {
   border-color: var(--brand);
 }
 
+.log-search-input {
+  width: 220px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
+}
+
+.log-search-input:focus {
+  outline: none;
+  border-color: var(--brand);
+}
+
+.log-search-input::placeholder {
+  color: var(--muted);
+}
+
+.log-error-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.log-error-filter input {
+  accent-color: var(--danger);
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -507,10 +541,6 @@ table {
 #logsTable td:nth-child(7),
 #runningLogsTable th:nth-child(7),
 #runningLogsTable td:nth-child(7),
-#logsTable th:nth-child(8),
-#logsTable td:nth-child(8),
-#runningLogsTable th:nth-child(8),
-#runningLogsTable td:nth-child(8),
 #logsTable th:nth-child(12),
 #logsTable td:nth-child(12),
 #runningLogsTable th:nth-child(12),
@@ -538,7 +568,19 @@ table {
 #logsTable td:nth-child(6),
 #runningLogsTable th:nth-child(6),
 #runningLogsTable td:nth-child(6) {
-  width: 130px;
+  min-width: 240px;
+  width: 240px;
+}
+
+#logsTable th:nth-child(8),
+#logsTable td:nth-child(8),
+#runningLogsTable th:nth-child(8),
+#runningLogsTable td:nth-child(8) {
+  width: 72px;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #logsTable th:nth-child(9),
@@ -985,6 +1027,10 @@ td input[type="checkbox"] {
     gap: 10px;
   }
 
+  .log-search-input {
+    flex: 1 1 220px;
+  }
+
   .token-list-actions {
     width: 100%;
     align-items: flex-start;
@@ -1011,5 +1057,10 @@ td input[type="checkbox"] {
 
   .input-select {
     width: 100%;
+  }
+
+  .log-search-input {
+    width: 100%;
+    flex-basis: 100%;
   }
 }

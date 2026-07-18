@@ -25,6 +25,16 @@ from core.models.openai_images import (
     image_generation_batch_sizes,
     is_native_gpt_image_model,
 )
+from core.models.gemini import (
+    GEMINI_IMAGE_MODELS,
+    GEMINI_MODEL_ALIASES,
+    GeminiRequestError,
+    build_gemini_generate_response,
+    gemini_model_resource,
+    gemini_model_resources,
+    normalize_gemini_model_id,
+    parse_gemini_generate_request,
+)
 from core.models.payloads import gpt_image_pixels_from_ratio, size_from_ratio
 
 
@@ -278,7 +288,70 @@ def build_generation_router(
                     "description": f"Custom OpenAI Images alias for gpt-image-2 ({quality})",
                 }
             )
+        compatible_models = {
+            **{
+                model_id: conf["description"]
+                for model_id, conf in GEMINI_IMAGE_MODELS.items()
+            },
+            **{
+                alias: GEMINI_IMAGE_MODELS[canonical_id]["description"]
+                for alias, canonical_id in GEMINI_MODEL_ALIASES.items()
+            },
+        }
+        existing_ids = {item["id"] for item in data}
+        for model_id, description in compatible_models.items():
+            if model_id in existing_ids:
+                continue
+            data.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "owned_by": "google",
+                    "description": description,
+                }
+            )
         return {"object": "list", "data": data}
+
+    @router.get("/v1beta/models")
+    def list_gemini_models(request: Request, pageSize: int | None = None):
+        require_service_api_key(request)
+        models = gemini_model_resources()
+        if pageSize is not None:
+            models = models[: max(1, min(int(pageSize), 1000))]
+        return {"models": models}
+
+    @router.get("/v1beta/models/{model_id}")
+    def get_gemini_model(model_id: str, request: Request):
+        require_service_api_key(request)
+        resource = gemini_model_resource(model_id)
+        if resource is None:
+            return _gemini_error_response(404, f"model not found: {model_id}")
+        return resource
+
+    def _gemini_error_status(status_code: int) -> str:
+        return {
+            400: "INVALID_ARGUMENT",
+            401: "UNAUTHENTICATED",
+            403: "PERMISSION_DENIED",
+            404: "NOT_FOUND",
+            429: "RESOURCE_EXHAUSTED",
+            500: "INTERNAL",
+            502: "UNAVAILABLE",
+            503: "UNAVAILABLE",
+            504: "DEADLINE_EXCEEDED",
+        }.get(int(status_code), "UNKNOWN")
+
+    def _gemini_error_response(status_code: int, message: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "error": {
+                    "code": status_code,
+                    "message": str(message),
+                    "status": _gemini_error_status(status_code),
+                }
+            },
+        )
 
     def _openai_image_error_response(exc: OpenAIImageRequestError) -> JSONResponse:
         error_payload = {
@@ -769,6 +842,131 @@ def build_generation_router(
             )
         except Exception:
             pass
+
+    def _gemini_generate_content_impl(
+        model_id: str,
+        data: dict,
+        request: Request,
+    ):
+        require_service_api_key(request)
+        try:
+            gemini_options = parse_gemini_generate_request(data, model_id)
+            if gemini_options.aspect_ratio not in supported_ratios:
+                raise GeminiRequestError(
+                    f"unsupported imageConfig.aspectRatio: {gemini_options.aspect_ratio}"
+                )
+            family_prefix = GEMINI_IMAGE_MODELS[
+                gemini_options.canonical_model_id
+            ]["family_prefix"]
+            model_conf = next(
+                (
+                    conf
+                    for candidate_id, conf in model_catalog.items()
+                    if candidate_id.startswith(f"{family_prefix}-")
+                ),
+                None,
+            )
+            if model_conf is None:
+                raise GeminiRequestError(f"model not found: {model_id}")
+            image_options = build_legacy_image_options(
+                {
+                    "n": gemini_options.candidate_count,
+                    "response_format": "b64_json",
+                    "output_format": "png",
+                },
+                ratio=gemini_options.aspect_ratio,
+                output_resolution=gemini_options.image_size,
+                resolved_model_id=gemini_options.canonical_model_id,
+            )
+        except GeminiRequestError as exc:
+            return _gemini_error_response(400, str(exc))
+        except OpenAIImageRequestError as exc:
+            return _gemini_error_response(400, str(exc))
+
+        _set_image_log_context(
+            request,
+            data={
+                "model": gemini_options.canonical_model_id,
+                "n": gemini_options.candidate_count,
+                "aspect_ratio": gemini_options.aspect_ratio,
+                "output_resolution": gemini_options.image_size,
+            },
+            prompt=gemini_options.prompt,
+            image_options=image_options,
+            request_type="gemini.generateContent",
+            input_image_count=len(gemini_options.input_images),
+        )
+
+        try:
+            set_request_task_progress(
+                request, task_status="IN_PROGRESS", task_progress=0.0
+            )
+
+            def _run_once(token: str):
+                source_image_ids = _upload_edit_source_images(
+                    token, gemini_options.input_images
+                )
+                response_items = _generate_openai_image_items(
+                    request=request,
+                    token=token,
+                    prompt=gemini_options.prompt,
+                    image_options=image_options,
+                    model_conf=model_conf,
+                    source_image_ids=source_image_ids,
+                )
+                return build_gemini_generate_response(
+                    model_id=gemini_options.canonical_model_id,
+                    images_base64=[item["b64_json"] for item in response_items],
+                    response_id=uuid.uuid4().hex,
+                )
+
+            return run_with_token_retries(
+                request=request,
+                operation_name="models.generateContent",
+                run_once=_run_once,
+            )
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = detail.get("message") or str(detail)
+            return _gemini_error_response(int(exc.status_code or 500), str(detail))
+        except quota_error_cls:
+            return _gemini_error_response(429, "Token quota exhausted")
+        except auth_error_cls:
+            return _gemini_error_response(401, "Token invalid or expired")
+        except upstream_temp_error_cls as exc:
+            return _gemini_error_response(
+                int(getattr(exc, "status_code", 503) or 503), str(exc)
+            )
+        except Exception as exc:
+            logger.exception(
+                "Unhandled error in Gemini generateContent model=%s", model_id
+            )
+            set_request_error_detail(
+                request,
+                error=exc,
+                status_code=500,
+                error_type="server_error",
+                include_traceback=True,
+            )
+            return _gemini_error_response(500, str(exc))
+
+    @router.post("/v1beta/models/{model_id}:generateContent")
+    def gemini_generate_content(model_id: str, data: dict, request: Request):
+        return _gemini_generate_content_impl(model_id, data, request)
+
+    @router.post("/v1beta/models/{model_id}:streamGenerateContent")
+    def gemini_stream_generate_content(model_id: str, data: dict, request: Request):
+        response = _gemini_generate_content_impl(model_id, data, request)
+        if isinstance(response, JSONResponse):
+            return response
+
+        def _stream():
+            import json
+
+            yield f"data: {json.dumps(response, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
 
     @router.post("/v1/images/generations")
     def openai_generate(data: dict, request: Request):
@@ -1377,7 +1575,7 @@ def build_generation_router(
             status_code=400,
             content={
                 "error": {
-                    "message": "不支持该方式调用，请使用 /v1/images/generations 进行图片生成；图片编辑请使用 /v1/images/edits。",
+                    "message": "This endpoint is disabled. Use /v1/images/generations for image generation or /v1/images/edits for image editing.",
                     "type": "invalid_request_error",
                 }
             },

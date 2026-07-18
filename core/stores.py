@@ -144,41 +144,67 @@ class RequestLogStore:
         with self._lock:
             self._append_payload_locked(item)
 
-    def list(self, limit: int = 20, page: int = 1) -> tuple[list[dict], int]:
+    @staticmethod
+    def matches_filters(
+        item: dict,
+        *,
+        prompt: str = "",
+        errors_only: bool = False,
+    ) -> bool:
+        prompt_query = str(prompt or "").strip().casefold()
+        if prompt_query:
+            prompt_preview = str(item.get("prompt_preview") or "").casefold()
+            if prompt_query not in prompt_preview:
+                return False
+        if errors_only:
+            try:
+                status_code = int(item.get("status_code") or 0)
+            except (TypeError, ValueError):
+                status_code = 0
+            task_status = str(item.get("task_status") or "").strip().upper()
+            if status_code < 400 and task_status != "FAILED":
+                return False
+        return True
+
+    def list(
+        self,
+        limit: int = 20,
+        page: int = 1,
+        *,
+        prompt: str = "",
+        errors_only: bool = False,
+    ) -> tuple[list[dict], int]:
         safe_limit = min(max(int(limit or 20), 1), 100)
         safe_page = max(int(page or 1), 1)
-        window_size = safe_limit * safe_page
-        tail: deque[str] = deque(maxlen=window_size)
-        total = 0
+        matching_items: list[dict] = []
         with self._lock:
             with self._file_path.open("r", encoding="utf-8") as f:
                 for line in f:
-                    total += 1
-                    tail.append(line)
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        item = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    if self.matches_filters(
+                        item,
+                        prompt=prompt,
+                        errors_only=errors_only,
+                    ):
+                        matching_items.append(item)
+
+        total = len(matching_items)
         if total <= 0:
             return [], 0
-
-        tail_lines = list(tail)
-        available = len(tail_lines)
         start_from_end = (safe_page - 1) * safe_limit
-        if start_from_end >= available:
+        if start_from_end >= total:
             return [], total
-
-        end_idx = available - start_from_end
+        end_idx = total - start_from_end
         start_idx = max(0, end_idx - safe_limit)
-        selected = tail_lines[start_idx:end_idx]
-        data: list[dict] = []
-        for line in reversed(selected):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                item = json.loads(line)
-                if isinstance(item, dict):
-                    data.append(item)
-            except Exception:
-                continue
-        return data, total
+        return list(reversed(matching_items[start_idx:end_idx])), total
 
     def stats(
         self,

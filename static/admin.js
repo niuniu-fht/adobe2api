@@ -706,6 +706,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const logsTbody = document.querySelector("#logsTable tbody");
   const refreshLogsBtn = document.getElementById("refreshLogsBtn");
   const clearLogsBtn = document.getElementById("clearLogsBtn");
+  const logPromptSearch = document.getElementById("logPromptSearch");
+  const logErrorsOnly = document.getElementById("logErrorsOnly");
   const logStatsRange = document.getElementById("logStatsRange");
   const logStatsUpdatedAt = document.getElementById("logStatsUpdatedAt");
   const logsStatsImageCount = document.getElementById("logsStatsImageCount");
@@ -729,6 +731,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let logsCurrentPage = 1;
   let logsTotalPages = 1;
   let logsRunningTotal = 0;
+  let logsSearchTimer = null;
 
   function switchConfigPane(targetId) {
     if (!targetId) return;
@@ -1234,9 +1237,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!logsTbody) return;
     try {
       const rangeValue = logStatsRange ? String(logStatsRange.value || "today") : "today";
+      const promptQuery = logPromptSearch ? String(logPromptSearch.value || "").trim() : "";
+      const errorsOnly = Boolean(logErrorsOnly && logErrorsOnly.checked);
+      const filterParams = new URLSearchParams();
+      if (promptQuery) filterParams.set("prompt", promptQuery);
+      if (errorsOnly) filterParams.set("errors_only", "true");
+      const filterQuery = filterParams.toString();
+      const filterSuffix = filterQuery ? `&${filterQuery}` : "";
       const [runningResult, logsResult, statsResult] = await Promise.allSettled([
-        fetch("/api/v1/logs/running?limit=200"),
-        fetch(`/api/v1/logs?limit=${LOGS_PAGE_SIZE}&page=${logsCurrentPage}`),
+        fetch(`/api/v1/logs/running?limit=200${filterSuffix}`),
+        fetch(`/api/v1/logs?limit=${LOGS_PAGE_SIZE}&page=${logsCurrentPage}${filterSuffix}`),
         fetch(`/api/v1/logs/stats?range=${encodeURIComponent(rangeValue)}`),
       ]);
 
@@ -1624,6 +1634,24 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (refreshLogsBtn) {
     refreshLogsBtn.addEventListener("click", () => {
+      logsCurrentPage = 1;
+      loadLogs();
+    });
+  }
+
+  if (logPromptSearch) {
+    logPromptSearch.addEventListener("input", () => {
+      if (logsSearchTimer) clearTimeout(logsSearchTimer);
+      logsSearchTimer = setTimeout(() => {
+        logsSearchTimer = null;
+        logsCurrentPage = 1;
+        loadLogs();
+      }, 300);
+    });
+  }
+
+  if (logErrorsOnly) {
+    logErrorsOnly.addEventListener("change", () => {
       logsCurrentPage = 1;
       loadLogs();
     });

@@ -15,8 +15,8 @@ English README: `README_EN.md`
 
 当前设计：
 
-- 对外统一入口：`/v1/chat/completions`（图像 + 视频）
 - 可选图像专用接口：`/v1/images/generations`
+- Gemini 原生兼容：`/v1beta/models`、`/v1beta/models/{model}:generateContent`
 - Token 池管理（手动 Token + 自动刷新 Token）
 - 管理后台 Web UI：Token / 配置 / 日志 / 刷新配置导入
 
@@ -69,6 +69,8 @@ docker compose up -d --build
 - `firefly-nano-banana-*`（图像，对应上游 `nano-banana-2`）
 - `firefly-nano-banana2-*`（图像，对应上游 `nano-banana-3`）
 - `firefly-nano-banana-pro-*`（图像）
+- `gemini-3.1-flash-image` / `nano-banana-2`（Nano Banana 2 兼容别名）
+- `gemini-3-pro-image` / `nano-banana-pro`（Nano Banana Pro 兼容别名）
 - `firefly-gpt-image-*`（图像，对应上游 `gpt-image:2`）
 - `firefly-sora2-*`（视频）
 - `firefly-sora2-pro-*`（视频）
@@ -226,82 +228,20 @@ Kling O3 视频模型：
 
 ### 3.1 获取模型列表
 
+OpenAI 格式：
+
 ```bash
 curl -X GET "http://127.0.0.1:6001/v1/models" \
   -H "Authorization: Bearer <service_api_key>"
 ```
 
-### 3.2 统一入口：`/v1/chat/completions`
-
-文生图：
+Gemini 格式：
 
 ```bash
-curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
-  -H "Authorization: Bearer <service_api_key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "firefly-nano-banana-pro-2k-16x9",
-    "messages": [{"role":"user","content":"a cinematic mountain sunrise"}]
-  }'
+curl -X GET "http://127.0.0.1:6001/v1beta/models?key=<service_api_key>"
 ```
 
-图生图（在最新 user 消息中传入图片）：
-
-```bash
-curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
-  -H "Authorization: Bearer <service_api_key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "firefly-nano-banana-pro-2k-16x9",
-    "messages": [{
-      "role":"user",
-      "content":[
-        {"type":"text","text":"turn this photo into watercolor style"},
-        {"type":"image_url","image_url":{"url":"https://example.com/input.jpg"}}
-      ]
-    }]
-  }'
-```
-
-文生视频：
-
-```bash
-curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
-  -H "Authorization: Bearer <service_api_key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "firefly-sora2-4s-16x9",
-    "messages": [{"role":"user","content":"a drone shot over snowy forest"}]
-  }'
-```
-
-Veo31 单图语义说明：
-
-- `firefly-veo31-*` / `firefly-veo31-fast-*`：帧模式
-  - 1 张图 => 首帧
-  - 2 张图 => 首帧 + 尾帧
-- `firefly-veo31-ref-*`：参考图模式
-  - 1~3 张图 => 参考图
-
-图生视频：
-
-```bash
-curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
-  -H "Authorization: Bearer <service_api_key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "firefly-sora2-8s-9x16",
-    "messages": [{
-      "role":"user",
-      "content":[
-        {"type":"text","text":"animate this character walking forward"},
-        {"type":"image_url","image_url":{"url":"https://example.com/character.png"}}
-      ]
-    }]
-  }'
-```
-
-### 3.3 实体创建与可灵引用
+### 3.2 实体创建与可灵引用
 
 实体用于 Kling O3 中保持角色或物体一致。实体绑定到创建它的 Adobe 账号，服务会自动获取该账号的 Creative Cloud 仓库，不需要也不支持手动配置 `repo_urn`。
 
@@ -342,21 +282,6 @@ curl -X GET "http://127.0.0.1:6001/v1/entities?sync=true" \
   -H "Authorization: Bearer <service_api_key>"
 ```
 
-在 Kling O3 中引用实体：
-
-```bash
-curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
-  -H "Authorization: Bearer <service_api_key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "firefly-kling-o3-5s-16x9",
-    "messages": [{
-      "role": "user",
-      "content": "A cinematic shot of @entity:PinkWarrior walking through a neon city."
-    }]
-  }'
-```
-
 注意事项：
 
 - 实体按 Adobe 账号绑定，不按 token 值绑定；token 自动刷新后仍可继续使用同一账号创建的实体
@@ -364,7 +289,7 @@ curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
 - 一个 prompt 中引用的多个实体必须属于同一个 Adobe 账号
 - 如果多个账号存在同名实体，服务会返回歧义错误，请使用唯一实体名
 
-### 3.4 图像接口：`/v1/images/generations`
+### 3.3 图像接口：`/v1/images/generations`
 
 ```bash
 curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
@@ -375,6 +300,28 @@ curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
     "prompt": "futuristic city skyline at dusk"
   }'
 ```
+
+也可以直接使用简洁别名：`nano-banana-2`、`nano-banana-pro`。
+
+### 3.4 Gemini 原生接口：`generateContent`
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1beta/models/gemini-3.1-flash-image:generateContent?key=<service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{
+      "role": "user",
+      "parts": [{"text": "futuristic city skyline at dusk"}]
+    }],
+    "generationConfig": {
+      "candidateCount": 1,
+      "responseModalities": ["IMAGE"],
+      "imageConfig": {"aspectRatio": "16:9", "imageSize": "2K"}
+    }
+  }'
+```
+
+支持 `gemini-3.1-flash-image`（Nano Banana 2）和 `gemini-3-pro-image`（Nano Banana Pro）。图生图可在 `parts` 中传入 Gemini 标准的 `inlineData`：`{"inlineData":{"mimeType":"image/png","data":"<base64>"}}`。返回图片位于 `candidates[].content.parts[].inlineData`。
 
 ## 4）Cookie 导入
 

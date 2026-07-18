@@ -5,11 +5,57 @@ from typing import Optional
 from fastapi import HTTPException
 
 from .catalog import DEFAULT_MODEL_ID, MODEL_CATALOG, SUPPORTED_RATIOS
+from .gemini import GEMINI_IMAGE_MODELS, normalize_gemini_model_id
+
+
+def _compatible_model_resolution(data: dict) -> str:
+    explicit = str(
+        data.get("output_resolution") or data.get("image_size") or ""
+    ).strip().upper()
+    if explicit in {"1K", "2K", "4K"}:
+        return explicit
+    quality = str(data.get("quality") or "").strip().lower()
+    if quality in {"4k", "ultra", "high"}:
+        return "4K"
+    if quality in {"1k", "standard", "low"}:
+        return "1K"
+    return "2K"
+
+
+def _resolve_compatible_model_id(
+    model_id: str,
+    *,
+    aspect_ratio: str,
+    output_resolution: str,
+) -> str | None:
+    canonical_model_id = normalize_gemini_model_id(model_id)
+    if canonical_model_id is None:
+        return None
+    family_prefix = GEMINI_IMAGE_MODELS[canonical_model_id]["family_prefix"]
+    for candidate_id, config in MODEL_CATALOG.items():
+        if not candidate_id.startswith(f"{family_prefix}-"):
+            continue
+        if str(config.get("aspect_ratio") or "") != aspect_ratio:
+            continue
+        if str(config.get("output_resolution") or "").upper() != output_resolution:
+            continue
+        return candidate_id
+    for candidate_id in MODEL_CATALOG:
+        if candidate_id.startswith(f"{family_prefix}-"):
+            return candidate_id
+    return None
 
 
 def resolve_model(model_id: Optional[str]) -> dict:
     if not model_id:
         return MODEL_CATALOG[DEFAULT_MODEL_ID]
+    compatible_model_id = _resolve_compatible_model_id(
+        model_id,
+        aspect_ratio="1:1",
+        output_resolution="2K",
+    )
+    if compatible_model_id:
+        return MODEL_CATALOG[compatible_model_id]
     if model_id not in MODEL_CATALOG:
         raise HTTPException(status_code=400, detail=f"Invalid model: {model_id}")
     return MODEL_CATALOG[model_id]
@@ -38,6 +84,20 @@ def resolve_ratio_and_resolution(
     )
     if ratio not in SUPPORTED_RATIOS:
         ratio = "1:1"
+
+    if model_id and normalize_gemini_model_id(model_id):
+        output_resolution = _compatible_model_resolution(data)
+        resolved_model_id = _resolve_compatible_model_id(
+            model_id,
+            aspect_ratio=ratio,
+            output_resolution=output_resolution,
+        )
+        if resolved_model_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported aspect ratio for model {model_id}: {ratio}",
+            )
+        return ratio, output_resolution, model_id
 
     resolved_model_id = model_id or DEFAULT_MODEL_ID
     if resolved_model_id not in MODEL_CATALOG:

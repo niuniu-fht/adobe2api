@@ -110,9 +110,20 @@ def build_admin_router(
         return FileResponse(static_dir / "admin.html")
 
     @router.get("/api/v1/logs")
-    def list_logs(request: Request, limit: int = 20, page: int = 1):
+    def list_logs(
+        request: Request,
+        limit: int = 20,
+        page: int = 1,
+        prompt: str = "",
+        errors_only: bool = False,
+    ):
         require_admin_auth(request)
-        logs, total = log_store.list(limit=limit, page=page)
+        logs, total = log_store.list(
+            limit=limit,
+            page=page,
+            prompt=prompt,
+            errors_only=errors_only,
+        )
         safe_limit = min(max(int(limit or 20), 1), 100)
         safe_page = max(int(page or 1), 1)
         total_pages = (total + safe_limit - 1) // safe_limit if total > 0 else 1
@@ -124,6 +135,10 @@ def build_admin_router(
             "limit": safe_limit,
             "total": total,
             "total_pages": total_pages,
+            "filters": {
+                "prompt": str(prompt or "").strip(),
+                "errors_only": bool(errors_only),
+            },
         }
 
     @router.get("/api/v1/logs/errors/{code}")
@@ -135,8 +150,15 @@ def build_admin_router(
         return item
 
     @router.get("/api/v1/logs/running")
-    def list_running_logs(request: Request, limit: int = 200):
+    def list_running_logs(
+        request: Request,
+        limit: int = 200,
+        prompt: str = "",
+        errors_only: bool = False,
+    ):
         require_admin_auth(request)
+        if errors_only:
+            return {"items": [], "total": 0}
         rows = live_log_store.list(limit=limit)
         items = []
         for item in rows:
@@ -144,6 +166,8 @@ def build_admin_router(
                 continue
             status = str(item.get("task_status") or "").upper()
             if status != "IN_PROGRESS":
+                continue
+            if not log_store.matches_filters(item, prompt=prompt):
                 continue
             items.append(item)
         return {"items": items, "total": len(items)}

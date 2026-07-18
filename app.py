@@ -253,6 +253,10 @@ def _set_request_error_detail(
     }
     path = str(getattr(getattr(request, "url", None), "path", "") or "")
     operation = op_map.get(path, "")
+    if path.startswith("/v1beta/models/") and path.endswith(
+        (":generateContent", ":streamGenerateContent")
+    ):
+        operation = "models.generateContent"
 
     record = ErrorDetailRecord(
         code=code,
@@ -496,6 +500,10 @@ async def request_logger(request: Request, call_next):
         "/v1/entities": "entities.create" if method == "POST" else "",
     }
     operation = op_map.get(path, "")
+    if path.startswith("/v1beta/models/") and path.endswith(
+        (":generateContent", ":streamGenerateContent")
+    ):
+        operation = "models.generateContent"
     should_log = bool(operation)
 
     if method in {"POST", "PUT", "PATCH"} and should_log:
@@ -1179,7 +1187,12 @@ def _extract_access_key(request: Request) -> str:
     auth = (request.headers.get("authorization") or "").strip()
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return (request.headers.get("x-api-key") or "").strip()
+    return str(
+        request.headers.get("x-api-key")
+        or request.headers.get("x-goog-api-key")
+        or request.query_params.get("key")
+        or ""
+    ).strip()
 
 
 def _require_service_api_key(request: Request) -> None:
