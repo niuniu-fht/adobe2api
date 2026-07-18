@@ -170,6 +170,61 @@ def test_gemini_image_config_takes_precedence_over_response_format_image():
     assert options.image_size == "4K"
 
 
+def test_gemini_response_format_accepts_official_enum_values():
+    options = parse_gemini_generate_request(
+        {
+            "contents": [{"parts": [{"text": "Draw a city"}]}],
+            "generationConfig": {
+                "responseFormat": {
+                    "image": {
+                        "aspectRatio": "ASPECT_RATIO_SIXTEEN_BY_NINE",
+                        "imageSize": "IMAGE_SIZE_FOUR_K",
+                    }
+                }
+            },
+        },
+        "gemini-3.1-flash-image",
+    )
+
+    assert options.aspect_ratio == "16:9"
+    assert options.image_size == "4K"
+
+
+def test_gemini_flat_snake_case_image_settings_are_compatible():
+    options = parse_gemini_generate_request(
+        {
+            "contents": [{"parts": [{"text": "Draw a city"}]}],
+            "generation_config": {
+                "response_modalities": ["IMAGE"],
+                "aspect_ratio": "16:9",
+                "image_size": "4K",
+            },
+        },
+        "gemini-3.1-flash-image",
+    )
+
+    assert options.aspect_ratio == "16:9"
+    assert options.image_size == "4K"
+
+
+def test_gemini_nested_snake_case_image_settings_are_compatible():
+    options = parse_gemini_generate_request(
+        {
+            "contents": [{"parts": [{"text": "Draw a city"}]}],
+            "generation_config": {
+                "image_config": {
+                    "aspect_ratio": "9:16",
+                    "image_size": "1K",
+                }
+            },
+        },
+        "gemini-3.1-flash-image",
+    )
+
+    assert options.aspect_ratio == "9:16"
+    assert options.image_size == "1K"
+
+
 @pytest.mark.parametrize(
     ("ratio", "resolution", "expected"),
     [

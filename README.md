@@ -348,7 +348,7 @@ curl -X POST "http://127.0.0.1:6001/v1beta/models/gemini-3.1-flash-image:generat
 
 `imageConfig.aspectRatio` 和 `imageConfig.imageSize` 会传递到实际上游 payload，同时设置 `modelSpecificPayload.aspectRatio`、`modelSpecificPayload.imageSize`、`outputResolution` 和对应像素 `size`。
 
-同时兼容 `generationConfig.responseFormat.image` 写法，例如：`"responseFormat":{"image":{"aspectRatio":"16:9","imageSize":"1K"}}`。
+同时兼容 `generationConfig.responseFormat.image`、官方枚举值、snake_case 和直接放在 `generationConfig` 下的 `aspect_ratio` / `image_size`。这些格式都会归一化后传入实际上游。
 
 ## 4）Cookie 导入
 

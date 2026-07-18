@@ -35,6 +35,33 @@ _SUPPORTED_IMAGE_MIME_TYPES = {
     "image/png",
     "image/webp",
 }
+_ASPECT_RATIO_ENUM_ALIASES = {
+    "ASPECT_RATIO_UNSPECIFIED": "1:1",
+    "ASPECT_RATIO_ONE_BY_ONE": "1:1",
+    "ASPECT_RATIO_TWO_BY_THREE": "2:3",
+    "ASPECT_RATIO_THREE_BY_TWO": "3:2",
+    "ASPECT_RATIO_THREE_BY_FOUR": "3:4",
+    "ASPECT_RATIO_FOUR_BY_THREE": "4:3",
+    "ASPECT_RATIO_FOUR_BY_FIVE": "4:5",
+    "ASPECT_RATIO_FIVE_BY_FOUR": "5:4",
+    "ASPECT_RATIO_NINE_BY_SIXTEEN": "9:16",
+    "ASPECT_RATIO_SIXTEEN_BY_NINE": "16:9",
+    "ASPECT_RATIO_TWENTY_ONE_BY_NINE": "21:9",
+    "ASPECT_RATIO_ONE_BY_EIGHT": "1:8",
+    "ASPECT_RATIO_EIGHT_BY_ONE": "8:1",
+    "ASPECT_RATIO_ONE_BY_FOUR": "1:4",
+    "ASPECT_RATIO_FOUR_BY_ONE": "4:1",
+}
+_IMAGE_SIZE_ENUM_ALIASES = {
+    "IMAGE_SIZE_UNSPECIFIED": "2K",
+    "IMAGE_SIZE_FIVE_TWELVE": "1K",
+    "IMAGE_SIZE_ONE_K": "1K",
+    "IMAGE_SIZE_TWO_K": "2K",
+    "IMAGE_SIZE_FOUR_K": "4K",
+    "IMAGE_SIZE_1K": "1K",
+    "IMAGE_SIZE_2K": "2K",
+    "IMAGE_SIZE_4K": "4K",
+}
 
 
 class GeminiRequestError(ValueError):
@@ -94,6 +121,16 @@ def _dict_value(data: Any, *keys: str) -> Any:
         if key in data:
             return data.get(key)
     return None
+
+
+def _normalize_aspect_ratio(value: Any) -> str:
+    normalized = str(value or "1:1").strip()
+    return _ASPECT_RATIO_ENUM_ALIASES.get(normalized.upper(), normalized)
+
+
+def _normalize_image_size(value: Any) -> str:
+    normalized = str(value or "2K").strip().upper()
+    return _IMAGE_SIZE_ENUM_ALIASES.get(normalized, normalized)
 
 
 def _parts_from_content(content: Any) -> list[dict]:
@@ -180,16 +217,18 @@ def parse_gemini_generate_request(
     response_image_config = (
         response_image_config if isinstance(response_image_config, dict) else {}
     )
-    aspect_ratio = str(
+    aspect_ratio = _normalize_aspect_ratio(
         _dict_value(image_config, "aspectRatio", "aspect_ratio")
         or _dict_value(response_image_config, "aspectRatio", "aspect_ratio")
+        or _dict_value(generation_config, "aspectRatio", "aspect_ratio")
         or "1:1"
-    ).strip()
-    image_size = str(
+    )
+    image_size = _normalize_image_size(
         _dict_value(image_config, "imageSize", "image_size")
         or _dict_value(response_image_config, "imageSize", "image_size")
+        or _dict_value(generation_config, "imageSize", "image_size")
         or "2K"
-    ).strip().upper()
+    )
     if image_size not in {"1K", "2K", "4K"}:
         raise GeminiRequestError("imageSize must be 1K, 2K, or 4K")
     try:
