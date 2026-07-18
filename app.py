@@ -150,6 +150,7 @@ def _compact_request_params(data: dict[str, Any]) -> Optional[str]:
 def _extract_logging_fields(raw_body: bytes) -> dict[str, Optional[str]]:
     empty = {
         "model": None,
+        "prompt": None,
         "prompt_preview": None,
         "resolution": None,
         "request_type": None,
@@ -178,12 +179,16 @@ def _extract_logging_fields(raw_body: bytes) -> dict[str, Optional[str]]:
             model = f"entity:{entity_type or 'object'}"
         if not prompt:
             prompt = _extract_prompt_from_messages(data.get("messages") or [])
-        if prompt:
-            prompt = prompt.replace("\r", " ").replace("\n", " ").strip()
-            prompt = prompt[:180]
+        prompt = prompt.strip()
+        prompt_preview = (
+            prompt.replace("\r", " ").replace("\n", " ").strip()[:180]
+            if prompt
+            else ""
+        )
         return {
             "model": model,
-            "prompt_preview": prompt or None,
+            "prompt": prompt or None,
+            "prompt_preview": prompt_preview or None,
             "resolution": resolution,
             "request_type": None,
             "request_params": _compact_request_params(data),
@@ -269,6 +274,7 @@ def _set_request_error_detail(
         path=path or None,
         log_id=str(getattr(request.state, "log_id", "") or "") or None,
         model=str(getattr(request.state, "log_model", "") or "") or None,
+        prompt=str(getattr(request.state, "log_prompt", "") or "") or None,
         prompt_preview=(
             str(getattr(request.state, "log_prompt_preview", "") or "") or None
         ),
@@ -357,6 +363,7 @@ def _set_request_task_progress(
                 "error": patch.get("error"),
                 "error_code": getattr(request.state, "log_error_code", None),
                 "model": getattr(request.state, "log_model", None),
+                "prompt": getattr(request.state, "log_prompt", None),
                 "prompt_preview": getattr(request.state, "log_prompt_preview", None),
                 "resolution": getattr(request.state, "log_resolution", None),
                 "request_type": getattr(request.state, "log_request_type", None),
@@ -420,6 +427,7 @@ def _append_attempt_log(
         method = str(getattr(request, "method", "POST") or "POST").upper()
         path = str(getattr(getattr(request, "url", None), "path", "") or "")
         model = getattr(request.state, "log_model", None)
+        prompt = getattr(request.state, "log_prompt", None)
         prompt_preview = getattr(request.state, "log_prompt_preview", None)
         resolution = getattr(request.state, "log_resolution", None)
         request_type = getattr(request.state, "log_request_type", None)
@@ -447,6 +455,7 @@ def _append_attempt_log(
                 preview_url=preview_url,
                 preview_kind=preview_kind,
                 model=model,
+                prompt=prompt,
                 prompt_preview=prompt_preview,
                 resolution=resolution,
                 request_type=request_type,
@@ -489,7 +498,7 @@ async def request_logger(request: Request, call_next):
     preview_url = None
     preview_kind = None
     raw_body = b""
-    body_meta = {"model": None, "prompt_preview": None}
+    body_meta = {"model": None, "prompt": None, "prompt_preview": None}
     error_text = None
     status_code = 500
 
@@ -511,7 +520,7 @@ async def request_logger(request: Request, call_next):
         try:
             # /v1/images/edits is often multipart and may contain large images.
             # Do not pre-read/cache its request body in middleware; let the route
-            # stream/parse it once, then fill log_model/log_prompt_preview itself.
+            # stream/parse it once, then fill the prompt log fields itself.
             if path != "/v1/images/edits":
                 raw_body = await request.body()
                 request._body = raw_body
@@ -523,6 +532,7 @@ async def request_logger(request: Request, call_next):
                 }:
                     body_meta = _extract_logging_fields(raw_body)
                     request.state.log_model = body_meta.get("model")
+                    request.state.log_prompt = body_meta.get("prompt")
                     request.state.log_prompt_preview = body_meta.get("prompt_preview")
                     request.state.log_resolution = body_meta.get("resolution")
                     request.state.log_request_type = body_meta.get("request_type")
@@ -552,6 +562,8 @@ async def request_logger(request: Request, call_next):
                         "operation": operation,
                         "model": getattr(request.state, "log_model", None)
                         or body_meta.get("model"),
+                        "prompt": getattr(request.state, "log_prompt", None)
+                        or body_meta.get("prompt"),
                         "prompt_preview": getattr(
                             request.state, "log_prompt_preview", None
                         )
@@ -662,6 +674,8 @@ async def request_logger(request: Request, call_next):
                             preview_kind=preview_kind,
                             model=getattr(request.state, "log_model", None)
                             or body_meta.get("model"),
+                            prompt=getattr(request.state, "log_prompt", None)
+                            or body_meta.get("prompt"),
                             prompt_preview=getattr(
                                 request.state, "log_prompt_preview", None
                             )

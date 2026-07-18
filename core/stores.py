@@ -73,6 +73,7 @@ class RequestLogRecord:
     preview_url: Optional[str] = None
     preview_kind: Optional[str] = None
     model: Optional[str] = None
+    prompt: Optional[str] = None
     prompt_preview: Optional[str] = None
     resolution: Optional[str] = None
     request_type: Optional[str] = None
@@ -153,8 +154,10 @@ class RequestLogStore:
     ) -> bool:
         prompt_query = str(prompt or "").strip().casefold()
         if prompt_query:
-            prompt_preview = str(item.get("prompt_preview") or "").casefold()
-            if prompt_query not in prompt_preview:
+            prompt_text = str(
+                item.get("prompt") or item.get("prompt_preview") or ""
+            ).casefold()
+            if prompt_query not in prompt_text:
                 return False
         if errors_only:
             try:
@@ -404,6 +407,7 @@ class ErrorDetailRecord:
     path: Optional[str] = None
     log_id: Optional[str] = None
     model: Optional[str] = None
+    prompt: Optional[str] = None
     prompt_preview: Optional[str] = None
     resolution: Optional[str] = None
     request_type: Optional[str] = None

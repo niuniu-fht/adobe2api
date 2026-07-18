@@ -725,6 +725,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const previewContent = document.getElementById("previewContent");
   const previewCloseBtn = document.getElementById("previewCloseBtn");
   const previewDownloadBtn = document.getElementById("previewDownloadBtn");
+  const promptDetailModal = document.getElementById("promptDetailModal");
+  const promptDetailContent = document.getElementById("promptDetailContent");
+  const promptDetailCloseBtn = document.getElementById("promptDetailCloseBtn");
   const errorDetailModal = document.getElementById("errorDetailModal");
   const errorDetailCode = document.getElementById("errorDetailCode");
   const errorDetailContent = document.getElementById("errorDetailContent");
@@ -1456,6 +1459,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     const previewCell = previewUrl
       ? `<button class="small preview-btn" data-url="${encodeURIComponent(previewUrl)}" data-kind="${previewKind || ""}">查看</button>`
       : `<span style="color:#7f96ad;">-</span>`;
+    const fullPrompt = String(item.prompt || "").trim();
+    const promptPreview = String(item.prompt_preview || fullPrompt || "-");
+    const promptCell = fullPrompt
+      ? `<button class="log-prompt-button" type="button" data-full-prompt="${encodeURIComponent(fullPrompt)}" title="查看完整提示词"><span>${escapeHtml(promptPreview)}</span><span class="log-prompt-detail">全文</span></button>`
+      : escapeHtml(promptPreview);
     tr.innerHTML = `
       <td class="log-time-cell"><span class="date">${dateText}</span><span class="time">${timeText}</span></td>
       <td>${statusCell}</td>
@@ -1467,7 +1475,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       <td class="log-type-cell" title="${escapeHtml(requestTypeText)}">${escapeHtml(requestTypeText)}</td>
       <td class="log-params-cell" title="${escapeHtml(requestParamsText)}">${escapeHtml(requestParamsText)}</td>
       <td class="log-input-url-cell">${inputImageCell}</td>
-      <td class="log-prompt-cell" title="${escapeHtml(item.prompt_preview || "")}">${escapeHtml(item.prompt_preview || "-")}</td>
+      <td class="log-prompt-cell">${promptCell}</td>
       <td>${previewCell}</td>
     `;
     if (isRunning) tr.classList.add("log-row-running");
@@ -1554,6 +1562,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     errorDetailContent.innerHTML = "";
   }
 
+  function closePromptDetail() {
+    if (!promptDetailModal || !promptDetailContent) return;
+    promptDetailModal.classList.remove("open");
+    promptDetailModal.setAttribute("aria-hidden", "true");
+    promptDetailContent.innerHTML = "";
+  }
+
+  function openPromptDetail(prompt) {
+    const fullPrompt = String(prompt || "").trim();
+    if (!fullPrompt || !promptDetailModal || !promptDetailContent) return;
+    promptDetailContent.innerHTML = `<pre>${escapeHtml(fullPrompt)}</pre>`;
+    promptDetailModal.classList.add("open");
+    promptDetailModal.setAttribute("aria-hidden", "false");
+  }
+
   async function openErrorDetailByCode(code) {
     const errCode = String(code || "").trim();
     if (!errCode || !errorDetailModal || !errorDetailCode || !errorDetailContent) return;
@@ -1581,7 +1604,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         `分辨率：${String(data?.resolution || "-")}`,
         `类型：${String(data?.request_type || data?.operation || "-")}`,
         `请求参数：${String(data?.request_params || "-")}`,
-        `提示词：${String(data?.prompt_preview || "-")}`,
+        `提示词：${String(data?.prompt || data?.prompt_preview || "-")}`,
         `输入图片 URL：${inputImageUrls.length ? inputImageUrls.join("\n") : "-"}`,
       ];
       errorDetailContent.innerHTML = `<pre>${escapeHtml(detailLines.join("\n"))}</pre>`;
@@ -1629,6 +1652,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         openPreview(decodeURIComponent(encodedUrl), kind);
         return;
       }
+      const clickablePromptEl = target.closest("[data-full-prompt]");
+      if (clickablePromptEl instanceof HTMLElement) {
+        const encodedPrompt = clickablePromptEl.getAttribute("data-full-prompt") || "";
+        if (!encodedPrompt) return;
+        openPromptDetail(decodeURIComponent(encodedPrompt));
+        return;
+      }
       const clickableErrorEl = target.closest("[data-error-code]");
       if (clickableErrorEl instanceof HTMLElement) {
         const code = String(clickableErrorEl.getAttribute("data-error-code") || "").trim();
@@ -1652,6 +1682,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     errorDetailCloseBtn.addEventListener("click", closeErrorDetail);
   }
 
+  if (promptDetailCloseBtn) {
+    promptDetailCloseBtn.addEventListener("click", closePromptDetail);
+  }
+
+  if (promptDetailModal) {
+    promptDetailModal.addEventListener("click", (event) => {
+      if (event.target === promptDetailModal) closePromptDetail();
+    });
+  }
+
   if (errorDetailModal) {
     errorDetailModal.addEventListener("click", (event) => {
       if (event.target === errorDetailModal) closeErrorDetail();
@@ -1661,6 +1701,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closePreview();
+      closePromptDetail();
       closeErrorDetail();
       closeDialog(tokenModal);
       closeDialog(refreshModal);

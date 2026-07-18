@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260718-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260718-2" />
 </head>
 <body>
   <div class="bg-orb bg-orb-a"></div>
@@ -416,6 +416,16 @@
     </div>
   </div>
 
+  <div id="promptDetailModal" class="preview-modal" aria-hidden="true">
+    <div class="preview-modal-dialog prompt-detail-dialog" role="dialog" aria-modal="true" aria-label="完整提示词">
+      <button id="promptDetailCloseBtn" class="preview-close" type="button">关闭</button>
+      <div class="error-detail-head">
+        <h3>完整提示词</h3>
+      </div>
+      <div id="promptDetailContent" class="error-detail-content prompt-detail-content"></div>
+    </div>
+  </div>
+
   <div id="errorDetailModal" class="preview-modal" aria-hidden="true">
     <div class="preview-modal-dialog" role="dialog" aria-modal="true" aria-label="错误详情">
       <button id="errorDetailCloseBtn" class="preview-close" type="button">关闭</button>
@@ -428,6 +438,6 @@
 
   <div id="appToast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="/static/admin.js?v=20260718-1"></script>
+  <script src="/static/admin.js?v=20260718-2"></script>
 </body>
 </html>

@@ -779,6 +779,36 @@ table {
   overflow-wrap: anywhere;
 }
 
+.log-prompt-button {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+}
+
+.log-prompt-button:hover > span:first-child {
+  color: #d5e7f8;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.log-prompt-detail {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(98, 216, 199, 0.35);
+  color: #62d8c7;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 th {
   text-align: left;
   padding: 12px;
@@ -1077,6 +1107,14 @@ td input[type="checkbox"] {
   font-family: "IBM Plex Mono", monospace;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.prompt-detail-dialog {
+  width: min(820px, 100%);
+}
+
+.prompt-detail-content {
+  min-height: 160px;
 }
 
 .toast {

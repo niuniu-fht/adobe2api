@@ -513,6 +513,7 @@ def build_generation_router(
             request.state.log_model = (
                 str(data.get("model") or "gpt-image-2").strip() or "gpt-image-2"
             )
+            request.state.log_prompt = prompt or None
             request.state.log_prompt_preview = (
                 prompt.replace("\r", " ").replace("\n", " ").strip()[:180] or None
             )
@@ -836,6 +837,7 @@ def build_generation_router(
                 or str(data.get("model") or "").strip()
                 or None
             )
+            request.state.log_prompt = str(prompt or "").strip() or None
             request.state.log_prompt_preview = (
                 str(prompt or "").replace("\r", " ").replace("\n", " ").strip()[:180]
                 or None
@@ -1272,6 +1274,7 @@ def build_generation_router(
         model_id = str(data.get("model") or "gpt-image-2").strip()
         try:
             request.state.log_model = model_id or "gpt-image-2"
+            request.state.log_prompt = prompt or None
             request.state.log_prompt_preview = (
                 prompt.replace("\r", " ").replace("\n", " ").strip()[:180] or None
             )

@@ -1,3 +1,6 @@
+import json
+
+from app import _extract_logging_fields
 from core.stores import RequestLogStore
 
 
@@ -85,3 +88,38 @@ def test_log_error_filter_matches_http_and_failed_task_errors(tmp_path):
 
     assert total == 2
     assert [item["id"] for item in errors] == ["task-error", "http-error"]
+
+
+def test_log_search_uses_full_prompt_beyond_preview(tmp_path):
+    store = RequestLogStore(tmp_path / "requests.jsonl", max_items=100)
+    full_prompt = f"{'A' * 220} hidden search phrase"
+    store.add_payload(
+        {
+            "id": "full-prompt",
+            "prompt": full_prompt,
+            "prompt_preview": full_prompt[:180],
+            "status_code": 200,
+            "task_status": "COMPLETED",
+        }
+    )
+
+    items, total = store.list(prompt="hidden search phrase")
+
+    assert total == 1
+    assert items[0]["id"] == "full-prompt"
+
+
+def test_logging_fields_keep_full_prompt_and_build_short_preview():
+    full_prompt = f"first line\n{'B' * 220}\nlast line"
+    metadata = _extract_logging_fields(
+        json.dumps(
+            {
+                "model": "gpt-image-gemini-3.1-flash-image",
+                "prompt": full_prompt,
+                "size": "1536x1024",
+            }
+        ).encode("utf-8")
+    )
+
+    assert metadata["prompt"] == full_prompt
+    assert metadata["prompt_preview"] == full_prompt.replace("\n", " ")[:180]
