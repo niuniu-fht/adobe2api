@@ -82,6 +82,59 @@ def test_parse_gemini_request_rejects_missing_text():
         )
 
 
+def test_gemini_accepts_sixteen_reference_images():
+    encoded_image = base64.b64encode(b"image").decode("ascii")
+    options = parse_gemini_generate_request(
+        {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": "Use all reference images"},
+                        *[
+                            {
+                                "inlineData": {
+                                    "mimeType": "image/png",
+                                    "data": encoded_image,
+                                }
+                            }
+                            for _ in range(16)
+                        ],
+                    ]
+                }
+            ]
+        },
+        "gemini-3.1-flash-image",
+    )
+
+    assert len(options.input_images) == 16
+
+
+def test_gemini_rejects_more_than_sixteen_reference_images():
+    encoded_image = base64.b64encode(b"image").decode("ascii")
+    with pytest.raises(GeminiRequestError, match="at most 16"):
+        parse_gemini_generate_request(
+            {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": "Use all reference images"},
+                            *[
+                                {
+                                    "inlineData": {
+                                        "mimeType": "image/png",
+                                        "data": encoded_image,
+                                    }
+                                }
+                                for _ in range(17)
+                            ],
+                        ]
+                    }
+                ]
+            },
+            "gemini-3.1-flash-image",
+        )
+
+
 def test_gemini_image_config_reaches_adobe_payload():
     options = parse_gemini_generate_request(
         {

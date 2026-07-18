@@ -5,6 +5,14 @@ import binascii
 from dataclasses import dataclass
 from typing import Any
 
+from .image_limits import (
+    MAX_INPUT_IMAGES,
+    MAX_SINGLE_IMAGE_BYTES,
+    ImageInputLimitError,
+    add_input_image_bytes,
+    validate_input_image_count,
+)
+
 
 GEMINI_IMAGE_MODELS: dict[str, dict[str, str]] = {
     "gemini-3.1-flash-image": {
@@ -28,8 +36,6 @@ GEMINI_MODEL_ALIASES: dict[str, str] = {
     "nanobannapro": "gemini-3-pro-image",
 }
 
-_MAX_INPUT_IMAGES = 6
-_MAX_IMAGE_BYTES = 30 * 1024 * 1024
 _SUPPORTED_IMAGE_MIME_TYPES = {
     "image/jpeg",
     "image/png",
@@ -160,7 +166,7 @@ def _decode_inline_image(part: dict) -> tuple[bytes, str] | None:
         raise GeminiRequestError("inlineData.data must be valid base64") from exc
     if not image_bytes:
         raise GeminiRequestError("inline image is empty")
-    if len(image_bytes) > _MAX_IMAGE_BYTES:
+    if len(image_bytes) > MAX_SINGLE_IMAGE_BYTES:
         raise GeminiRequestError("inline image is too large, max 30MB")
     return image_bytes, mime_type
 
@@ -177,6 +183,7 @@ def parse_gemini_generate_request(
 
     text_parts: list[str] = []
     input_images: list[tuple[bytes, str]] = []
+    total_input_image_bytes = 0
     system_instruction = _dict_value(data, "systemInstruction", "system_instruction")
     for part in _parts_from_content(system_instruction):
         text = str(part.get("text") or "").strip()
@@ -196,10 +203,13 @@ def parse_gemini_generate_request(
             inline_image = _decode_inline_image(part)
             if inline_image is not None:
                 input_images.append(inline_image)
-                if len(input_images) > _MAX_INPUT_IMAGES:
-                    raise GeminiRequestError(
-                        f"at most {_MAX_INPUT_IMAGES} input images are supported"
+                try:
+                    validate_input_image_count(len(input_images))
+                    total_input_image_bytes = add_input_image_bytes(
+                        total_input_image_bytes, len(inline_image[0])
                     )
+                except ImageInputLimitError as exc:
+                    raise GeminiRequestError(str(exc)) from exc
 
     prompt = "\n".join(text_parts).strip()
     if not prompt:

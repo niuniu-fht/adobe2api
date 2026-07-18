@@ -15,6 +15,12 @@ from core.models.openai_images import (
     parse_response_format,
 )
 from core.models.payloads import build_image_payload_candidates, random_image_seed
+from core.models.image_limits import (
+    MAX_TOTAL_IMAGE_BYTES,
+    ImageInputLimitError,
+    add_input_image_bytes,
+    validate_input_image_count,
+)
 from core.models.resolver import resolve_model, resolve_ratio_and_resolution
 from core.adobe_client import AdobeClient, ContentPolicyError
 
@@ -160,6 +166,18 @@ def test_image_generation_batch_sizes_limit_each_worker_to_two_images():
     assert image_generation_batch_sizes(3) == [1, 2]
     assert image_generation_batch_sizes(4) == [2, 2]
     assert image_generation_batch_sizes(5) == [1, 2, 2]
+
+
+def test_reference_image_limits_allow_sixteen_and_200mb():
+    validate_input_image_count(16)
+    assert add_input_image_bytes(MAX_TOTAL_IMAGE_BYTES - 1, 1) == (
+        MAX_TOTAL_IMAGE_BYTES
+    )
+
+    with pytest.raises(ImageInputLimitError, match="at most 16"):
+        validate_input_image_count(17)
+    with pytest.raises(ImageInputLimitError, match="max 200MB"):
+        add_input_image_bytes(MAX_TOTAL_IMAGE_BYTES, 1)
 
 
 def test_gpt_image_seed_is_randomized():

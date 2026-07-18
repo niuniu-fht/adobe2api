@@ -37,6 +37,14 @@ from core.models.gemini import (
     parse_gemini_generate_request,
 )
 from core.models.payloads import gpt_image_pixels_from_ratio, size_from_ratio
+from core.models.image_limits import (
+    MAX_INPUT_IMAGES,
+    MAX_SINGLE_IMAGE_BYTES,
+    MAX_TOTAL_IMAGE_BYTES,
+    ImageInputLimitError,
+    add_input_image_bytes,
+    validate_input_image_count,
+)
 
 
 def build_generation_router(
@@ -389,7 +397,7 @@ def build_generation_router(
         )
         return JSONResponse(status_code=status_code, content={"error": error_payload})
 
-    max_openai_edit_image_bytes = 30 * 1024 * 1024
+    max_openai_edit_body_bytes = (MAX_TOTAL_IMAGE_BYTES * 4 // 3) + (8 * 1024 * 1024)
 
     def _validate_openai_edit_content_length(request: Request) -> None:
         raw_content_length = str(request.headers.get("content-length") or "").strip()
@@ -399,11 +407,10 @@ def build_generation_router(
             content_length = int(raw_content_length)
         except ValueError:
             return
-        max_body_bytes = 80 * 1024 * 1024
-        if content_length > max_body_bytes:
+        if content_length > max_openai_edit_body_bytes:
             raise HTTPException(
                 status_code=413,
-                detail="request body too large, max 80MB",
+                detail="request body is too large for 200MB of input images",
             )
 
     def _normalize_edit_image_mime(mime_type: str) -> str:
@@ -471,7 +478,7 @@ def build_generation_router(
 
         if not image_bytes:
             raise HTTPException(status_code=400, detail="image is empty")
-        if len(image_bytes) > max_openai_edit_image_bytes:
+        if len(image_bytes) > MAX_SINGLE_IMAGE_BYTES:
             raise HTTPException(status_code=400, detail="image too large, max 30MB")
         return image_bytes, _normalize_edit_image_mime(mime_type)
 
@@ -479,7 +486,7 @@ def build_generation_router(
         urls: list[str] = []
 
         def append_value(value: Any) -> None:
-            if len(urls) >= 6:
+            if len(urls) >= MAX_INPUT_IMAGES:
                 return
             if isinstance(value, list):
                 for item in value:
@@ -573,16 +580,30 @@ def build_generation_router(
             )
             _set_raw_edit_log_context(request, data, raw_images)
             image_values = raw_images if isinstance(raw_images, list) else [raw_images]
-            input_images = await run_in_threadpool(
-                lambda: [
-                    _load_edit_image_value(value) for value in image_values if value
-                ]
-            )
-            if len(input_images) > 6:
+            image_values = [value for value in image_values if value]
+            try:
+                validate_input_image_count(len(image_values))
+            except ImageInputLimitError as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail="image edits support at most 6 input images",
-                )
+                    detail=str(exc),
+                ) from exc
+
+            def load_json_images() -> list[tuple[bytes, str]]:
+                loaded_images: list[tuple[bytes, str]] = []
+                total_image_bytes = 0
+                for value in image_values:
+                    loaded_image = _load_edit_image_value(value)
+                    try:
+                        total_image_bytes = add_input_image_bytes(
+                            total_image_bytes, len(loaded_image[0])
+                        )
+                    except ImageInputLimitError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    loaded_images.append(loaded_image)
+                return loaded_images
+
+            input_images = await run_in_threadpool(load_json_images)
             return data, input_images
 
         form = await request.form()
@@ -601,31 +622,39 @@ def build_generation_router(
         if not image_values:
             image_values = list(form.getlist("image[]"))
         _set_raw_edit_log_context(request, data, image_values)
+        try:
+            validate_input_image_count(len(image_values))
+        except ImageInputLimitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         input_images: list[tuple[bytes, str]] = []
+        total_image_bytes = 0
         for value in image_values:
             if hasattr(value, "read"):
                 image_bytes = await value.read()
                 mime_type = getattr(value, "content_type", None) or "image/jpeg"
                 if not image_bytes:
                     raise HTTPException(status_code=400, detail="image is empty")
-                if len(image_bytes) > max_openai_edit_image_bytes:
+                if len(image_bytes) > MAX_SINGLE_IMAGE_BYTES:
                     raise HTTPException(
                         status_code=400,
                         detail="image too large, max 30MB",
                     )
-                input_images.append(
-                    (image_bytes, _normalize_edit_image_mime(str(mime_type)))
+                loaded_image = (
+                    image_bytes,
+                    _normalize_edit_image_mime(str(mime_type)),
                 )
             else:
-                input_images.append(
-                    await run_in_threadpool(lambda: _load_edit_image_value(value))
+                loaded_image = await run_in_threadpool(
+                    lambda: _load_edit_image_value(value)
                 )
-            if len(input_images) > 6:
-                raise HTTPException(
-                    status_code=400,
-                    detail="image edits support at most 6 input images",
+            try:
+                total_image_bytes = add_input_image_bytes(
+                    total_image_bytes, len(loaded_image[0])
                 )
+            except ImageInputLimitError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            input_images.append(loaded_image)
 
         return data, input_images
 

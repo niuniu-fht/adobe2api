@@ -346,6 +346,8 @@ curl -X POST "http://127.0.0.1:6001/v1beta/models/gemini-3.1-flash-image:generat
 
 支持 `gemini-3.1-flash-image`（Nano Banana 2）和 `gemini-3-pro-image`（Nano Banana Pro）。图生图可在 `parts` 中传入 Gemini 标准的 `inlineData`：`{"inlineData":{"mimeType":"image/png","data":"<base64>"}}`。返回图片位于 `candidates[].content.parts[].inlineData`。
 
+OpenAI `/v1/images/edits` 和 Gemini `inlineData` 均支持最多 16 张参考图；单张最大 30MB，所有参考图解码或下载后的总大小最大 200MB。
+
 `imageConfig.aspectRatio` 和 `imageConfig.imageSize` 会传递到实际上游 payload，同时设置 `modelSpecificPayload.aspectRatio`、`modelSpecificPayload.imageSize`、`outputResolution` 和对应像素 `size`。
 
 同时兼容 `generationConfig.responseFormat.image`、官方枚举值、snake_case 和直接放在 `generationConfig` 下的 `aspect_ratio` / `image_size`。这些格式都会归一化后传入实际上游。
