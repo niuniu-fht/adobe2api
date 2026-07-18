@@ -172,14 +172,26 @@ def parse_gemini_generate_request(
     generation_config = generation_config if isinstance(generation_config, dict) else {}
     image_config = _dict_value(generation_config, "imageConfig", "image_config")
     image_config = image_config if isinstance(image_config, dict) else {}
+    response_format = _dict_value(
+        generation_config, "responseFormat", "response_format"
+    )
+    response_format = response_format if isinstance(response_format, dict) else {}
+    response_image_config = _dict_value(response_format, "image")
+    response_image_config = (
+        response_image_config if isinstance(response_image_config, dict) else {}
+    )
     aspect_ratio = str(
-        _dict_value(image_config, "aspectRatio", "aspect_ratio") or "1:1"
+        _dict_value(image_config, "aspectRatio", "aspect_ratio")
+        or _dict_value(response_image_config, "aspectRatio", "aspect_ratio")
+        or "1:1"
     ).strip()
     image_size = str(
-        _dict_value(image_config, "imageSize", "image_size") or "2K"
+        _dict_value(image_config, "imageSize", "image_size")
+        or _dict_value(response_image_config, "imageSize", "image_size")
+        or "2K"
     ).strip().upper()
     if image_size not in {"1K", "2K", "4K"}:
-        raise GeminiRequestError("imageConfig.imageSize must be 1K, 2K, or 4K")
+        raise GeminiRequestError("imageSize must be 1K, 2K, or 4K")
     try:
         candidate_count = int(
             _dict_value(generation_config, "candidateCount", "candidate_count") or 1

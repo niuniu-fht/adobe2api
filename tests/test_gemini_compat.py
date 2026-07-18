@@ -110,6 +110,66 @@ def test_gemini_image_config_reaches_adobe_payload():
     assert payload["size"] == {"width": 1360, "height": 768}
 
 
+def test_gemini_response_format_image_reaches_adobe_payload():
+    options = parse_gemini_generate_request(
+        {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": "生成一张赛博朋克风格的上海雨夜街道"
+                        }
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "responseFormat": {
+                    "image": {
+                        "aspectRatio": "16:9",
+                        "imageSize": "1K",
+                    }
+                },
+            },
+        },
+        "gemini-3.1-flash-image",
+    )
+
+    payload = build_image_payload_candidates(
+        prompt=options.prompt,
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.image_size,
+        upstream_model_id="gemini-flash",
+        upstream_model_version="nano-banana-3",
+    )[0]
+
+    assert options.aspect_ratio == "16:9"
+    assert options.image_size == "1K"
+    assert payload["modelSpecificPayload"]["aspectRatio"] == "16:9"
+    assert payload["modelSpecificPayload"]["imageSize"] == "1K"
+    assert payload["outputResolution"] == "1K"
+    assert payload["size"] == {"width": 1360, "height": 768}
+
+
+def test_gemini_image_config_takes_precedence_over_response_format_image():
+    options = parse_gemini_generate_request(
+        {
+            "contents": [{"parts": [{"text": "Draw a city"}]}],
+            "generationConfig": {
+                "imageConfig": {"aspectRatio": "4:3", "imageSize": "4K"},
+                "responseFormat": {
+                    "image": {"aspectRatio": "16:9", "imageSize": "1K"}
+                },
+            },
+        },
+        "gemini-3.1-flash-image",
+    )
+
+    assert options.aspect_ratio == "4:3"
+    assert options.image_size == "4K"
+
+
 @pytest.mark.parametrize(
     ("ratio", "resolution", "expected"),
     [
