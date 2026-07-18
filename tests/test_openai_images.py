@@ -9,7 +9,8 @@ from core.models.openai_images import (
     parse_requested_size,
     parse_response_format,
 )
-from core.models.payloads import build_image_payload_candidates
+from core.models.payloads import build_image_payload_candidates, random_image_seed
+from core.adobe_client import AdobeClient, ContentPolicyError
 
 
 def test_native_gpt_image_2_request_uses_requested_size():
@@ -153,3 +154,41 @@ def test_image_generation_batch_sizes_limit_each_worker_to_two_images():
     assert image_generation_batch_sizes(3) == [1, 2]
     assert image_generation_batch_sizes(4) == [2, 2]
     assert image_generation_batch_sizes(5) == [1, 2, 2]
+
+
+def test_gpt_image_seed_is_randomized():
+    generated_seeds = {random_image_seed() for _ in range(20)}
+    assert all(0 <= value <= 999999 for value in generated_seeds)
+    assert len(generated_seeds) > 1
+
+
+def test_gpt_image_unsafe_retries_with_new_seeds(monkeypatch):
+    client = AdobeClient()
+    attempted_seeds = []
+
+    def fake_generate_once(**kwargs):
+        attempted_seeds.append(kwargs["seed"])
+        if len(attempted_seeds) < 3:
+            raise ContentPolicyError(
+                "unsafe",
+                upstream_code="image_unsafe",
+            )
+        return b"image", {"status": "succeeded"}
+
+    seed_values = iter([101, 202, 303])
+    monkeypatch.setattr(client, "_generate_once", fake_generate_once)
+    monkeypatch.setattr(
+        "core.adobe_client.random_image_seed",
+        lambda: next(seed_values),
+    )
+
+    image_bytes, meta = client.generate(
+        token="TOKEN",
+        prompt="a blue crystal cube",
+        upstream_model_id="gpt-image",
+        upstream_model_version="2",
+    )
+
+    assert image_bytes == b"image"
+    assert meta["status"] == "succeeded"
+    assert attempted_seeds == [101, 202, 303]

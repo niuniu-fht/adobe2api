@@ -268,6 +268,14 @@ def _set_request_error_detail(
         prompt_preview=(
             str(getattr(request.state, "log_prompt_preview", "") or "") or None
         ),
+        resolution=str(getattr(request.state, "log_resolution", "") or "") or None,
+        request_type=(
+            str(getattr(request.state, "log_request_type", "") or "") or None
+        ),
+        request_params=(
+            str(getattr(request.state, "log_request_params", "") or "") or None
+        ),
+        input_image_urls=getattr(request.state, "log_input_image_urls", None),
         task_status=str(getattr(request.state, "log_task_status", "") or "") or None,
         task_progress=getattr(request.state, "log_task_progress", None),
         upstream_job_id=(
@@ -349,6 +357,9 @@ def _set_request_task_progress(
                 "resolution": getattr(request.state, "log_resolution", None),
                 "request_type": getattr(request.state, "log_request_type", None),
                 "request_params": getattr(request.state, "log_request_params", None),
+                "input_image_urls": getattr(
+                    request.state, "log_input_image_urls", None
+                ),
                 "ts": time.time(),
             },
         )
@@ -409,6 +420,7 @@ def _append_attempt_log(
         resolution = getattr(request.state, "log_resolution", None)
         request_type = getattr(request.state, "log_request_type", None)
         request_params = getattr(request.state, "log_request_params", None)
+        input_image_urls = getattr(request.state, "log_input_image_urls", None)
         preview_url = getattr(request.state, "log_preview_url", None)
         preview_kind = getattr(request.state, "log_preview_kind", None)
         task_status = task_status_override
@@ -435,6 +447,7 @@ def _append_attempt_log(
                 resolution=resolution,
                 request_type=request_type,
                 request_params=request_params,
+                input_image_urls=input_image_urls,
                 error=(str(error)[:240] if error else None),
                 error_code=(str(error_code or "") or None),
                 error_type=(str(error_type or "") or None),
@@ -545,6 +558,9 @@ async def request_logger(request: Request, call_next):
                             request.state, "log_request_params", None
                         )
                         or body_meta.get("request_params"),
+                        "input_image_urls": getattr(
+                            request.state, "log_input_image_urls", None
+                        ),
                         "task_status": "IN_PROGRESS",
                         "task_progress": 0.0,
                     },
@@ -661,6 +677,9 @@ async def request_logger(request: Request, call_next):
                                 request.state, "log_request_params", None
                             )
                             or body_meta.get("request_params"),
+                            input_image_urls=getattr(
+                                request.state, "log_input_image_urls", None
+                            ),
                             error=error_final,
                             error_code=error_code,
                             task_status=task_status,

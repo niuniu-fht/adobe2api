@@ -1263,7 +1263,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         renderLogStats(null);
       }
     } catch (err) {
-      logsTbody.innerHTML = `<tr><td colspan="11" class="empty-state" style="color: #ffb4bc;">${err.message || "日志加载失败"}</td></tr>`;
+      logsTbody.innerHTML = `<tr><td colspan="12" class="empty-state" style="color: #ffb4bc;">${err.message || "日志加载失败"}</td></tr>`;
       logsRunningTotal = 0;
       logsTotalPages = Math.max(1, logsCurrentPage || 1);
       renderLogsPagination();
@@ -1402,6 +1402,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       ? "edits"
       : (rawRequestType === "images.generations" ? "generation" : (rawRequestType || "-"));
     const requestParamsText = String(item.request_params || "-");
+    const inputImageUrls = Array.isArray(item.input_image_urls)
+      ? item.input_image_urls.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const inputImageCell = inputImageUrls.length
+      ? inputImageUrls.map((url) => `<a class="log-input-url" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(url)}">${escapeHtml(url)}</a>`).join("<br>")
+      : `<span style="color:#7f96ad;">-</span>`;
     const tokenCell = `<div class="log-account-cell">${accountParts.join("<br>")}</div>`;
     const previewCell = previewUrl
       ? `<button class="small preview-btn" data-url="${encodeURIComponent(previewUrl)}" data-kind="${previewKind || ""}">查看</button>`
@@ -1416,6 +1422,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       <td class="log-resolution-cell" title="${escapeHtml(resolutionText)}">${escapeHtml(resolutionText)}</td>
       <td class="log-type-cell" title="${escapeHtml(requestTypeText)}">${escapeHtml(requestTypeText)}</td>
       <td class="log-params-cell" title="${escapeHtml(requestParamsText)}">${escapeHtml(requestParamsText)}</td>
+      <td class="log-input-url-cell">${inputImageCell}</td>
       <td class="log-prompt-cell" title="${escapeHtml(item.prompt_preview || "")}">${escapeHtml(item.prompt_preview || "-")}</td>
       <td>${previewCell}</td>
     `;
@@ -1436,7 +1443,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     ];
 
     if (!allRows.length) {
-      logsTbody.innerHTML = `<tr><td colspan="11" class="empty-state">暂无请求日志</td></tr>`;
+      logsTbody.innerHTML = `<tr><td colspan="12" class="empty-state">暂无请求日志</td></tr>`;
       return;
     }
 
@@ -1517,7 +1524,22 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       const data = await res.json();
       const message = String(data?.message || "").trim() || "暂无错误信息";
-      errorDetailContent.innerHTML = `<pre>${escapeHtml(message)}</pre>`;
+      const inputImageUrls = Array.isArray(data?.input_image_urls)
+        ? data.input_image_urls.map((value) => String(value || "").trim()).filter(Boolean)
+        : [];
+      const detailLines = [
+        `错误信息：${message}`,
+        `错误编号：${String(data?.code || errCode)}`,
+        `状态码：${String(data?.status_code || "-")}`,
+        `请求接口：${[data?.method, data?.path].filter(Boolean).join(" ") || "-"}`,
+        `模型：${String(data?.model || "-")}`,
+        `分辨率：${String(data?.resolution || "-")}`,
+        `类型：${String(data?.request_type || data?.operation || "-")}`,
+        `请求参数：${String(data?.request_params || "-")}`,
+        `提示词：${String(data?.prompt_preview || "-")}`,
+        `输入图片 URL：${inputImageUrls.length ? inputImageUrls.join("\n") : "-"}`,
+      ];
+      errorDetailContent.innerHTML = `<pre>${escapeHtml(detailLines.join("\n"))}</pre>`;
     } catch (err) {
       errorDetailContent.innerHTML = `<pre>${escapeHtml(err.message || "获取错误详情失败")}</pre>`;
     }

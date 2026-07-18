@@ -12,7 +12,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from core.config_mgr import config_manager
-from core.models import build_image_payload_candidates
+from core.models import build_image_payload_candidates, random_image_seed
 
 try:
     from curl_cffi.requests import Session as CurlSession
@@ -734,24 +734,34 @@ class AdobeClient:
             return {}
 
     @staticmethod
+    def _raise_if_image_unsafe_data(data: Any, *, param: str = "prompt") -> None:
+        if isinstance(data, list):
+            for item in data:
+                AdobeClient._raise_if_image_unsafe_data(item, param=param)
+            return
+        if not isinstance(data, dict):
+            return
+        upstream_code = str(data.get("error_code") or data.get("code") or "").strip()
+        if upstream_code == "image_unsafe":
+            message = str(data.get("message") or "").strip()
+            if (
+                not message
+                or message
+                == "The generated images appear to be unsafe. Try modifying the prompts or the seeds."
+            ):
+                message = "生成的图片可能不安全，请修改提示词或更换随机种子后重试。"
+            raise ContentPolicyError(message, upstream_code=upstream_code, param=param)
+        for value in data.values():
+            if isinstance(value, (dict, list)):
+                AdobeClient._raise_if_image_unsafe_data(value, param=param)
+
+    @staticmethod
     def _raise_if_image_unsafe(resp, *, param: str = "prompt") -> None:
         try:
             data = resp.json()
         except Exception:
             data = {}
-        if not isinstance(data, dict):
-            return
-        upstream_code = str(data.get("error_code") or data.get("code") or "").strip()
-        if upstream_code != "image_unsafe":
-            return
-        message = str(data.get("message") or "").strip()
-        if (
-            not message
-            or message
-            == "The generated images appear to be unsafe. Try modifying the prompts or the seeds."
-        ):
-            message = "生成的图片可能不安全，请修改提示词或更换随机种子后重试。"
-        raise ContentPolicyError(message, upstream_code=upstream_code, param=param)
+        AdobeClient._raise_if_image_unsafe_data(data, param=param)
 
     @staticmethod
     def _entity_urn_from_data(data: Any) -> str:
@@ -1007,6 +1017,7 @@ class AdobeClient:
         upstream_model_version: str,
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
+        seed: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
         requested_size: Optional[dict] = None,
     ) -> list[dict]:
@@ -1018,6 +1029,7 @@ class AdobeClient:
             upstream_model_version=upstream_model_version,
             quality_level=quality_level,
             detail_level=detail_level,
+            seed=seed,
             source_image_ids=source_image_ids,
             requested_size=requested_size,
         )
@@ -1538,7 +1550,7 @@ class AdobeClient:
                 raise AdobeRequestError("video generation timed out")
             time.sleep(3.0)
 
-    def generate(
+    def _generate_once(
         self,
         token: str,
         prompt: str,
@@ -1548,6 +1560,7 @@ class AdobeClient:
         upstream_model_version: str = "nano-banana-2",
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
+        seed: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
         requested_size: Optional[dict] = None,
         timeout: int = 180,
@@ -1564,6 +1577,7 @@ class AdobeClient:
             upstream_model_version=upstream_model_version,
             quality_level=quality_level,
             detail_level=detail_level,
+            seed=seed,
             source_image_ids=source_image_ids,
             requested_size=requested_size,
         ):
@@ -1578,6 +1592,7 @@ class AdobeClient:
             if submit_resp.status_code in (401, 403):
                 break
 
+            self._raise_if_image_unsafe(submit_resp, param="prompt")
             last_error = submit_resp.text[:300]
 
         if submit_resp is None:
@@ -1661,6 +1676,7 @@ class AdobeClient:
                 )
 
             latest = poll_resp.json()
+            self._raise_if_image_unsafe_data(latest, param="prompt")
             status_header = str(poll_resp.headers.get("x-task-status") or "").upper()
             status_val = str(latest.get("status") or "").upper() or status_header
             progress_val = self._extract_progress_percent(latest, poll_resp)
@@ -1750,3 +1766,82 @@ class AdobeClient:
                         pass
                 raise AdobeRequestError("generation timed out")
             time.sleep(sleep_time)
+
+    def generate(
+        self,
+        token: str,
+        prompt: str,
+        aspect_ratio: str = "16:9",
+        output_resolution: str = "2K",
+        upstream_model_id: str = "gemini-flash",
+        upstream_model_version: str = "nano-banana-2",
+        quality_level: Optional[str] = None,
+        detail_level: Optional[int] = None,
+        source_image_ids: Optional[list[str]] = None,
+        requested_size: Optional[dict] = None,
+        timeout: int = 180,
+        out_path: Optional[Path] = None,
+        progress_cb: Optional[Callable[[dict], None]] = None,
+    ) -> tuple[Optional[bytes], dict]:
+        is_gpt_image = str(upstream_model_id or "").strip().lower() == "gpt-image"
+        if not is_gpt_image:
+            return self._generate_once(
+                token=token,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                output_resolution=output_resolution,
+                upstream_model_id=upstream_model_id,
+                upstream_model_version=upstream_model_version,
+                quality_level=quality_level,
+                detail_level=detail_level,
+                source_image_ids=source_image_ids,
+                requested_size=requested_size,
+                timeout=timeout,
+                out_path=out_path,
+                progress_cb=progress_cb,
+            )
+        max_seed_attempts = 3 if is_gpt_image else 1
+        attempted_seeds: set[int] = set()
+        current_seed = None
+
+        for seed_attempt in range(1, max_seed_attempts + 1):
+            if current_seed is None or current_seed in attempted_seeds:
+                current_seed = random_image_seed()
+                while current_seed in attempted_seeds:
+                    current_seed = random_image_seed()
+            attempted_seeds.add(current_seed)
+            logger.info(
+                "image generation seed attempt=%s/%s model=%s seed=%s",
+                seed_attempt,
+                max_seed_attempts,
+                upstream_model_id,
+                current_seed,
+            )
+            try:
+                return self._generate_once(
+                    token=token,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    output_resolution=output_resolution,
+                    upstream_model_id=upstream_model_id,
+                    upstream_model_version=upstream_model_version,
+                    quality_level=quality_level,
+                    detail_level=detail_level,
+                    seed=current_seed,
+                    source_image_ids=source_image_ids,
+                    requested_size=requested_size,
+                    timeout=timeout,
+                    out_path=out_path,
+                    progress_cb=progress_cb,
+                )
+            except ContentPolicyError:
+                if seed_attempt >= max_seed_attempts:
+                    raise
+                logger.warning(
+                    "Adobe returned image_unsafe; retrying with a new seed model=%s seed=%s",
+                    upstream_model_id,
+                    current_seed,
+                )
+                current_seed = None
+
+        raise AdobeRequestError("image generation failed")

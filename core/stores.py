@@ -77,6 +77,7 @@ class RequestLogRecord:
     resolution: Optional[str] = None
     request_type: Optional[str] = None
     request_params: Optional[str] = None
+    input_image_urls: Optional[list[str]] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
     error_type: Optional[str] = None
@@ -378,6 +379,10 @@ class ErrorDetailRecord:
     log_id: Optional[str] = None
     model: Optional[str] = None
     prompt_preview: Optional[str] = None
+    resolution: Optional[str] = None
+    request_type: Optional[str] = None
+    request_params: Optional[str] = None
+    input_image_urls: Optional[list[str]] = None
     task_status: Optional[str] = None
     task_progress: Optional[float] = None
     upstream_job_id: Optional[str] = None

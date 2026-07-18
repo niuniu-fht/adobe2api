@@ -511,10 +511,10 @@ table {
 #logsTable td:nth-child(8),
 #runningLogsTable th:nth-child(8),
 #runningLogsTable td:nth-child(8),
-#logsTable th:nth-child(11),
-#logsTable td:nth-child(11),
-#runningLogsTable th:nth-child(11),
-#runningLogsTable td:nth-child(11) {
+#logsTable th:nth-child(12),
+#logsTable td:nth-child(12),
+#runningLogsTable th:nth-child(12),
+#runningLogsTable td:nth-child(12) {
   width: auto;
   white-space: nowrap;
 }
@@ -553,6 +553,14 @@ table {
 #logsTable td:nth-child(10),
 #runningLogsTable th:nth-child(10),
 #runningLogsTable td:nth-child(10) {
+  min-width: 260px;
+  width: 30%;
+}
+
+#logsTable th:nth-child(11),
+#logsTable td:nth-child(11),
+#runningLogsTable th:nth-child(11),
+#runningLogsTable td:nth-child(11) {
   min-width: 220px;
   width: 30%;
 }
@@ -610,6 +618,21 @@ table {
   white-space: normal;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+.log-input-url-cell {
+  max-width: 360px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.log-input-url {
+  color: #62d8c7;
+  text-decoration: none;
+}
+
+.log-input-url:hover {
+  text-decoration: underline;
 }
 
 .log-prompt-cell {

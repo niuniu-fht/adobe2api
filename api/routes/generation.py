@@ -60,6 +60,7 @@ def build_generation_router(
 ) -> APIRouter:
     router = APIRouter()
     entity_ref_re = re.compile(r"@entity:([^\s@]+)")
+    remote_image_error_message = "输入图片下载失败，请确认图片 URL 可公开访问"
 
     def _nanoid(size: int = 21) -> str:
         alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
@@ -358,11 +359,21 @@ def build_generation_router(
         if image_ref.startswith("data:"):
             image_bytes, mime_type = _decode_edit_data_url(image_ref)
         elif image_ref.lower().startswith(("http://", "https://")):
-            resp = requests.get(image_ref, timeout=30)
+            try:
+                resp = requests.get(
+                    image_ref,
+                    timeout=30,
+                    proxies=client._requests_proxies(),
+                )
+            except requests.RequestException as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=remote_image_error_message,
+                ) from exc
             if resp.status_code != 200:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Failed to fetch image: {resp.status_code}",
+                    detail=remote_image_error_message,
                 )
             image_bytes = resp.content
             mime_type = resp.headers.get("content-type") or "image/jpeg"
@@ -381,6 +392,70 @@ def build_generation_router(
         if len(image_bytes) > max_openai_edit_image_bytes:
             raise HTTPException(status_code=400, detail="image too large, max 30MB")
         return image_bytes, _normalize_edit_image_mime(mime_type)
+
+    def _extract_edit_image_urls(raw_images: Any) -> list[str]:
+        urls: list[str] = []
+
+        def append_value(value: Any) -> None:
+            if len(urls) >= 6:
+                return
+            if isinstance(value, list):
+                for item in value:
+                    append_value(item)
+                return
+            if isinstance(value, dict):
+                for key in ("image", "url", "image_url"):
+                    if key in value:
+                        append_value(value.get(key))
+                return
+            image_ref = str(value or "").strip()
+            if image_ref.lower().startswith(("http://", "https://")):
+                urls.append(image_ref)
+
+        append_value(raw_images)
+        return urls
+
+    def _set_raw_edit_log_context(
+        request: Request,
+        data: dict,
+        raw_images: Any = None,
+    ) -> None:
+        try:
+            prompt = str(data.get("prompt") or "").strip()
+            resolution = str(
+                data.get("size")
+                or data.get("output_resolution")
+                or data.get("aspect_ratio")
+                or ""
+            ).strip()
+            request.state.log_model = (
+                str(data.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+            )
+            request.state.log_prompt_preview = (
+                prompt.replace("\r", " ").replace("\n", " ").strip()[:180] or None
+            )
+            request.state.log_resolution = resolution or None
+            request.state.log_request_type = "edits"
+            param_parts = []
+            for key in (
+                "n",
+                "size",
+                "aspect_ratio",
+                "output_resolution",
+                "response_format",
+                "output_format",
+                "quality",
+                "output_compression",
+            ):
+                value = data.get(key)
+                if value not in (None, ""):
+                    param_parts.append(f"{key}={value}")
+            request.state.log_request_params = ", ".join(param_parts)[:240] or None
+            request.state.log_input_image_urls = (
+                _extract_edit_image_urls(raw_images) or None
+            )
+        except Exception:
+            pass
 
     def _load_edit_image_value(raw_value: Any) -> tuple[bytes, str]:
         if isinstance(raw_value, dict):
@@ -413,6 +488,7 @@ def build_generation_router(
                 or data.get("image_url")
                 or data.get("image_urls")
             )
+            _set_raw_edit_log_context(request, data, raw_images)
             image_values = raw_images if isinstance(raw_images, list) else [raw_images]
             input_images = await run_in_threadpool(
                 lambda: [
@@ -441,6 +517,7 @@ def build_generation_router(
             image_values = list(form.getlist("images"))
         if not image_values:
             image_values = list(form.getlist("image[]"))
+        _set_raw_edit_log_context(request, data, image_values)
 
         input_images: list[tuple[bytes, str]] = []
         for value in image_values:
@@ -919,12 +996,32 @@ def build_generation_router(
             passthrough = _openai_http_exception_response(exc)
             if passthrough is not None:
                 return passthrough
+            status_code = int(exc.status_code or 400)
+            error_type = (
+                "invalid_request_error"
+                if 400 <= status_code < 500
+                else "server_error"
+            )
+            error_code = set_request_error_detail(
+                request,
+                error=str(exc.detail),
+                status_code=status_code,
+                error_type=error_type,
+                include_traceback=False,
+            )
+            set_request_task_progress(
+                request,
+                task_status="FAILED",
+                task_progress=0.0,
+                error=str(exc.detail),
+            )
             return JSONResponse(
-                status_code=exc.status_code,
+                status_code=status_code,
                 content={
                     "error": {
                         "message": str(exc.detail),
-                        "type": "invalid_request_error",
+                        "type": error_type,
+                        "code": error_code,
                     }
                 },
             )

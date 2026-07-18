@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import time
 from typing import Optional
 
@@ -112,6 +113,10 @@ def gpt_image_detail_level_from_quality(quality_level: Optional[str]) -> int:
     return 1
 
 
+def random_image_seed() -> int:
+    return secrets.randbelow(1_000_000)
+
+
 def build_image_payload_candidates(
     *,
     prompt: str,
@@ -121,12 +126,14 @@ def build_image_payload_candidates(
     upstream_model_version: str,
     quality_level: Optional[str] = None,
     detail_level: Optional[int] = None,
+    seed: Optional[int] = None,
     source_image_ids: Optional[list[str]] = None,
     requested_size: Optional[dict] = None,
 ) -> list[dict]:
     normalized_ratio = str(aspect_ratio or "").strip().lower()
     effective_ratio = normalized_ratio or "1:1"
     if str(upstream_model_id or "").strip().lower() == "gpt-image":
+        effective_seed = int(seed) if seed is not None else random_image_seed()
         effective_detail_level = detail_level
         if effective_detail_level is None:
             effective_detail_level = gpt_image_detail_level_from_quality(quality_level)
@@ -140,7 +147,7 @@ def build_image_payload_candidates(
             "modelVersion": upstream_model_version,
             "n": 1,
             "prompt": prompt,
-            "seeds": [int(time.time()) % 999999],
+            "seeds": [effective_seed],
             "output": {"storeInputs": True},
             "referenceBlobs": [],
             "generationMetadata": {
