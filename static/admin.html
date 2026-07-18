@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260302-4" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260718-1" />
 </head>
 <body>
   <div class="bg-orb bg-orb-a"></div>
@@ -244,18 +244,6 @@
         <div class="list-head">
           <h2>请求日志</h2>
           <div class="actions">
-            <input
-              id="logPromptSearch"
-              class="log-search-input"
-              type="search"
-              placeholder="搜索提示词"
-              aria-label="搜索提示词"
-              autocomplete="off"
-            />
-            <label class="log-error-filter" for="logErrorsOnly">
-              <input id="logErrorsOnly" type="checkbox" />
-              仅错误请求
-            </label>
             <label for="logStatsRange" class="help">统计范围</label>
             <select id="logStatsRange" class="input-select" aria-label="日志统计范围">
               <option value="today">今日</option>
@@ -266,7 +254,36 @@
             <button id="clearLogsBtn" class="danger">清空日志</button>
           </div>
         </div>
-        <p class="help" style="margin-bottom: 16px;">支持按提示词摘要搜索及过滤错误请求。失败状态中的状态码可点击查看错误信息。</p>
+        <div class="log-query-bar" aria-label="日志筛选">
+          <div class="log-query-search">
+            <label class="log-query-label" for="logPromptSearch">提示词</label>
+            <div class="log-search-control">
+              <input
+                id="logPromptSearch"
+                class="log-search-input"
+                type="search"
+                placeholder="输入提示词片段"
+                aria-label="搜索提示词"
+                autocomplete="off"
+              />
+              <button
+                id="logSearchClear"
+                class="log-search-clear"
+                type="button"
+                aria-label="清空提示词搜索"
+                title="清空搜索"
+              >×</button>
+            </div>
+          </div>
+          <div class="log-query-status">
+            <span class="log-query-label">请求状态</span>
+            <div class="log-filter-segment" role="group" aria-label="请求状态筛选">
+              <button id="logFilterAll" class="active" type="button" aria-pressed="true">全部</button>
+              <button id="logFilterErrors" type="button" aria-pressed="false">仅错误</button>
+            </div>
+          </div>
+          <div id="logFilterSummary" class="log-filter-summary" aria-live="polite">共 0 条</div>
+        </div>
         <div class="stats-grid" id="logsStatsGrid">
           <div class="stat-card">
             <div class="stat-label">图片生成数</div>
@@ -411,6 +428,6 @@
 
   <div id="appToast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="/static/admin.js?v=20260302-7"></script>
+  <script src="/static/admin.js?v=20260718-1"></script>
 </body>
 </html>

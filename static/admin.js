@@ -707,7 +707,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const refreshLogsBtn = document.getElementById("refreshLogsBtn");
   const clearLogsBtn = document.getElementById("clearLogsBtn");
   const logPromptSearch = document.getElementById("logPromptSearch");
-  const logErrorsOnly = document.getElementById("logErrorsOnly");
+  const logSearchClear = document.getElementById("logSearchClear");
+  const logFilterAll = document.getElementById("logFilterAll");
+  const logFilterErrors = document.getElementById("logFilterErrors");
+  const logFilterSummary = document.getElementById("logFilterSummary");
   const logStatsRange = document.getElementById("logStatsRange");
   const logStatsUpdatedAt = document.getElementById("logStatsUpdatedAt");
   const logsStatsImageCount = document.getElementById("logsStatsImageCount");
@@ -731,6 +734,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   let logsCurrentPage = 1;
   let logsTotalPages = 1;
   let logsRunningTotal = 0;
+  let logsFilteredTotal = 0;
+  let logsErrorsOnly = false;
+  let logsLoadSequence = 0;
   let logsSearchTimer = null;
 
   function switchConfigPane(targetId) {
@@ -1235,13 +1241,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   async function loadLogs() {
     if (!logsTbody) return;
+    const loadSequence = ++logsLoadSequence;
     try {
       const rangeValue = logStatsRange ? String(logStatsRange.value || "today") : "today";
       const promptQuery = logPromptSearch ? String(logPromptSearch.value || "").trim() : "";
-      const errorsOnly = Boolean(logErrorsOnly && logErrorsOnly.checked);
       const filterParams = new URLSearchParams();
       if (promptQuery) filterParams.set("prompt", promptQuery);
-      if (errorsOnly) filterParams.set("errors_only", "true");
+      if (logsErrorsOnly) filterParams.set("errors_only", "true");
       const filterQuery = filterParams.toString();
       const filterSuffix = filterQuery ? `&${filterQuery}` : "";
       const [runningResult, logsResult, statsResult] = await Promise.allSettled([
@@ -1249,6 +1255,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         fetch(`/api/v1/logs?limit=${LOGS_PAGE_SIZE}&page=${logsCurrentPage}${filterSuffix}`),
         fetch(`/api/v1/logs/stats?range=${encodeURIComponent(rangeValue)}`),
       ]);
+      if (loadSequence !== logsLoadSequence) return;
 
       let runningItems = [];
       if (runningResult.status === "fulfilled" && runningResult.value.ok) {
@@ -1263,8 +1270,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const logsData = await logsResult.value.json();
       logsCurrentPage = Math.max(1, Number(logsData.page || logsCurrentPage || 1));
       logsTotalPages = Math.max(1, Number(logsData.total_pages || 1));
+      logsFilteredTotal = Math.max(0, Number(logsData.total || 0));
       renderLogsPagination();
       renderLogs(logsData.logs || [], runningItems);
+      renderLogFilterState();
 
       if (statsResult.status === "fulfilled" && statsResult.value.ok) {
         const statsData = await statsResult.value.json();
@@ -1273,11 +1282,36 @@ document.addEventListener("DOMContentLoaded", async () => {
         renderLogStats(null);
       }
     } catch (err) {
+      if (loadSequence !== logsLoadSequence) return;
       logsTbody.innerHTML = `<tr><td colspan="12" class="empty-state" style="color: #ffb4bc;">${err.message || "日志加载失败"}</td></tr>`;
       logsRunningTotal = 0;
+      logsFilteredTotal = 0;
       logsTotalPages = Math.max(1, logsCurrentPage || 1);
       renderLogsPagination();
       renderLogStats(null);
+      renderLogFilterState();
+    }
+  }
+
+  function renderLogFilterState() {
+    const promptQuery = logPromptSearch ? String(logPromptSearch.value || "").trim() : "";
+    if (logSearchClear) {
+      logSearchClear.disabled = !promptQuery;
+      logSearchClear.classList.toggle("visible", Boolean(promptQuery));
+    }
+    if (logFilterAll) {
+      logFilterAll.classList.toggle("active", !logsErrorsOnly);
+      logFilterAll.setAttribute("aria-pressed", String(!logsErrorsOnly));
+    }
+    if (logFilterErrors) {
+      logFilterErrors.classList.toggle("active", logsErrorsOnly);
+      logFilterErrors.setAttribute("aria-pressed", String(logsErrorsOnly));
+    }
+    if (logFilterSummary) {
+      const total = logsFilteredTotal + logsRunningTotal;
+      const filtered = Boolean(promptQuery || logsErrorsOnly);
+      logFilterSummary.textContent = filtered ? `筛选结果 ${total} 条` : `共 ${total} 条`;
+      logFilterSummary.classList.toggle("filtered", filtered);
     }
   }
 
@@ -1363,7 +1397,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const t = Number(item.duration_sec || 0);
     const status = Number(item.status_code || 0);
     const taskStatus = forceInProgress ? "IN_PROGRESS" : String(item.task_status || "").toUpperCase();
-    const isFailed = !forceInProgress && status >= 400;
+    const isFailed = !forceInProgress && (status >= 400 || taskStatus === "FAILED");
     const isRunning = !isFailed && taskStatus === "IN_PROGRESS";
     const isSuccess = !isRunning && !isFailed;
     const stateClass = isRunning ? "running" : (isFailed ? "failed" : "success");
@@ -1378,7 +1412,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const errCode = String(item.error_code || "").trim();
     const failedStatusText = status > 0 ? String(status) : "-";
     const failedStateContent = errCode
-      ? `<button class="log-state log-state-btn failed" data-error-code="${escapeHtml(errCode)}" type="button">${stateIcon}<span>${escapeHtml(failedStatusText)}</span></button>`
+      ? `<button class="log-state log-state-btn failed" data-error-code="${escapeHtml(errCode)}" type="button" title="查看错误详情" aria-label="查看错误 ${escapeHtml(failedStatusText)} 的详情">${stateIcon}<span>${escapeHtml(failedStatusText)}</span><span class="log-state-detail">详情</span></button>`
       : `<span class="log-state failed"><span class="icon-error" aria-hidden="true">!</span><span>${escapeHtml(failedStatusText)}</span></span>`;
     const stateContent = isFailed ? failedStateContent : `${stateIcon}<span>${stateLabel}</span>`;
     const statusCell = isFailed ? stateContent : `<span class="log-state ${stateClass}">${stateContent}</span>`;
@@ -1453,7 +1487,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     ];
 
     if (!allRows.length) {
-      logsTbody.innerHTML = `<tr><td colspan="12" class="empty-state">暂无请求日志</td></tr>`;
+      const hasFilter = logsErrorsOnly || Boolean(logPromptSearch && String(logPromptSearch.value || "").trim());
+      logsTbody.innerHTML = `<tr><td colspan="12" class="empty-state">${hasFilter ? "没有匹配的请求日志" : "暂无请求日志"}</td></tr>`;
       return;
     }
 
@@ -1641,6 +1676,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (logPromptSearch) {
     logPromptSearch.addEventListener("input", () => {
+      renderLogFilterState();
       if (logsSearchTimer) clearTimeout(logsSearchTimer);
       logsSearchTimer = setTimeout(() => {
         logsSearchTimer = null;
@@ -1648,11 +1684,45 @@ document.addEventListener("DOMContentLoaded", async () => {
         loadLogs();
       }, 300);
     });
+    logPromptSearch.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      if (logsSearchTimer) clearTimeout(logsSearchTimer);
+      logsSearchTimer = null;
+      logsCurrentPage = 1;
+      loadLogs();
+    });
   }
 
-  if (logErrorsOnly) {
-    logErrorsOnly.addEventListener("change", () => {
+  if (logSearchClear) {
+    logSearchClear.addEventListener("click", () => {
+      if (!logPromptSearch) return;
+      logPromptSearch.value = "";
+      logPromptSearch.focus();
+      if (logsSearchTimer) clearTimeout(logsSearchTimer);
+      logsSearchTimer = null;
       logsCurrentPage = 1;
+      renderLogFilterState();
+      loadLogs();
+    });
+  }
+
+  if (logFilterAll) {
+    logFilterAll.addEventListener("click", () => {
+      if (!logsErrorsOnly) return;
+      logsErrorsOnly = false;
+      logsCurrentPage = 1;
+      renderLogFilterState();
+      loadLogs();
+    });
+  }
+
+  if (logFilterErrors) {
+    logFilterErrors.addEventListener("click", () => {
+      if (logsErrorsOnly) return;
+      logsErrorsOnly = true;
+      logsCurrentPage = 1;
+      renderLogFilterState();
       loadLogs();
     });
   }
