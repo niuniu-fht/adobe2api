@@ -303,6 +303,29 @@ curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
 
 也可以直接使用简洁别名：`nano-banana-2`、`nano-banana-pro`。
 
+OpenAI Images 客户端可在 Gemini 模型前增加 `gpt-image-` 前缀：
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-gemini-3.1-flash-image",
+    "prompt": "futuristic city skyline at dusk",
+    "size": "1536x1024"
+  }'
+```
+
+此格式会继续走 Gemini 上游，并自动转换 `size`：
+
+- `1024x1024` -> `aspectRatio=1:1`、`imageSize=1K`
+- `1536x1024` -> `aspectRatio=3:2`、`imageSize=2K`
+- `1024x1536` -> `aspectRatio=2:3`、`imageSize=2K`
+- `1792x1024` -> `aspectRatio=16:9`、`imageSize=2K`
+- `1024x1792` -> `aspectRatio=9:16`、`imageSize=2K`
+
+支持的前缀模型为 `gpt-image-gemini-3.1-flash-image` 和 `gpt-image-gemini-3-pro-image`，同样适用于 `/v1/images/edits`。
+
 ### 3.4 Gemini 原生接口：`generateContent`
 
 ```bash

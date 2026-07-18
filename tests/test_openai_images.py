@@ -6,10 +6,13 @@ from core.models.openai_images import (
     encode_image_response_item,
     gpt_image_model_id_from_size,
     image_generation_batch_sizes,
+    normalize_openai_gemini_model_id,
+    parse_openai_gemini_size,
     parse_requested_size,
     parse_response_format,
 )
 from core.models.payloads import build_image_payload_candidates, random_image_seed
+from core.models.resolver import resolve_model, resolve_ratio_and_resolution
 from core.adobe_client import AdobeClient, ContentPolicyError
 
 
@@ -192,3 +195,49 @@ def test_gpt_image_unsafe_retries_with_new_seeds(monkeypatch):
     assert image_bytes == b"image"
     assert meta["status"] == "succeeded"
     assert attempted_seeds == [101, 202, 303]
+
+
+def test_openai_prefixed_gemini_model_is_normalized():
+    assert normalize_openai_gemini_model_id(
+        "gpt-image-gemini-3.1-flash-image"
+    ) == "gemini-3.1-flash-image"
+    assert normalize_openai_gemini_model_id(
+        "gpt-image-gemini-3-pro-image"
+    ) == "gemini-3-pro-image"
+    assert normalize_openai_gemini_model_id("gpt-image-2") is None
+
+
+def test_openai_sizes_map_to_gemini_ratio_and_resolution():
+    assert parse_openai_gemini_size("1024x1024") == ("1:1", "1K")
+    assert parse_openai_gemini_size("1536x1024") == ("3:2", "2K")
+    assert parse_openai_gemini_size("1024x1536") == ("2:3", "2K")
+    assert parse_openai_gemini_size("1792x1024") == ("16:9", "2K")
+    assert parse_openai_gemini_size("1024x1792") == ("9:16", "2K")
+    assert parse_openai_gemini_size("4096x4096") == ("1:1", "4K")
+
+
+def test_openai_prefixed_gemini_size_reaches_gemini_payload():
+    model_id = "gpt-image-gemini-3.1-flash-image"
+    ratio, resolution, response_model = resolve_ratio_and_resolution(
+        {"size": "1536x1024"},
+        model_id,
+    )
+    model_conf = resolve_model(response_model)
+
+    assert (ratio, resolution, response_model) == ("3:2", "2K", model_id)
+    assert model_conf["upstream_model_id"] == "gemini-flash"
+    assert model_conf["upstream_model_version"] == "nano-banana-3"
+
+    payload = build_image_payload_candidates(
+        prompt="draw a dashboard",
+        aspect_ratio=ratio,
+        output_resolution=resolution,
+        upstream_model_id=model_conf["upstream_model_id"],
+        upstream_model_version=model_conf["upstream_model_version"],
+    )[0]
+
+    assert payload["modelId"] == "gemini-flash"
+    assert payload["modelVersion"] == "nano-banana-3"
+    assert payload["modelSpecificPayload"]["aspectRatio"] == "3:2"
+    assert payload["modelSpecificPayload"]["imageSize"] == "2K"
+    assert payload["size"] == {"width": 2496, "height": 1664}

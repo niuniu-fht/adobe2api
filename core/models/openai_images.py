@@ -4,7 +4,7 @@ import base64
 import io
 import re
 from dataclasses import dataclass
-from math import gcd
+from math import gcd, log
 from typing import Optional
 
 try:
@@ -12,12 +12,14 @@ try:
 except Exception:
     Image = None
 
-from .catalog import GPT_IMAGE_RATIO_SUFFIX_MAP
+from .catalog import GPT_IMAGE_RATIO_SUFFIX_MAP, SUPPORTED_RATIOS
+from .gemini import normalize_gemini_model_id
 
 
 OPENAI_GPT_IMAGE_MODEL_VERSIONS = {
     "gpt-image-2": "2",
 }
+OPENAI_GEMINI_MODEL_PREFIX = "gpt-image-"
 SUPPORTED_RESPONSE_FORMATS = {"url", "b64_json", "base64"}
 SUPPORTED_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
 DEFAULT_OUTPUT_FORMAT = "png"
@@ -25,6 +27,7 @@ MAX_IMAGE_COUNT = 10
 MAX_GPT_IMAGE_LONG_EDGE = 3840
 MAX_GPT_IMAGE_PIXELS = 8_294_400
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
+RATIO_RE = re.compile(r"^\d+:\d+$")
 DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP = {
     "16:9": {"width": 2560, "height": 1440},
 }
@@ -54,6 +57,54 @@ class OpenAIImageGenerationOptions:
 
 def is_native_gpt_image_model(model_id: Optional[str]) -> bool:
     return str(model_id or "").strip() in OPENAI_GPT_IMAGE_MODEL_VERSIONS
+
+
+def normalize_openai_gemini_model_id(model_id: object) -> str | None:
+    normalized = str(model_id or "").strip()
+    if not normalized.startswith(OPENAI_GEMINI_MODEL_PREFIX):
+        return None
+    return normalize_gemini_model_id(normalized[len(OPENAI_GEMINI_MODEL_PREFIX) :])
+
+
+def _nearest_supported_ratio(width: int, height: int) -> str:
+    target = width / height
+
+    def distance(ratio: str) -> tuple[float, str]:
+        left, right = ratio.split(":", 1)
+        candidate = int(left) / int(right)
+        return abs(log(target / candidate)), ratio
+
+    return min(SUPPORTED_RATIOS, key=distance)
+
+
+def parse_openai_gemini_size(raw_size: object) -> Optional[tuple[str, str]]:
+    if raw_size is None:
+        return None
+    size = str(raw_size or "").strip().lower()
+    if not size or size == "auto":
+        return None
+    if size in SUPPORTED_RATIOS:
+        return size, "2K"
+    if RATIO_RE.match(size):
+        raise OpenAIImageRequestError(
+            f"unsupported Gemini aspect ratio: {size}",
+            "size",
+        )
+    match = SIZE_RE.match(size)
+    if not match:
+        raise OpenAIImageRequestError(
+            "size must be auto, a supported ASPECT_RATIO, or WIDTHxHEIGHT",
+            "size",
+        )
+    width = int(match.group(1))
+    height = int(match.group(2))
+    if width <= 0 or height <= 0:
+        raise OpenAIImageRequestError("size dimensions must be positive", "size")
+    requested_size = {"width": width, "height": height}
+    return (
+        _nearest_supported_ratio(width, height),
+        output_resolution_from_size(requested_size),
+    )
 
 
 def parse_image_count(raw_n: object) -> int:

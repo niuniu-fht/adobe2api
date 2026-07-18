@@ -24,6 +24,7 @@ from core.models.openai_images import (
     encode_image_response_item,
     image_generation_batch_sizes,
     is_native_gpt_image_model,
+    normalize_openai_gemini_model_id,
 )
 from core.models.gemini import (
     GEMINI_IMAGE_MODELS,
@@ -96,6 +97,8 @@ def build_generation_router(
 
     def _is_gpt_image_model_or_alias(model_id: str | None) -> bool:
         model_id = str(model_id or "").strip()
+        if normalize_openai_gemini_model_id(model_id):
+            return False
         if is_native_gpt_image_model(model_id):
             return True
         return bool(
@@ -296,6 +299,12 @@ def build_generation_router(
             **{
                 alias: GEMINI_IMAGE_MODELS[canonical_id]["description"]
                 for alias, canonical_id in GEMINI_MODEL_ALIASES.items()
+            },
+            **{
+                f"gpt-image-{model_id}": (
+                    f"OpenAI Images compatible alias for {conf['display_name']}"
+                )
+                for model_id, conf in GEMINI_IMAGE_MODELS.items()
             },
         }
         existing_ids = {item["id"] for item in data}

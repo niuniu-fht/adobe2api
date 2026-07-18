@@ -6,14 +6,22 @@ from fastapi import HTTPException
 
 from .catalog import DEFAULT_MODEL_ID, MODEL_CATALOG, SUPPORTED_RATIOS
 from .gemini import GEMINI_IMAGE_MODELS, normalize_gemini_model_id
+from .openai_images import (
+    normalize_openai_gemini_model_id,
+    parse_openai_gemini_size,
+)
 
 
-def _compatible_model_resolution(data: dict) -> str:
+def _compatible_model_resolution(
+    data: dict, size_resolution: str | None = None
+) -> str:
     explicit = str(
         data.get("output_resolution") or data.get("image_size") or ""
     ).strip().upper()
     if explicit in {"1K", "2K", "4K"}:
         return explicit
+    if size_resolution in {"1K", "2K", "4K"}:
+        return str(size_resolution)
     quality = str(data.get("quality") or "").strip().lower()
     if quality in {"4k", "ultra", "high"}:
         return "4K"
@@ -28,7 +36,9 @@ def _resolve_compatible_model_id(
     aspect_ratio: str,
     output_resolution: str,
 ) -> str | None:
-    canonical_model_id = normalize_gemini_model_id(model_id)
+    canonical_model_id = normalize_gemini_model_id(
+        model_id
+    ) or normalize_openai_gemini_model_id(model_id)
     if canonical_model_id is None:
         return None
     family_prefix = GEMINI_IMAGE_MODELS[canonical_model_id]["family_prefix"]
@@ -79,14 +89,26 @@ def ratio_from_size(size: str) -> str:
 def resolve_ratio_and_resolution(
     data: dict, model_id: Optional[str]
 ) -> tuple[str, str, str]:
-    ratio = str(data.get("aspect_ratio") or "").strip() or ratio_from_size(
-        data.get("size", "1024x1024")
+    canonical_model_id = normalize_gemini_model_id(
+        model_id
+    ) or normalize_openai_gemini_model_id(model_id)
+    compatible_size = (
+        parse_openai_gemini_size(data.get("size"))
+        if canonical_model_id
+        else None
+    )
+    size_ratio = compatible_size[0] if compatible_size else ""
+    size_resolution = compatible_size[1] if compatible_size else None
+    ratio = (
+        str(data.get("aspect_ratio") or "").strip()
+        or size_ratio
+        or ratio_from_size(data.get("size", "1024x1024"))
     )
     if ratio not in SUPPORTED_RATIOS:
         ratio = "1:1"
 
-    if model_id and normalize_gemini_model_id(model_id):
-        output_resolution = _compatible_model_resolution(data)
+    if model_id and canonical_model_id:
+        output_resolution = _compatible_model_resolution(data, size_resolution)
         resolved_model_id = _resolve_compatible_model_id(
             model_id,
             aspect_ratio=ratio,
