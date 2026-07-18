@@ -10,6 +10,7 @@ from core.models.gemini import (
     normalize_gemini_model_id,
     parse_gemini_generate_request,
 )
+from core.models.payloads import build_image_payload_candidates, size_from_ratio
 from core.models.resolver import resolve_model, resolve_ratio_and_resolution
 
 
@@ -79,6 +80,50 @@ def test_parse_gemini_request_rejects_missing_text():
             {"contents": [{"parts": []}]},
             "gemini-3-pro-image",
         )
+
+
+def test_gemini_image_config_reaches_adobe_payload():
+    options = parse_gemini_generate_request(
+        {
+            "contents": [{"parts": [{"text": "Draw a wide city skyline"}]}],
+            "generationConfig": {
+                "imageConfig": {
+                    "aspectRatio": "16:9",
+                    "imageSize": "1K",
+                }
+            },
+        },
+        "gemini-3.1-flash-image",
+    )
+
+    payload = build_image_payload_candidates(
+        prompt=options.prompt,
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.image_size,
+        upstream_model_id="gemini-flash",
+        upstream_model_version="nano-banana-3",
+    )[0]
+
+    assert payload["modelSpecificPayload"]["aspectRatio"] == "16:9"
+    assert payload["modelSpecificPayload"]["imageSize"] == "1K"
+    assert payload["outputResolution"] == "1K"
+    assert payload["size"] == {"width": 1360, "height": 768}
+
+
+@pytest.mark.parametrize(
+    ("ratio", "resolution", "expected"),
+    [
+        ("3:2", "1K", {"width": 1248, "height": 832}),
+        ("2:3", "2K", {"width": 1664, "height": 2496}),
+        ("21:9", "4K", {"width": 3696, "height": 1584}),
+    ],
+)
+def test_nano_banana_size_mapping_covers_gemini_ratios(
+    ratio,
+    resolution,
+    expected,
+):
+    assert size_from_ratio(ratio, resolution) == expected
 
 
 def test_gemini_response_uses_inline_data_candidates():

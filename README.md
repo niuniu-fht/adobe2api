@@ -323,6 +323,8 @@ curl -X POST "http://127.0.0.1:6001/v1beta/models/gemini-3.1-flash-image:generat
 
 支持 `gemini-3.1-flash-image`（Nano Banana 2）和 `gemini-3-pro-image`（Nano Banana Pro）。图生图可在 `parts` 中传入 Gemini 标准的 `inlineData`：`{"inlineData":{"mimeType":"image/png","data":"<base64>"}}`。返回图片位于 `candidates[].content.parts[].inlineData`。
 
+`imageConfig.aspectRatio` 和 `imageConfig.imageSize` 会传递到实际上游 payload，同时设置 `modelSpecificPayload.aspectRatio`、`modelSpecificPayload.imageSize`、`outputResolution` 和对应像素 `size`。
+
 ## 4）Cookie 导入
 
 ### 第一步：使用浏览器插件导出（推荐）

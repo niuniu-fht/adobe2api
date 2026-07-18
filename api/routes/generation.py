@@ -863,9 +863,22 @@ def build_generation_router(
                     conf
                     for candidate_id, conf in model_catalog.items()
                     if candidate_id.startswith(f"{family_prefix}-")
+                    and str(conf.get("aspect_ratio") or "")
+                    == gemini_options.aspect_ratio
+                    and str(conf.get("output_resolution") or "").upper()
+                    == gemini_options.image_size
                 ),
                 None,
             )
+            if model_conf is None:
+                model_conf = next(
+                    (
+                        conf
+                        for candidate_id, conf in model_catalog.items()
+                        if candidate_id.startswith(f"{family_prefix}-")
+                    ),
+                    None,
+                )
             if model_conf is None:
                 raise GeminiRequestError(f"model not found: {model_id}")
             image_options = build_legacy_image_options(
