@@ -14,6 +14,7 @@ except Exception:
 
 from .catalog import GPT_IMAGE_RATIO_SUFFIX_MAP, SUPPORTED_RATIOS
 from .gemini import normalize_gemini_model_id
+from .payloads import gpt_image_pixels_from_ratio
 
 
 OPENAI_GPT_IMAGE_MODEL_VERSIONS = {
@@ -24,8 +25,6 @@ SUPPORTED_RESPONSE_FORMATS = {"url", "b64_json", "base64"}
 SUPPORTED_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
 DEFAULT_OUTPUT_FORMAT = "png"
 MAX_IMAGE_COUNT = 10
-MAX_GPT_IMAGE_LONG_EDGE = 3840
-MAX_GPT_IMAGE_PIXELS = 8_294_400
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 RATIO_RE = re.compile(r"^\d+:\d+$")
 DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP = {
@@ -197,24 +196,6 @@ def parse_requested_size(raw_size: object) -> Optional[dict[str, int]]:
     height = int(match.group(2))
     if width <= 0 or height <= 0:
         raise OpenAIImageRequestError("size dimensions must be positive", "size")
-    longest_edge = max(width, height)
-    total_pixels = width * height
-    if longest_edge > MAX_GPT_IMAGE_LONG_EDGE:
-        raise OpenAIImageRequestError(
-            (
-                f"Invalid image size {width}x{height}: longest edge must not exceed "
-                f"{MAX_GPT_IMAGE_LONG_EDGE}px"
-            ),
-            "size",
-        )
-    if total_pixels > MAX_GPT_IMAGE_PIXELS:
-        raise OpenAIImageRequestError(
-            (
-                f"Invalid image size {width}x{height}: total pixels must not exceed "
-                f"{MAX_GPT_IMAGE_PIXELS}"
-            ),
-            "size",
-        )
     return {"width": width, "height": height}
 
 
@@ -238,12 +219,38 @@ def output_resolution_from_size(size: Optional[dict[str, int]]) -> str:
     return "4K"
 
 
+def gpt_image_output_resolution_from_size(
+    size: Optional[dict[str, int]],
+) -> str:
+    if not size:
+        return "2K"
+    width = int(size["width"])
+    height = int(size["height"])
+    ratio = aspect_ratio_from_size(size)
+    if ratio not in GPT_IMAGE_RATIO_SUFFIX_MAP:
+        return output_resolution_from_size(size)
+
+    def distance(resolution: str) -> tuple[float, int]:
+        candidate = gpt_image_pixels_from_ratio(ratio, resolution)
+        if candidate is None:
+            return float("inf"), 0
+        candidate_width = int(candidate["width"])
+        candidate_height = int(candidate["height"])
+        score = abs(log(width / candidate_width)) + abs(
+            log(height / candidate_height)
+        )
+        return score, int(resolution[0])
+
+    return min(("1K", "2K", "4K"), key=distance)
+
+
 def gpt_image_model_id_from_size(size: Optional[dict[str, int]]) -> Optional[str]:
     ratio = aspect_ratio_from_size(size)
     suffix = GPT_IMAGE_RATIO_SUFFIX_MAP.get(ratio)
     if not suffix:
         return None
-    return f"firefly-gpt-image-{output_resolution_from_size(size).lower()}-{suffix}"
+    resolution = gpt_image_output_resolution_from_size(size).lower()
+    return f"firefly-gpt-image-{resolution}-{suffix}"
 
 
 def build_native_gpt_image_options(
@@ -265,7 +272,7 @@ def build_native_gpt_image_options(
     return OpenAIImageGenerationOptions(
         n=parse_image_count(data.get("n")),
         aspect_ratio=aspect_ratio_from_size(requested_size),
-        output_resolution=output_resolution_from_size(requested_size),
+        output_resolution=gpt_image_output_resolution_from_size(requested_size),
         response_model=str(response_model or model_id).strip() or model_id,
         response_format=parse_response_format(
             data.get("response_format"),

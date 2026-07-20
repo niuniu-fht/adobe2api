@@ -4,14 +4,12 @@ import pytest
 from fastapi import HTTPException
 
 from core.models.openai_images import (
-    OpenAIImageRequestError,
     build_native_gpt_image_options,
     encode_image_response_item,
     gpt_image_model_id_from_size,
     image_generation_batch_sizes,
     normalize_openai_gemini_model_id,
     parse_openai_gemini_size,
-    parse_requested_size,
     parse_response_format,
 )
 from core.models.payloads import build_image_payload_candidates, random_image_seed
@@ -38,6 +36,7 @@ def test_native_gpt_image_2_request_uses_requested_size():
     assert options.response_model == "gpt-image-2"
     assert options.response_format == "url"
     assert options.aspect_ratio == "3:2"
+    assert options.output_resolution == "1K"
     assert options.requested_size == {"width": 1536, "height": 1024}
     assert options.upstream_model_id == "gpt-image"
     assert options.upstream_model_version == "2"
@@ -120,25 +119,49 @@ def test_custom_gpt_image_alias_can_keep_requested_model_id_and_quality():
     assert payload["generationSettings"]["detailLevel"] == 5
 
 
-def test_gpt_image_rejects_sizes_above_upstream_limits():
-    try:
-        parse_requested_size("4096x4096")
-    except OpenAIImageRequestError as exc:
-        assert exc.param == "size"
-        assert "longest edge" in str(exc)
-    else:
-        raise AssertionError("expected 4096x4096 to be rejected")
+def test_gpt_image_converts_large_size_to_ratio_and_resolution():
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2",
+            "prompt": "draw a poster",
+            "size": "3072x4096",
+        }
+    )
 
-    try:
-        parse_requested_size("3840x3840")
-    except OpenAIImageRequestError as exc:
-        assert exc.param == "size"
-        assert "total pixels" in str(exc)
-    else:
-        raise AssertionError("expected 3840x3840 to be rejected")
+    assert options.aspect_ratio == "3:4"
+    assert options.output_resolution == "4K"
+    assert options.requested_size == {"width": 3072, "height": 4096}
+    assert options.resolved_model_id == "firefly-gpt-image-4k-3x4"
 
-    assert parse_requested_size("3840x2160") == {"width": 3840, "height": 2160}
-    assert parse_requested_size("2880x2880") == {"width": 2880, "height": 2880}
+    payload = build_image_payload_candidates(
+        prompt="draw a poster",
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.output_resolution,
+        upstream_model_id=options.upstream_model_id or "",
+        upstream_model_version=options.upstream_model_version or "",
+        requested_size=options.requested_size,
+    )[0]
+
+    assert payload["outputResolution"] == "4K"
+    assert payload["size"] == {"width": 3072, "height": 4096}
+    assert payload["modelSpecificPayload"]["size"] == "3072x4096"
+
+
+def test_gpt_image_accepts_unbounded_pixels_and_keeps_requested_size():
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2-high",
+            "prompt": "draw a square",
+            "size": "10000x10000",
+        },
+        model_id_override="gpt-image-2",
+        response_model="gpt-image-2-high",
+    )
+
+    assert options.aspect_ratio == "1:1"
+    assert options.output_resolution == "4K"
+    assert options.requested_size == {"width": 10000, "height": 10000}
+    assert options.response_model == "gpt-image-2-high"
 
 
 def test_b64_json_response_item_matches_openai_images_shape():
