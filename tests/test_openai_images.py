@@ -130,7 +130,7 @@ def test_gpt_image_converts_large_size_to_ratio_and_resolution():
 
     assert options.aspect_ratio == "3:4"
     assert options.output_resolution == "4K"
-    assert options.requested_size == {"width": 3072, "height": 4096}
+    assert options.requested_size == {"width": 2496, "height": 3312}
     assert options.resolved_model_id == "firefly-gpt-image-4k-3x4"
 
     payload = build_image_payload_candidates(
@@ -143,11 +143,11 @@ def test_gpt_image_converts_large_size_to_ratio_and_resolution():
     )[0]
 
     assert payload["outputResolution"] == "4K"
-    assert payload["size"] == {"width": 3072, "height": 4096}
-    assert payload["modelSpecificPayload"]["size"] == "3072x4096"
+    assert payload["size"] == {"width": 2496, "height": 3312}
+    assert payload["modelSpecificPayload"]["size"] == "2496x3312"
 
 
-def test_gpt_image_caps_longest_edge_at_4096():
+def test_gpt_image_caps_square_at_upstream_pixel_limit():
     options = build_native_gpt_image_options(
         {
             "model": "gpt-image-2-high",
@@ -160,7 +160,7 @@ def test_gpt_image_caps_longest_edge_at_4096():
 
     assert options.aspect_ratio == "1:1"
     assert options.output_resolution == "4K"
-    assert options.requested_size == {"width": 4096, "height": 4096}
+    assert options.requested_size == {"width": 2880, "height": 2880}
     assert options.response_model == "gpt-image-2-high"
 
 
@@ -191,7 +191,38 @@ def test_gpt_image_scales_oversized_dimensions_while_preserving_ratio():
 
     assert options.aspect_ratio == "3:4"
     assert options.output_resolution == "4K"
-    assert options.requested_size == {"width": 3072, "height": 4096}
+    assert options.requested_size == {"width": 2496, "height": 3312}
+
+
+def test_gpt_image_caps_longest_edge_at_3840():
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2",
+            "prompt": "draw a wide banner",
+            "size": "5000x1000",
+        }
+    )
+
+    assert options.requested_size == {"width": 3840, "height": 768}
+    assert max(options.requested_size.values()) == 3840
+
+
+def test_gpt_image_adapts_3840_square_to_upstream_pixel_limit():
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2",
+            "prompt": "draw a square",
+            "size": "3840x3840",
+        }
+    )
+
+    assert options.aspect_ratio == "1:1"
+    assert options.output_resolution == "4K"
+    assert options.requested_size == {"width": 2880, "height": 2880}
+    assert (
+        options.requested_size["width"] * options.requested_size["height"]
+        <= 8_294_400
+    )
 
 
 def test_b64_json_response_item_matches_openai_images_shape():

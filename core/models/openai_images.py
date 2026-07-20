@@ -4,7 +4,7 @@ import base64
 import io
 import re
 from dataclasses import dataclass
-from math import gcd, log
+from math import gcd, log, sqrt
 from typing import Optional
 
 try:
@@ -25,7 +25,8 @@ SUPPORTED_RESPONSE_FORMATS = {"url", "b64_json", "base64"}
 SUPPORTED_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
 DEFAULT_OUTPUT_FORMAT = "png"
 MAX_IMAGE_COUNT = 10
-MAX_GPT_IMAGE_LONG_EDGE = 4096
+MAX_GPT_IMAGE_LONG_EDGE = 3840
+MAX_GPT_IMAGE_PIXELS = 8_294_400
 GPT_IMAGE_EDGE_ALIGNMENT = 16
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 RATIO_RE = re.compile(r"^\d+:\d+$")
@@ -275,7 +276,12 @@ def normalize_gpt_image_size(
     width = int(size["width"])
     height = int(size["height"])
     longest_edge = max(width, height)
-    scale = min(1.0, MAX_GPT_IMAGE_LONG_EDGE / longest_edge)
+    total_pixels = width * height
+    scale = min(
+        1.0,
+        MAX_GPT_IMAGE_LONG_EDGE / longest_edge,
+        sqrt(MAX_GPT_IMAGE_PIXELS / total_pixels),
+    )
 
     def align_edge(value: float) -> int:
         lower = int(value // GPT_IMAGE_EDGE_ALIGNMENT) * GPT_IMAGE_EDGE_ALIGNMENT
@@ -286,10 +292,33 @@ def normalize_gpt_image_size(
             min(MAX_GPT_IMAGE_LONG_EDGE, aligned),
         )
 
-    return {
-        "width": align_edge(width * scale),
-        "height": align_edge(height * scale),
-    }
+    target_width = width * scale
+    target_height = height * scale
+    aligned_width = align_edge(target_width)
+    aligned_height = align_edge(target_height)
+
+    while aligned_width * aligned_height > MAX_GPT_IMAGE_PIXELS:
+        candidates: list[tuple[int, int]] = []
+        if aligned_width > GPT_IMAGE_EDGE_ALIGNMENT:
+            candidates.append(
+                (aligned_width - GPT_IMAGE_EDGE_ALIGNMENT, aligned_height)
+            )
+        if aligned_height > GPT_IMAGE_EDGE_ALIGNMENT:
+            candidates.append(
+                (aligned_width, aligned_height - GPT_IMAGE_EDGE_ALIGNMENT)
+            )
+        if not candidates:
+            break
+
+        def distance(candidate: tuple[int, int]) -> float:
+            candidate_width, candidate_height = candidate
+            return abs(log(candidate_width / target_width)) + abs(
+                log(candidate_height / target_height)
+            )
+
+        aligned_width, aligned_height = min(candidates, key=distance)
+
+    return {"width": aligned_width, "height": aligned_height}
 
 
 def gpt_image_model_id_from_size(size: Optional[dict[str, int]]) -> Optional[str]:
