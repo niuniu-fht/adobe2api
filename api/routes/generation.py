@@ -47,9 +47,648 @@ from core.models.image_limits import (
 )
 
 
+SEEDANCE2_RATIOS = {
+    "auto",
+    "adaptive",
+    "21:9",
+    "16:9",
+    "4:3",
+    "1:1",
+    "3:4",
+    "9:16",
+}
+SEEDANCE_OFFICIAL_MODEL_ALIASES = {
+    "seedance-2.0": "firefly-seedance2",
+    "seedance-2-0": "firefly-seedance2",
+    "seedance-2-0-260128": "firefly-seedance2",
+    "dreamina-seedance-2-0": "firefly-seedance2",
+    "dreamina-seedance-2-0-260128": "firefly-seedance2",
+    "seedance-2.0-fast": "firefly-seedance2-fast",
+    "seedance-2-0-fast": "firefly-seedance2-fast",
+    "seedance-2-0-fast-260128": "firefly-seedance2-fast",
+    "dreamina-seedance-2-0-fast": "firefly-seedance2-fast",
+    "dreamina-seedance-2-0-fast-260128": "firefly-seedance2-fast",
+}
+SEEDANCE_OFFICIAL_MODEL_IDS = {
+    "firefly-seedance2": "dreamina-seedance-2-0-260128",
+    "firefly-seedance2-fast": "dreamina-seedance-2-0-fast-260128",
+}
+SEEDANCE_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+SEEDANCE_AUDIO_MAX_BYTES = 50 * 1024 * 1024
+SEEDANCE_IMAGE_MAX_BYTES = 50 * 1024 * 1024
+SEEDANCE_MAX_MULTIMODAL_REFERENCES = 9
+GROK_VIDEO_MODELS = {
+    "grok-imagine-video",
+    "grok-imagine-video-1.5",
+}
+GROK_VIDEO_RATIOS = {"16:9", "9:16", "4:3", "3:4", "1:1"}
+SEEDANCE_MEDIA_MIME_TYPES = {
+    "video": {
+        "video/mp4",
+        "video/quicktime",
+        "video/x-m4v",
+    },
+    "audio": {
+        "audio/aac",
+        "audio/aiff",
+        "audio/m4a",
+        "audio/mp4",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/x-aiff",
+        "audio/x-m4a",
+        "audio/x-wav",
+    },
+}
+SEEDANCE_MEDIA_EXTENSION_MIMES = {
+    "video": {
+        ".m4v": "video/x-m4v",
+        ".mov": "video/quicktime",
+        ".mp4": "video/mp4",
+    },
+    "audio": {
+        ".aac": "audio/aac",
+        ".aif": "audio/aiff",
+        ".aiff": "audio/aiff",
+        ".m4a": "audio/mp4",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+    },
+}
+
+
+def _normalize_seedance_media_mime(
+    media_type: str, mime_type: str, source: str = ""
+) -> str:
+    kind = str(media_type or "").strip().lower()
+    if kind not in SEEDANCE_MEDIA_MIME_TYPES:
+        raise ValueError("media_type must be video or audio")
+
+    normalized = str(mime_type or "").split(";", 1)[0].strip().lower()
+    aliases = {
+        "audio/mp3": "audio/mpeg",
+        "audio/mpeg3": "audio/mpeg",
+        "audio/x-mpeg-3": "audio/mpeg",
+        "video/mov": "video/quicktime",
+    }
+    normalized = aliases.get(normalized, normalized)
+    suffix = Path(str(source or "").split("?", 1)[0]).suffix.lower()
+    guessed = SEEDANCE_MEDIA_EXTENSION_MIMES[kind].get(suffix)
+    if normalized in {"", "application/octet-stream", "binary/octet-stream"}:
+        normalized = guessed or ("video/mp4" if kind == "video" else "audio/mpeg")
+    elif normalized not in SEEDANCE_MEDIA_MIME_TYPES[kind] and guessed:
+        normalized = guessed
+    if normalized not in SEEDANCE_MEDIA_MIME_TYPES[kind]:
+        supported = ", ".join(sorted(SEEDANCE_MEDIA_MIME_TYPES[kind]))
+        raise ValueError(f"unsupported {kind} content type {normalized}; use {supported}")
+    return normalized
+
+
+def load_seedance_media_reference(
+    raw_value: str,
+    media_type: str,
+    *,
+    proxies: dict | None = None,
+) -> tuple[bytes, str]:
+    """Load an official-style media value into memory for Adobe asset upload."""
+    kind = str(media_type or "").strip().lower()
+    if kind not in {"video", "audio"}:
+        raise ValueError("media_type must be video or audio")
+    value = str(raw_value or "").strip()
+    if not value:
+        raise ValueError(f"{kind}_url.url is required")
+
+    max_bytes = (
+        SEEDANCE_VIDEO_MAX_BYTES if kind == "video" else SEEDANCE_AUDIO_MAX_BYTES
+    )
+    mime_type = ""
+    if value.startswith("data:"):
+        head, sep, body = value.partition(",")
+        if not sep or ";base64" not in head.lower():
+            raise ValueError(f"{kind} data URL must be base64 encoded")
+        mime_type = head[5:].split(";", 1)[0].strip()
+        try:
+            media_bytes = base64.b64decode(re.sub(r"\s+", "", body), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(f"invalid base64 {kind} data") from exc
+    elif value.lower().startswith(("http://", "https://")):
+        try:
+            response = requests.get(
+                value,
+                timeout=60,
+                proxies=proxies,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise ValueError(f"failed to fetch {kind}_url: {exc}") from exc
+        try:
+            if response.status_code != 200:
+                raise ValueError(
+                    f"failed to fetch {kind}_url: HTTP {response.status_code}"
+                )
+            content_length = str(response.headers.get("content-length") or "").strip()
+            if content_length:
+                try:
+                    declared_size = int(content_length)
+                except ValueError:
+                    declared_size = 0
+                if declared_size > max_bytes:
+                    raise ValueError(
+                        f"{kind} is too large, max {max_bytes // (1024 * 1024)}MB"
+                    )
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(
+                        f"{kind} is too large, max {max_bytes // (1024 * 1024)}MB"
+                    )
+                chunks.append(chunk)
+            media_bytes = b"".join(chunks)
+            mime_type = str(response.headers.get("content-type") or "")
+        finally:
+            response.close()
+    else:
+        try:
+            media_bytes = base64.b64decode(
+                re.sub(r"\s+", "", value), validate=True
+            )
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                f"{kind} must be an http/https URL, data URL, or base64 string"
+            ) from exc
+
+    if not media_bytes:
+        raise ValueError(f"{kind} is empty")
+    if len(media_bytes) > max_bytes:
+        raise ValueError(f"{kind} is too large, max {max_bytes // (1024 * 1024)}MB")
+    return media_bytes, _normalize_seedance_media_mime(kind, mime_type, value)
+
+
+def normalize_seedance_official_model(
+    model: str, video_model_catalog: dict | None = None
+) -> str:
+    value = str(model or "").strip().lower()
+    if value in {"firefly-seedance2", "firefly-seedance2-fast"}:
+        return value
+    alias = SEEDANCE_OFFICIAL_MODEL_ALIASES.get(value, "")
+    if alias:
+        return alias
+    conf = (video_model_catalog or {}).get(value) or {}
+    if str(conf.get("engine") or "") in {"seedance2", "seedance2-fast"}:
+        return value
+    return ""
+
+
+def parse_seedance_official_request(data: dict, video_model_catalog: dict) -> dict:
+    requested_model = str(data.get("model") or "").strip().lower()
+    model = normalize_seedance_official_model(requested_model, video_model_catalog)
+    if not model or model not in video_model_catalog:
+        raise ValueError(
+            "model must be a Seedance official ID or sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}, "
+            "or sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}"
+        )
+
+    content = data.get("content")
+    if not isinstance(content, list) or not content:
+        raise ValueError("content must be a non-empty array")
+
+    prompt_parts: list[str] = []
+    image_refs: list[dict] = []
+    video_refs: list[dict] = []
+    audio_refs: list[dict] = []
+    for item in content:
+        if not isinstance(item, dict):
+            raise ValueError("content items must be objects")
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                prompt_parts.append(text)
+            continue
+        if item_type == "image_url":
+            image_value = item.get("image_url")
+            if isinstance(image_value, dict):
+                image_url = str(image_value.get("url") or "").strip()
+            else:
+                image_url = str(image_value or "").strip()
+            if not image_url:
+                raise ValueError("image_url.url is required")
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"", "first_frame", "last_frame", "reference_image"}:
+                raise ValueError(
+                    "image_url.role must be first_frame, last_frame or reference_image"
+                )
+            image_refs.append({"url": image_url, "role": role})
+            continue
+        if item_type in {"video_url", "audio_url"}:
+            value = item.get(item_type)
+            if isinstance(value, dict):
+                media_url = str(value.get("url") or "").strip()
+            else:
+                media_url = str(value or "").strip()
+            if not media_url:
+                raise ValueError(f"{item_type}.url is required")
+            expected_role = "reference_video" if item_type == "video_url" else "reference_audio"
+            role = str(item.get("role") or "").strip().lower()
+            if role != expected_role:
+                raise ValueError(f"{item_type}.role must be {expected_role}")
+            target = video_refs if item_type == "video_url" else audio_refs
+            target.append({"url": media_url, "role": role})
+            continue
+        if item_type == "draft_task":
+            raise ValueError("draft_task is not supported by the Adobe Firefly bridge")
+        raise ValueError(
+            "content.type must be text, image_url, video_url or audio_url"
+        )
+
+    frame_refs = [
+        item for item in image_refs if item["role"] in {"first_frame", "last_frame"}
+    ]
+    media_refs = [item for item in image_refs if item["role"] == "reference_image"]
+    untyped_refs = [item for item in image_refs if not item["role"]]
+    if frame_refs and (media_refs or video_refs or audio_refs):
+        raise ValueError(
+            "first/last frame roles cannot be mixed with multimodal references"
+        )
+    if frame_refs and len(frame_refs) > 2:
+        raise ValueError("at most two frame images are supported")
+    if media_refs and len(media_refs) > 9:
+        raise ValueError("at most nine reference images are supported")
+    if len(video_refs) > 3:
+        raise ValueError("at most three reference videos are supported")
+    if len(audio_refs) > 3:
+        raise ValueError("at most three reference audio files are supported")
+    if len(media_refs) + len(video_refs) + len(audio_refs) > SEEDANCE_MAX_MULTIMODAL_REFERENCES:
+        raise ValueError("at most nine multimodal references are supported by Adobe")
+    if audio_refs and not (media_refs or video_refs):
+        raise ValueError("reference_audio requires at least one image or video reference")
+    if untyped_refs:
+        if frame_refs or media_refs or video_refs or audio_refs:
+            raise ValueError("typed and untyped image roles cannot be mixed")
+        if len(image_refs) > 2:
+            raise ValueError("untyped image_url content supports at most two images")
+        for item in untyped_refs:
+            item["role"] = "first_frame"
+        if len(untyped_refs) == 2:
+            untyped_refs[1]["role"] = "last_frame"
+    if sum(item["role"] == "first_frame" for item in image_refs) > 1:
+        raise ValueError("only one first_frame image is supported")
+    if sum(item["role"] == "last_frame" for item in image_refs) > 1:
+        raise ValueError("only one last_frame image is supported")
+
+    conf = video_model_catalog[model]
+    is_fixed_preset = bool(conf.get("fixed_parameters", False))
+    default_ratio = str(conf.get("aspect_ratio") or "adaptive") if is_fixed_preset else "adaptive"
+    ratio = str(data.get("ratio") or default_ratio).strip().lower()
+    if ratio == "adaptive":
+        upstream_ratio = "auto"
+    else:
+        upstream_ratio = ratio
+    if ratio not in SEEDANCE2_RATIOS:
+        raise ValueError(
+            "ratio must be 16:9, 4:3, 1:1, 3:4, 9:16, 21:9 or adaptive"
+        )
+
+    resolution = str(
+        data.get("resolution") or conf.get("resolution") or "720p"
+    ).strip().lower()
+    supported = tuple(
+        str(value).lower() for value in conf.get("supported_resolutions", ())
+    )
+    if resolution not in supported:
+        raise ValueError(
+            f"resolution {resolution} is not supported by {model}; use {', '.join(supported)}"
+        )
+
+    raw_duration = data.get("duration")
+    if raw_duration is None:
+        raw_duration = conf.get("duration", 5)
+    try:
+        duration = int(raw_duration)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("duration must be an integer between 4 and 15") from exc
+    if duration < 4 or duration > 15:
+        raise ValueError("duration must be an integer between 4 and 15")
+    if is_fixed_preset:
+        if ratio != str(conf.get("aspect_ratio") or ""):
+            raise ValueError(
+                f"model {model} fixes ratio to {conf.get('aspect_ratio')}"
+            )
+        if resolution != str(conf.get("resolution") or ""):
+            raise ValueError(
+                f"model {model} fixes resolution to {conf.get('resolution')}"
+            )
+        if duration != int(conf.get("duration") or 0):
+            raise ValueError(
+                f"model {model} fixes duration to {conf.get('duration')} seconds"
+            )
+    if data.get("frames") is not None:
+        raise ValueError("frames is not supported by the Adobe Firefly bridge")
+    if bool(data.get("watermark", False)):
+        raise ValueError("watermark=true is not supported by the Adobe Firefly bridge")
+    if bool(data.get("return_last_frame", False)):
+        raise ValueError(
+            "return_last_frame=true is not supported by the Adobe Firefly bridge"
+        )
+    if bool(data.get("camera_fixed", False)):
+        raise ValueError("camera_fixed=true is not supported by Seedance 2.0")
+    if str(data.get("service_tier") or "default").lower() != "default":
+        raise ValueError("only service_tier=default is supported by the Adobe bridge")
+
+    seed = data.get("seed")
+    if seed is not None:
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("seed must be an integer between 0 and 4294967295") from exc
+        if seed < 0 or seed > 4294967295:
+            raise ValueError("seed must be an integer between 0 and 4294967295")
+
+    prompt = "\n".join(prompt_parts).strip()
+    if not prompt and not image_refs and not video_refs:
+        raise ValueError("content must include text, image_url or video_url")
+    if len(prompt) > 2500:
+        raise ValueError("prompt must be at most 2500 characters")
+    callback_url = str(data.get("callback_url") or "").strip()
+    if callback_url and not callback_url.lower().startswith(("http://", "https://")):
+        raise ValueError("callback_url must use http or https")
+    return {
+        "model": model,
+        "official_model": SEEDANCE_OFFICIAL_MODEL_IDS[
+            str(conf.get("canonical_model") or model)
+        ],
+        "response_model": (
+            requested_model
+            if is_fixed_preset
+            else SEEDANCE_OFFICIAL_MODEL_IDS[model]
+        ),
+        "prompt": prompt,
+        "ratio": ratio,
+        "upstream_ratio": upstream_ratio,
+        "resolution": resolution,
+        "duration": duration,
+        "generate_audio": bool(data.get("generate_audio", True)),
+        "seed": seed,
+        "image_refs": image_refs,
+        "video_refs": video_refs,
+        "audio_refs": audio_refs,
+        "callback_url": callback_url or None,
+        "user": str(data.get("user") or "").strip() or None,
+    }
+
+
+def _grok_input_url(value: Any, field_name: str) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    if str(value.get("file_id") or "").strip():
+        raise ValueError(f"{field_name}.file_id is not supported by this bridge; use url")
+    return str(value.get("url") or value.get("image_url") or "").strip()
+
+
+def parse_grok_video_request(data: dict, video_model_catalog: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("request body must be an object")
+
+    requested_model = str(data.get("model") or "grok-imagine-video").strip().lower()
+    seedance_preset = video_model_catalog.get(requested_model)
+    is_seedance_preset = bool(
+        isinstance(seedance_preset, dict)
+        and seedance_preset.get("fixed_parameters")
+        and str(seedance_preset.get("engine") or "")
+        in {"seedance2", "seedance2-fast"}
+    )
+    if requested_model not in GROK_VIDEO_MODELS and not is_seedance_preset:
+        raise ValueError(
+            "model must be grok-imagine-video, grok-imagine-video-1.5, or an sd2-* / sd2-fast-* fixed model"
+        )
+
+    default_duration = int(seedance_preset.get("duration") or 8) if is_seedance_preset else 8
+    raw_duration = data.get(
+        "duration",
+        data.get("seconds", default_duration),
+    )
+    try:
+        duration = int(raw_duration)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("duration must be an integer between 4 and 15") from exc
+    if duration < 4 or duration > 15:
+        raise ValueError("duration must be an integer between 4 and 15")
+
+    default_ratio = (
+        str(seedance_preset.get("aspect_ratio") or "16:9")
+        if is_seedance_preset
+        else "16:9"
+    )
+    ratio = str(
+        data.get("aspect_ratio") or data.get("ratio") or default_ratio
+    ).strip()
+    if ratio not in GROK_VIDEO_RATIOS:
+        raise ValueError("aspect_ratio must be one of: 16:9, 9:16, 4:3, 3:4, 1:1")
+
+    default_resolution = (
+        str(seedance_preset.get("resolution") or "480p")
+        if is_seedance_preset
+        else "480p"
+    )
+    resolution = str(
+        data.get("resolution") or data.get("output_resolution") or default_resolution
+    ).strip().lower()
+    if resolution not in {"480p", "720p", "1080p"}:
+        raise ValueError("resolution must be 480p, 720p or 1080p")
+    internal_model = (
+        requested_model
+        if is_seedance_preset
+        else ("firefly-seedance2" if resolution == "1080p" else "firefly-seedance2-fast")
+    )
+
+    prompt = str(data.get("prompt") or "").strip()
+    image_url = _grok_input_url(data.get("image"), "image")
+    reference_values = data.get("reference_images") or []
+    if not isinstance(reference_values, list):
+        raise ValueError("reference_images must be an array")
+    if len(reference_values) > 9:
+        raise ValueError("reference_images supports at most nine images")
+    reference_urls = [
+        _grok_input_url(value, f"reference_images[{index}]")
+        for index, value in enumerate(reference_values)
+    ]
+    if any(not value for value in reference_urls):
+        raise ValueError("reference_images.url is required")
+    if image_url and reference_urls:
+        raise ValueError("image and reference_images cannot be used in the same request")
+    if not prompt and not image_url:
+        raise ValueError("prompt is required unless image is provided")
+    if reference_urls and not prompt:
+        raise ValueError("prompt is required when reference_images is provided")
+
+    content: list[dict] = []
+    if prompt:
+        content.append({"type": "text", "text": prompt})
+    if image_url:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": image_url},
+                "role": "first_frame",
+            }
+        )
+    for value in reference_urls:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": value},
+                "role": "reference_image",
+            }
+        )
+
+    bridge_request = {
+        "model": internal_model,
+        "content": content,
+        "duration": duration,
+        "ratio": ratio,
+        "resolution": resolution,
+        "generate_audio": bool(data.get("generate_audio", True)),
+        "seed": data.get("seed"),
+        "user": data.get("user"),
+    }
+    normalized = parse_seedance_official_request(
+        bridge_request, video_model_catalog
+    )
+    normalized["response_model"] = requested_model
+    normalized["grok_model"] = requested_model
+    return normalized
+
+
+def build_grok_video_task_response(task) -> dict:
+    status = str(task.status or "queued").lower()
+    if status == "succeeded":
+        return {
+            "status": "done",
+            "progress": 100,
+            "video": {
+                "url": task.video_url,
+                "duration": int(task.duration),
+                "respect_moderation": True,
+            },
+            "model": task.model,
+        }
+    if status == "failed":
+        raw_error = task.error if isinstance(task.error, dict) else {}
+        raw_code = str(raw_error.get("code") or "internal_error")
+        code_map = {
+            "InvalidInput": "invalid_argument",
+            "AuthenticationError": "permission_denied",
+            "QuotaExceeded": "failed_precondition",
+            "UpstreamUnavailable": "service_unavailable",
+        }
+        return {
+            "status": "failed",
+            "error": {
+                "code": code_map.get(raw_code, "internal_error"),
+                "message": str(raw_error.get("message") or "video generation failed"),
+            },
+        }
+    return {
+        "status": "pending",
+        "progress": max(0, min(99, int(round(float(task.progress or 0))))),
+        "model": task.model,
+    }
+
+
+def resolve_video_request_parameters(
+    data: dict, video_conf: dict
+) -> tuple[int, str, str, int | None]:
+    duration = int(video_conf.get("duration") or 8)
+    ratio = str(video_conf.get("aspect_ratio") or "16:9")
+    resolution = str(video_conf.get("resolution") or "720p").lower()
+    seed = None
+
+    engine = str(video_conf.get("engine") or "")
+    if engine not in {"seedance2", "seedance2-fast"}:
+        return duration, ratio, resolution, seed
+
+    if bool(video_conf.get("fixed_parameters", False)):
+        fixed_duration = int(video_conf.get("duration") or duration)
+        fixed_ratio = str(video_conf.get("aspect_ratio") or ratio)
+        fixed_resolution = str(video_conf.get("resolution") or resolution).lower()
+        requested_duration = data.get("duration")
+        if requested_duration is not None and int(requested_duration) != fixed_duration:
+            raise ValueError(f"model fixes duration to {fixed_duration} seconds")
+        requested_ratio = str(
+            data.get("aspect_ratio") or data.get("aspectRatio") or fixed_ratio
+        ).strip()
+        if requested_ratio != fixed_ratio:
+            raise ValueError(f"model fixes aspect_ratio to {fixed_ratio}")
+        requested_resolution = str(
+            data.get("resolution") or data.get("output_resolution") or fixed_resolution
+        ).strip().lower()
+        if requested_resolution != fixed_resolution:
+            raise ValueError(f"model fixes resolution to {fixed_resolution}")
+        raw_seed = data.get("seed")
+        if raw_seed is not None and str(raw_seed).strip() != "":
+            try:
+                seed = int(raw_seed)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "seed must be an integer between 0 and 4294967295"
+                ) from exc
+            if seed < 0 or seed > 4294967295:
+                raise ValueError("seed must be an integer between 0 and 4294967295")
+        return fixed_duration, fixed_ratio, fixed_resolution, seed
+
+    try:
+        duration = int(data.get("duration", duration))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("duration must be an integer between 4 and 15") from exc
+    if duration < 4 or duration > 15:
+        raise ValueError("duration must be an integer between 4 and 15")
+
+    ratio = str(
+        data.get("aspect_ratio") or data.get("aspectRatio") or ratio
+    ).strip()
+    if ratio not in SEEDANCE2_RATIOS:
+        raise ValueError(
+            "aspect_ratio must be one of: auto, 21:9, 16:9, 4:3, 1:1, 3:4, 9:16"
+        )
+
+    resolution = str(
+        data.get("resolution")
+        or data.get("output_resolution")
+        or resolution
+    ).strip().lower()
+    supported_resolutions = tuple(
+        str(value).lower()
+        for value in video_conf.get("supported_resolutions", ("480p", "720p"))
+    )
+    if resolution not in supported_resolutions:
+        raise ValueError(
+            f"resolution must be one of: {', '.join(supported_resolutions)}"
+        )
+
+    raw_seed = data.get("seed")
+    if raw_seed is not None and str(raw_seed).strip() != "":
+        try:
+            seed = int(raw_seed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("seed must be an integer between 0 and 4294967295") from exc
+        if seed < 0 or seed > 4294967295:
+            raise ValueError("seed must be an integer between 0 and 4294967295")
+
+    return duration, ratio, resolution, seed
+
+
 def build_generation_router(
     *,
     store,
+    seedance_task_store,
     token_manager,
     client,
     generated_dir: Path,
@@ -66,12 +705,13 @@ def build_generation_router(
     public_image_url: Callable[[Request, str], str],
     public_generated_url: Callable[[Request, str], str],
     resolve_video_options: Callable[[dict], tuple[bool, str, str]],
-    load_input_images: Callable[[Any], list[tuple[bytes, str]]],
+    load_input_images: Callable[..., list[tuple[bytes, str]]],
     prepare_video_source_image: Callable[[bytes, str, str], tuple[bytes, str]],
     video_ext_from_meta: Callable[[dict], str],
     extract_prompt_from_messages: Callable[[Any], str],
     sse_chat_stream: Callable[[dict], Any],
     on_generated_file_written: Callable[[Path, int, int], None],
+    update_deferred_request_log: Callable[..., None],
     quota_error_cls,
     auth_error_cls,
     upstream_temp_error_cls,
@@ -1509,6 +2149,465 @@ def build_generation_router(
                 },
             )
 
+    def _seedance_task_response(task) -> dict:
+        payload = {
+            "id": task.id,
+            "model": task.model,
+            "status": task.status,
+            "error": task.error,
+            "created_at": task.created_at,
+            "updated_at": task.updated_at,
+            "content": {"video_url": task.video_url} if task.video_url else None,
+            "resolution": task.resolution,
+            "ratio": task.ratio,
+            "duration": task.duration,
+            "framespersecond": 24,
+            "progress": round(float(task.progress or 0), 2),
+        }
+        if task.seed is not None:
+            payload["seed"] = task.seed
+        if task.user:
+            payload["user"] = task.user
+        return payload
+
+    def _bind_deferred_task_log(request: Request, task, normalized: dict) -> None:
+        log_id = str(getattr(task, "log_id", None) or "").strip()
+        if not log_id:
+            return
+        request.state.log_deferred = True
+        request.state.log_task_id = task.id
+        request.state.log_task_status = "IN_PROGRESS"
+        request.state.log_task_progress = 0.0
+        request.state.log_model = task.model
+        request.state.log_prompt = task.prompt or None
+        request.state.log_prompt_preview = (
+            task.prompt.replace("\r", " ").replace("\n", " ")[:180]
+            if task.prompt
+            else None
+        )
+        request.state.log_resolution = task.resolution
+        request.state.log_request_params = (
+            f"duration={task.duration}, aspect_ratio={task.ratio}, "
+            f"resolution={task.resolution}, generate_audio={task.generate_audio}"
+        )
+        input_urls = [
+            str(item.get("url") or "")
+            for item in normalized.get("image_refs", [])
+            if str(item.get("url") or "").lower().startswith(("http://", "https://"))
+        ]
+        request.state.log_input_image_urls = input_urls or None
+        update_deferred_request_log(
+            log_id,
+            {
+                "task_id": task.id,
+                "task_status": "IN_PROGRESS",
+                "task_progress": 0.0,
+                "status_code": 202,
+                "model": task.model,
+                "prompt": task.prompt or None,
+                "prompt_preview": request.state.log_prompt_preview,
+                "resolution": task.resolution,
+                "request_params": request.state.log_request_params,
+                "input_image_urls": request.state.log_input_image_urls,
+                "started_at": float(getattr(task, "log_started_at", 0.0) or time.time()),
+            },
+            final=False,
+        )
+
+    def _notify_seedance_callback(task_id: str) -> None:
+        task = seedance_task_store.get(task_id)
+        if not task or not task.callback_url:
+            return
+        try:
+            requests.post(
+                task.callback_url,
+                json=_seedance_task_response(task),
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.warning("Seedance callback failed task_id=%s error=%s", task_id, exc)
+
+    def _run_seedance_official_task(
+        task_id: str, normalized: dict, output_url_root: str
+    ) -> None:
+        initial_task = seedance_task_store.get(task_id)
+        log_id = str(getattr(initial_task, "log_id", None) or "").strip()
+        task_started_at = float(
+            getattr(initial_task, "log_started_at", 0.0) or time.time()
+        )
+        resolution_weight = {"480p": 0, "720p": 60, "1080p": 150}.get(
+            str(normalized.get("resolution") or "").lower(), 60
+        )
+        estimated_total_sec = max(
+            120.0,
+            150.0 + resolution_weight + max(0, int(normalized["duration"]) - 4) * 15,
+        )
+        last_progress = 1.0
+
+        def update_async_log(
+            *,
+            task_status: str,
+            progress: float | None = None,
+            upstream_job_id: str | None = None,
+            preview_url: str | None = None,
+            error: str | None = None,
+            status_code: int | None = None,
+            final: bool = False,
+        ) -> None:
+            if not log_id:
+                return
+            patch: dict[str, Any] = {
+                "task_id": task_id,
+                "task_status": task_status,
+                "updated_at": time.time(),
+            }
+            if progress is not None:
+                patch["task_progress"] = round(float(progress), 2)
+            if upstream_job_id:
+                patch["upstream_job_id"] = str(upstream_job_id)
+            if preview_url:
+                patch["preview_url"] = preview_url
+                patch["preview_kind"] = "video"
+            if error:
+                patch["error"] = str(error)[:240]
+            if status_code is not None:
+                patch["status_code"] = int(status_code)
+            update_deferred_request_log(log_id, patch, final=final)
+
+        seedance_task_store.update(task_id, status="running", progress=1.0)
+        update_async_log(task_status="IN_PROGRESS", progress=1.0)
+        _notify_seedance_callback(task_id)
+        content_parts: list[dict] = []
+        if normalized["prompt"]:
+            content_parts.append({"type": "text", "text": normalized["prompt"]})
+        image_refs = list(normalized["image_refs"])
+        if image_refs:
+            role_order = {"first_frame": 0, "last_frame": 1, "reference_image": 2}
+            image_refs.sort(key=lambda item: role_order.get(item["role"], 3))
+            content_parts.extend(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": item["url"]},
+                }
+                for item in image_refs
+            )
+        messages = [{"role": "user", "content": content_parts}]
+
+        try:
+            input_images = load_input_images(
+                messages,
+                max_items=9,
+                max_bytes=SEEDANCE_IMAGE_MAX_BYTES,
+            )
+            input_videos = [
+                load_seedance_media_reference(
+                    item["url"], "video", proxies=client._requests_proxies()
+                )
+                for item in normalized["video_refs"]
+            ]
+            input_audios = [
+                load_seedance_media_reference(
+                    item["url"], "audio", proxies=client._requests_proxies()
+                )
+                for item in normalized["audio_refs"]
+            ]
+        except Exception as exc:
+            detail = str(getattr(exc, "detail", None) or exc)
+            seedance_task_store.update(
+                task_id,
+                status="failed",
+                error={"code": "InvalidInput", "message": detail},
+            )
+            update_async_log(
+                task_status="FAILED",
+                error=detail,
+                status_code=422,
+                final=True,
+            )
+            _notify_seedance_callback(task_id)
+            return
+
+        reference_mode = (
+            "image"
+            if any(item["role"] == "reference_image" for item in image_refs)
+            else "frame"
+        )
+        model_conf = video_model_catalog[normalized["model"]]
+        max_attempts = client.retry_max_attempts if client.retry_enabled else 1
+        max_attempts = max(1, int(max_attempts))
+        last_error = "No active tokens available in the pool"
+        last_code = "NoAvailableToken"
+
+        for attempt in range(1, max_attempts + 1):
+            token = token_manager.get_available(strategy=client.token_rotation_strategy)
+            if not token:
+                break
+            try:
+                source_image_ids: list[str] = []
+                for image_bytes, image_mime in input_images:
+                    if reference_mode == "image" or normalized["upstream_ratio"] == "auto":
+                        prepared_bytes = image_bytes
+                        prepared_mime = image_mime or "image/jpeg"
+                    else:
+                        prepared_bytes, prepared_mime = prepare_video_source_image(
+                            image_bytes,
+                            normalized["upstream_ratio"],
+                            normalized["resolution"],
+                        )
+                    source_image_ids.append(
+                        client.upload_image(token, prepared_bytes, prepared_mime)
+                    )
+                source_video_ids = [
+                    client.upload_video(token, media_bytes, media_mime)
+                    for media_bytes, media_mime in input_videos
+                ]
+                source_audio_ids = [
+                    client.upload_audio(token, media_bytes, media_mime)
+                    for media_bytes, media_mime in input_audios
+                ]
+
+                def progress_cb(update: dict) -> None:
+                    nonlocal last_progress
+                    raw_progress = update.get("task_progress")
+                    try:
+                        progress = float(raw_progress)
+                    except (TypeError, ValueError):
+                        progress = 0.0
+                    if progress <= 0:
+                        elapsed = max(0.0, time.time() - task_started_at)
+                        progress = min(95.0, 3.0 + (elapsed / estimated_total_sec) * 92.0)
+                    progress = min(99.0, max(last_progress, progress))
+                    last_progress = progress
+                    upstream_job_id = str(update.get("upstream_job_id") or "").strip()
+                    patch: dict = {
+                        "status": "running",
+                        "progress": progress,
+                    }
+                    if upstream_job_id:
+                        patch["upstream_job_id"] = upstream_job_id
+                    seedance_task_store.update(task_id, **patch)
+                    update_async_log(
+                        task_status="IN_PROGRESS",
+                        progress=progress,
+                        upstream_job_id=upstream_job_id or None,
+                    )
+
+                tmp_path = generated_dir / f"{task_id}.video.tmp"
+                video_bytes, video_meta = client.generate_video(
+                    token=token,
+                    video_conf=model_conf,
+                    prompt=normalized["prompt"],
+                    aspect_ratio=normalized["upstream_ratio"],
+                    duration=normalized["duration"],
+                    resolution=normalized["resolution"],
+                    source_image_ids=source_image_ids,
+                    source_video_ids=source_video_ids,
+                    source_audio_ids=source_audio_ids,
+                    timeout=max(int(client.generate_timeout), 600),
+                    generate_audio=normalized["generate_audio"],
+                    reference_mode=reference_mode,
+                    seed=normalized["seed"],
+                    out_path=tmp_path,
+                    progress_cb=progress_cb,
+                )
+                video_ext = video_ext_from_meta(video_meta)
+                filename = f"{task_id}.{video_ext}"
+                out_path = generated_dir / filename
+                old_size = int(out_path.stat().st_size) if out_path.exists() else 0
+                if video_bytes is not None:
+                    out_path.write_bytes(video_bytes)
+                elif tmp_path.exists():
+                    tmp_path.replace(out_path)
+                new_size = int(out_path.stat().st_size) if out_path.exists() else 0
+                on_generated_file_written(out_path, old_size, new_size)
+                token_manager.report_success(token)
+                seedance_task_store.update(
+                    task_id,
+                    status="succeeded",
+                    progress=100.0,
+                    video_url=f"{output_url_root}{filename}",
+                    error=None,
+                )
+                video_url = f"{output_url_root}{filename}"
+                completed_task = seedance_task_store.get(task_id)
+                update_async_log(
+                    task_status="COMPLETED",
+                    progress=100.0,
+                    upstream_job_id=(
+                        str(getattr(completed_task, "upstream_job_id", None) or "")
+                        or None
+                    ),
+                    preview_url=video_url,
+                    status_code=200,
+                    final=True,
+                )
+                _notify_seedance_callback(task_id)
+                return
+            except quota_error_cls as exc:
+                token_manager.report_exhausted(token)
+                last_error = str(exc)
+                last_code = "QuotaExceeded"
+                retryable = attempt < max_attempts
+            except auth_error_cls as exc:
+                token_manager.report_invalid(token)
+                last_error = str(exc)
+                last_code = "AuthenticationError"
+                retryable = attempt < max_attempts
+            except upstream_temp_error_cls as exc:
+                last_error = str(exc)
+                last_code = "UpstreamUnavailable"
+                retryable = attempt < max_attempts and client.should_retry_temporary_error(
+                    exc
+                )
+            except Exception as exc:
+                last_error = str(getattr(exc, "detail", None) or exc)
+                last_code = "GenerationFailed"
+                retryable = False
+
+            if retryable:
+                delay = client._retry_delay_for_attempt(attempt)
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+            break
+
+        seedance_task_store.update(
+            task_id,
+            status="failed",
+            error={"code": last_code, "message": last_error},
+        )
+        failed_task = seedance_task_store.get(task_id)
+        update_async_log(
+            task_status="FAILED",
+            progress=last_progress,
+            upstream_job_id=(
+                str(getattr(failed_task, "upstream_job_id", None) or "") or None
+            ),
+            error=last_error,
+            status_code=502,
+            final=True,
+        )
+        _notify_seedance_callback(task_id)
+
+    @router.post("/api/v3/contents/generations/tasks")
+    def create_seedance_official_task(data: dict, request: Request):
+        require_service_api_key(request)
+        try:
+            normalized = parse_seedance_official_request(data, video_model_catalog)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "InvalidParameter",
+                        "message": str(exc),
+                    }
+                },
+            )
+
+        log_started_at = time.time()
+        task = seedance_task_store.create(
+            model=normalized["response_model"],
+            local_model=normalized["model"],
+            prompt=normalized["prompt"],
+            ratio=normalized["ratio"],
+            resolution=normalized["resolution"],
+            duration=normalized["duration"],
+            generate_audio=normalized["generate_audio"],
+            seed=normalized["seed"],
+            callback_url=normalized["callback_url"],
+            user=normalized["user"],
+            log_id=str(getattr(request.state, "log_id", "") or "") or None,
+            log_started_at=log_started_at,
+            api_style="seedance",
+        )
+        _bind_deferred_task_log(request, task, normalized)
+        output_url_root = public_generated_url(request, "OUTPUT_FILE").replace(
+            "OUTPUT_FILE", ""
+        )
+        threading.Thread(
+            target=_run_seedance_official_task,
+            args=(task.id, normalized, output_url_root),
+            daemon=True,
+        ).start()
+        return {"id": task.id}
+
+    @router.post("/v1/videos")
+    @router.post("/v1/videos/generations")
+    def create_grok_video_task(data: dict, request: Request):
+        require_service_api_key(request)
+        try:
+            normalized = parse_grok_video_request(data, video_model_catalog)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "invalid_argument",
+                        "message": str(exc),
+                    }
+                },
+            )
+
+        log_started_at = time.time()
+        task = seedance_task_store.create(
+            model=normalized["response_model"],
+            local_model=normalized["model"],
+            prompt=normalized["prompt"],
+            ratio=normalized["ratio"],
+            resolution=normalized["resolution"],
+            duration=normalized["duration"],
+            generate_audio=normalized["generate_audio"],
+            seed=normalized["seed"],
+            callback_url=None,
+            user=normalized["user"],
+            log_id=str(getattr(request.state, "log_id", "") or "") or None,
+            log_started_at=log_started_at,
+            api_style="grok",
+        )
+        _bind_deferred_task_log(request, task, normalized)
+        output_url_root = public_generated_url(request, "OUTPUT_FILE").replace(
+            "OUTPUT_FILE", ""
+        )
+        threading.Thread(
+            target=_run_seedance_official_task,
+            args=(task.id, normalized, output_url_root),
+            daemon=True,
+        ).start()
+        return {"request_id": task.id}
+
+    @router.get("/v1/videos/{request_id}")
+    def get_grok_video_task(request_id: str, request: Request):
+        require_service_api_key(request)
+        task = seedance_task_store.get(request_id)
+        if not task:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "invalid_argument",
+                        "message": "video request not found",
+                    }
+                },
+            )
+        return build_grok_video_task_response(task)
+
+    @router.get("/api/v3/contents/generations/tasks/{task_id}")
+    def get_seedance_official_task(task_id: str, request: Request):
+        require_service_api_key(request)
+        task = seedance_task_store.get(task_id)
+        if not task:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "TaskNotFound",
+                        "message": "video generation task not found",
+                    }
+                },
+            )
+        return _seedance_task_response(task)
+
     @router.post("/api/v1/generate")
     def create_job(data: GenerateRequest, request: Request):
         require_service_api_key(request)
@@ -1625,15 +2724,17 @@ def build_generation_router(
     def chat_completions(data: dict, request: Request):
         require_service_api_key(request)
 
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "message": "This endpoint is disabled. Use /v1/images/generations for image generation or /v1/images/edits for image editing.",
-                    "type": "invalid_request_error",
-                }
-            },
-        )
+        requested_model_id = str(data.get("model") or "").strip()
+        if requested_model_id not in video_model_catalog:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": "This endpoint only accepts video models. Use /v1/images/generations for image generation or /v1/images/edits for image editing.",
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
 
         prompt = extract_prompt_from_messages(data.get("messages") or [])
         if not prompt:
@@ -1651,7 +2752,8 @@ def build_generation_router(
 
         model_id = str(data.get("model") or "").strip()
         if (
-            model_id.startswith("firefly-sora2")
+            model_id.startswith("firefly-seedance")
+            or model_id.startswith("firefly-sora2")
             or model_id.startswith("firefly-veo31-fast")
             or model_id.startswith("firefly-veo31-")
             or model_id.startswith("firefly-kling-")
@@ -1660,7 +2762,7 @@ def build_generation_router(
                 status_code=400,
                 content={
                     "error": {
-                        "message": "Invalid video model. Use /v1/models to get supported firefly-sora2-*, firefly-veo31-*, firefly-veo31-fast-* or firefly-kling-* models",
+                        "message": "Invalid video model. Use /v1/models to get supported sd2-*, sd2-fast-*, firefly-seedance2, firefly-seedance2-fast, firefly-sora2-*, firefly-veo31-*, firefly-veo31-fast-* or firefly-kling-* models",
                         "type": "invalid_request_error",
                     }
                 },
@@ -1679,9 +2781,36 @@ def build_generation_router(
         video_resolution = (
             str(video_conf.get("resolution") or "720p") if video_conf else "720p"
         )
+        video_seed = None
         if video_conf:
             ratio = str(video_conf.get("aspect_ratio") or ratio)
         video_engine = str(video_conf.get("engine") or "sora2") if video_conf else ""
+        if video_conf:
+            try:
+                duration, ratio, video_resolution, video_seed = (
+                    resolve_video_request_parameters(data, video_conf)
+                )
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": str(exc),
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
+            prompt_max_length = int(video_conf.get("prompt_max_length") or 0)
+            if prompt_max_length and len(prompt) > prompt_max_length:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": f"prompt must be at most {prompt_max_length} characters",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
         generate_audio = True
         negative_prompt = ""
         video_reference_mode = (
@@ -1735,11 +2864,23 @@ def build_generation_router(
                         and video_reference_mode == "image"
                     ):
                         max_video_inputs = 3
+                    elif (
+                        video_engine in {"seedance2", "seedance2-fast"}
+                        and video_reference_mode == "image"
+                    ):
+                        max_video_inputs = 9
                     else:
                         max_video_inputs = (
                             2
                             if video_engine
-                            in {"veo31-fast", "veo31-standard", "kling-o3", "kling3"}
+                            in {
+                                "seedance2",
+                                "seedance2-fast",
+                                "veo31-fast",
+                                "veo31-standard",
+                                "kling-o3",
+                                "kling3",
+                            }
                             else 1
                         )
                     if len(input_images) > max_video_inputs:
@@ -1748,11 +2889,18 @@ def build_generation_router(
                             detail=f"video model supports at most {max_video_inputs} input image(s)",
                         )
                     for image_bytes, _image_mime in input_images[:max_video_inputs]:
-                        prepared_bytes, prepared_mime = prepare_video_source_image(
-                            image_bytes,
-                            ratio,
-                            video_resolution,
-                        )
+                        if (
+                            video_engine in {"seedance2", "seedance2-fast"}
+                            and video_reference_mode == "image"
+                        ):
+                            prepared_bytes = image_bytes
+                            prepared_mime = _image_mime or "image/jpeg"
+                        else:
+                            prepared_bytes, prepared_mime = prepare_video_source_image(
+                                image_bytes,
+                                ratio,
+                                video_resolution,
+                            )
                         source_image_ids.append(
                             client.upload_image(token, prepared_bytes, prepared_mime)
                         )
@@ -1789,12 +2937,14 @@ def build_generation_router(
                         prompt=video_prompt,
                         aspect_ratio=ratio,
                         duration=duration,
+                        resolution=video_resolution,
                         source_image_ids=source_image_ids,
                         entity_refs=entity_refs,
                         timeout=max(int(client.generate_timeout), 600),
                         negative_prompt=negative_prompt,
                         generate_audio=generate_audio,
                         reference_mode=video_reference_mode,
+                        seed=video_seed,
                         out_path=tmp_path,
                         progress_cb=_video_progress_cb,
                     )

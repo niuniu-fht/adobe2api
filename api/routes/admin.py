@@ -1,3 +1,5 @@
+import asyncio
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -5,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, List
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.responses import RedirectResponse
 
 from api.schemas import (
@@ -149,18 +151,17 @@ def build_admin_router(
             raise HTTPException(status_code=404, detail="error code not found")
         return item
 
-    @router.get("/api/v1/logs/running")
-    def list_running_logs(
-        request: Request,
+    def _running_log_items(
+        *,
         limit: int = 200,
         prompt: str = "",
         errors_only: bool = False,
-    ):
-        require_admin_auth(request)
+    ) -> list[dict]:
         if errors_only:
-            return {"items": [], "total": 0}
+            return []
         rows = live_log_store.list(limit=limit)
         items = []
+        now = time.time()
         for item in rows:
             if not isinstance(item, dict):
                 continue
@@ -169,8 +170,65 @@ def build_admin_router(
                 continue
             if not log_store.matches_filters(item, prompt=prompt):
                 continue
-            items.append(item)
+            row = dict(item)
+            started_at = float(row.get("started_at") or row.get("ts") or now)
+            row["duration_sec"] = max(
+                int(row.get("duration_sec") or 0),
+                max(0, int(now - started_at)),
+            )
+            items.append(row)
+        return items
+
+    @router.get("/api/v1/logs/running")
+    def list_running_logs(
+        request: Request,
+        limit: int = 200,
+        prompt: str = "",
+        errors_only: bool = False,
+    ):
+        require_admin_auth(request)
+        items = _running_log_items(
+            limit=limit,
+            prompt=prompt,
+            errors_only=errors_only,
+        )
         return {"items": items, "total": len(items)}
+
+    @router.get("/api/v1/logs/stream")
+    async def stream_running_logs(
+        request: Request,
+        limit: int = 200,
+        prompt: str = "",
+        errors_only: bool = False,
+    ):
+        require_admin_auth(request)
+
+        async def event_stream():
+            while True:
+                if await request.is_disconnected():
+                    break
+                items = _running_log_items(
+                    limit=limit,
+                    prompt=prompt,
+                    errors_only=errors_only,
+                )
+                payload = json.dumps(
+                    {"items": items, "total": len(items), "ts": time.time()},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                yield f"event: logs\ndata: {payload}\n\n"
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
     def _resolve_logs_stats_range(range_key: str) -> tuple[str, float, float]:
         now_dt = datetime.now()

@@ -72,6 +72,9 @@ docker compose up -d --build
 - `gemini-3.1-flash-image` / `nano-banana-2`（Nano Banana 2 兼容别名）
 - `gemini-3-pro-image` / `nano-banana-pro`（Nano Banana Pro 兼容别名）
 - `firefly-gpt-image-*`（图像，对应上游 `gpt-image:2`）
+- `sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}`（前端固定参数模型名）
+- `sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}`（前端固定参数模型名）
+- `firefly-seedance2` / `firefly-seedance2-fast`（旧客户端兼容别名）
 - `firefly-sora2-*`（视频）
 - `firefly-sora2-pro-*`（视频）
 - `firefly-veo31-*`（视频）
@@ -225,6 +228,39 @@ Kling O3 视频模型：
 - 示例：
   - `firefly-kling-o3-5s-16x9`
   - `firefly-kling-o3-15s-9x16`
+
+Seedance 2.0 系列使用固定参数模型名。标准版格式为
+`sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}`，Fast 格式为
+`sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}`。模型名直接确定时长、比例和
+分辨率，请求体无需重复这三个字段。两者均支持音频开关、seed、首尾帧和
+图片/视频/音频多模态参考；参考素材可在一次请求中使用 URL、Data URL 或纯
+Base64。标准版完整参数和实测示例见
+[`SEEDANCE2_API.md`](SEEDANCE2_API.md)，Fast 版见
+[`SEEDANCE2_FAST_API.md`](SEEDANCE2_FAST_API.md)。
+
+`firefly-seedance2` 与 `firefly-seedance2-fast` 作为旧客户端兼容别名继续保留。
+
+新接入建议使用 Seedance 官方兼容的异步接口：
+
+```text
+POST /api/v3/contents/generations/tasks
+GET  /api/v3/contents/generations/tasks/{id}
+```
+
+完整调用说明、比例表和 Adobe bridge 差异见
+[`SEEDANCE_OFFICIAL_API.md`](SEEDANCE_OFFICIAL_API.md)。
+
+xAI Grok Imagine Video 异步兼容入口：
+
+```text
+POST /v1/videos/generations
+POST /v1/videos
+GET  /v1/videos/{request_id}
+```
+
+创建接口返回 `request_id`，查询接口返回 `pending`、`done` 或 `failed`，并包含
+`progress` 与最终 `video.url`。详细参数和参考图示例见
+[`GROK_VIDEO_API.md`](GROK_VIDEO_API.md)。
 
 ### 3.1 获取模型列表
 

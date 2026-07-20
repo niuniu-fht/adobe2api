@@ -8,6 +8,7 @@ import traceback
 import base64
 import binascii
 import io
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, Any, Callable
@@ -46,6 +47,7 @@ from core.stores import (
     LiveRequestStore,
     RequestLogRecord,
     RequestLogStore,
+    SeedanceTaskStore,
 )
 from core.models import (
     MODEL_CATALOG,
@@ -121,6 +123,7 @@ def serve_generated_file(filename: str):
     return FileResponse(path=target, filename=safe_name, background=background)
 
 store = JobStore()
+seedance_task_store = SeedanceTaskStore()
 log_store = RequestLogStore(DATA_DIR / "request_logs.jsonl", max_items=5000)
 error_store = ErrorDetailStore(DATA_DIR / "request_errors.jsonl", max_items=5000)
 live_log_store = LiveRequestStore(max_items=2000)
@@ -134,7 +137,12 @@ def _compact_request_params(data: dict[str, Any]) -> Optional[str]:
         "n",
         "size",
         "aspect_ratio",
+        "duration",
+        "resolution",
         "output_resolution",
+        "generate_audio",
+        "seed",
+        "video_reference_mode",
         "response_format",
         "output_format",
         "quality",
@@ -168,7 +176,9 @@ def _extract_logging_fields(raw_body: bytes) -> dict[str, Optional[str]]:
         model = str(data.get("model") or "").strip() or None
         prompt = str(data.get("prompt") or "").strip()
         size = data.get("size")
-        resolution = str(size or data.get("output_resolution") or "").strip() or None
+        resolution = str(
+            size or data.get("resolution") or data.get("output_resolution") or ""
+        ).strip() or None
         entity_name = str(data.get("name") or data.get("displayName") or "").strip()
         if entity_name:
             entity_type = str(data.get("type") or data.get("entityType") or "object").strip()
@@ -179,6 +189,14 @@ def _extract_logging_fields(raw_body: bytes) -> dict[str, Optional[str]]:
             model = f"entity:{entity_type or 'object'}"
         if not prompt:
             prompt = _extract_prompt_from_messages(data.get("messages") or [])
+        if not prompt and isinstance(data.get("content"), list):
+            prompt = "\n".join(
+                str(item.get("text") or "").strip()
+                for item in data.get("content")
+                if isinstance(item, dict)
+                and str(item.get("type") or "").strip().lower() == "text"
+                and str(item.get("text") or "").strip()
+            )
         prompt = prompt.strip()
         prompt_preview = (
             prompt.replace("\r", " ").replace("\n", " ").strip()[:180]
@@ -205,6 +223,38 @@ def _upsert_live_request(request: Request, patch: dict) -> None:
         live_log_store.upsert(log_id, patch)
     except Exception:
         pass
+
+
+def _update_deferred_request_log(
+    log_id: str,
+    patch: dict,
+    *,
+    final: bool = False,
+) -> None:
+    iid = str(log_id or "").strip()
+    if not iid or not isinstance(patch, dict):
+        return
+
+    now = time.time()
+    current = live_log_store.get(iid) or {"id": iid, "ts": now}
+    merged = dict(current)
+    merged.update(patch)
+    started_at = float(
+        merged.get("started_at") or current.get("started_at") or current.get("ts") or now
+    )
+    merged["started_at"] = started_at
+    merged["duration_sec"] = max(0, int(now - started_at))
+    merged["updated_at"] = now
+
+    if not final:
+        live_log_store.upsert(iid, merged)
+        return
+
+    task_status = str(merged.get("task_status") or "").upper()
+    if not merged.get("status_code") or int(merged.get("status_code") or 0) == 202:
+        merged["status_code"] = 200 if task_status == "COMPLETED" else 500
+    live_log_store.remove(iid)
+    log_store.upsert(iid, merged)
 
 
 def _set_request_preview(request: Request, url: str, kind: str = "image") -> None:
@@ -255,6 +305,9 @@ def _set_request_error_detail(
         "/v1/images/generations": "images.generations",
         "/v1/images/edits": "images.edits",
         "/api/v1/generate": "api.generate",
+        "/api/v3/contents/generations/tasks": "contents.generations.tasks.create",
+        "/v1/videos": "videos.generations",
+        "/v1/videos/generations": "videos.generations",
     }
     path = str(getattr(getattr(request, "url", None), "path", "") or "")
     operation = op_map.get(path, "")
@@ -507,6 +560,11 @@ async def request_logger(request: Request, call_next):
         "/v1/images/generations": "images.generations",
         "/v1/images/edits": "images.edits",
         "/v1/entities": "entities.create" if method == "POST" else "",
+        "/api/v3/contents/generations/tasks": (
+            "contents.generations.tasks.create" if method == "POST" else ""
+        ),
+        "/v1/videos": "videos.generations" if method == "POST" else "",
+        "/v1/videos/generations": "videos.generations" if method == "POST" else "",
     }
     operation = op_map.get(path, "")
     if path.startswith("/v1beta/models/") and path.endswith(
@@ -529,6 +587,9 @@ async def request_logger(request: Request, call_next):
                     "/v1/chat/completions",
                     "/v1/entities",
                     "/api/v1/generate",
+                    "/api/v3/contents/generations/tasks",
+                    "/v1/videos",
+                    "/v1/videos/generations",
                 }:
                     body_meta = _extract_logging_fields(raw_body)
                     request.state.log_model = body_meta.get("model")
@@ -583,6 +644,7 @@ async def request_logger(request: Request, call_next):
                         ),
                         "task_status": "IN_PROGRESS",
                         "task_progress": 0.0,
+                        "started_at": started,
                     },
                 )
         except Exception:
@@ -616,14 +678,36 @@ async def request_logger(request: Request, call_next):
             log_id = (
                 str(getattr(request.state, "log_id", "") or "") or uuid.uuid4().hex[:12]
             )
-            live_log_store.remove(log_id)
+            deferred_log = bool(
+                getattr(request.state, "log_deferred", False)
+            ) and int(status_code or 0) < 400
+            if deferred_log:
+                # A very fast worker can finish before the HTTP middleware exits.
+                # Keep the row only when the worker has not already finalized it.
+                if live_log_store.get(log_id):
+                    live_log_store.upsert(
+                        log_id,
+                        {
+                            "status_code": 202,
+                            "task_status": "IN_PROGRESS",
+                            "task_progress": getattr(
+                                request.state, "log_task_progress", 0.0
+                            ),
+                            "task_id": getattr(request.state, "log_task_id", None),
+                            "duration_sec": max(0, int(time.time() - started)),
+                            "started_at": started,
+                            "updated_at": time.time(),
+                        },
+                    )
+            else:
+                live_log_store.remove(log_id)
 
             attempt_records = getattr(request.state, "log_attempt_records", None)
             if isinstance(attempt_records, list) and attempt_records:
                 for payload in attempt_records:
                     log_store.add_payload(payload)
 
-            if not has_attempt_logs:
+            if not has_attempt_logs and not deferred_log:
                 duration_sec = int(time.time() - started)
                 preview_url = getattr(request.state, "log_preview_url", None)
                 preview_kind = getattr(request.state, "log_preview_kind", None)
@@ -1100,8 +1184,10 @@ def _normalize_image_mime(mime_type: str) -> str:
     return normalized
 
 
-def _load_input_images(messages) -> list[tuple[bytes, str]]:
-    image_urls = _extract_image_urls_from_messages(messages, max_items=6)
+def _load_input_images(
+    messages, max_items: int = 6, max_bytes: int = 10 * 1024 * 1024
+) -> list[tuple[bytes, str]]:
+    image_urls = _extract_image_urls_from_messages(messages, max_items=max_items)
     if not image_urls:
         return []
 
@@ -1113,26 +1199,39 @@ def _load_input_images(messages) -> list[tuple[bytes, str]]:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
         else:
-            if not image_url.lower().startswith(("http://", "https://")):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Only http/https or data URL images are supported",
-                )
-            resp = requests.get(image_url, timeout=30)
-            if resp.status_code != 200:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to fetch image_url: {resp.status_code}",
-                )
-            image_bytes = resp.content
-            mime_type = (resp.headers.get("content-type") or "image/jpeg").split(";")[
-                0
-            ].strip() or "image/jpeg"
+            if image_url.lower().startswith(("http://", "https://")):
+                resp = requests.get(image_url, timeout=30)
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to fetch image_url: {resp.status_code}",
+                    )
+                image_bytes = resp.content
+                mime_type = (resp.headers.get("content-type") or "image/jpeg").split(
+                    ";"
+                )[0].strip() or "image/jpeg"
+            else:
+                try:
+                    image_bytes = base64.b64decode(
+                        re.sub(r"\s+", "", image_url), validate=True
+                    )
+                except (binascii.Error, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "image_url must be an http/https URL, data URL, "
+                            "or base64 string"
+                        ),
+                    ) from exc
+                mime_type = "image/jpeg"
 
         if not image_bytes:
             raise HTTPException(status_code=400, detail="image_url is empty")
-        if len(image_bytes) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="image too large, max 10MB")
+        if len(image_bytes) > max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"image too large, max {max_bytes // (1024 * 1024)}MB",
+            )
 
         loaded.append((image_bytes, _normalize_image_mime(mime_type)))
 
@@ -1470,6 +1569,7 @@ app.include_router(
 app.include_router(
     build_generation_router(
         store=store,
+        seedance_task_store=seedance_task_store,
         token_manager=token_manager,
         client=client,
         generated_dir=GENERATED_DIR,
@@ -1492,6 +1592,7 @@ app.include_router(
         extract_prompt_from_messages=_extract_prompt_from_messages,
         sse_chat_stream=_sse_chat_stream,
         on_generated_file_written=_on_generated_file_written,
+        update_deferred_request_log=_update_deferred_request_log,
         quota_error_cls=QuotaExhaustedError,
         auth_error_cls=AuthError,
         upstream_temp_error_cls=UpstreamTemporaryError,

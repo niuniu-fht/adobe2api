@@ -105,6 +105,54 @@ _register_gpt_image_family()
 DEFAULT_MODEL_ID = "firefly-nano-banana-pro-2k-16x9"
 
 VIDEO_MODEL_CATALOG: dict[str, dict] = {
+    "firefly-seedance2": {
+        "engine": "seedance2",
+        "upstream_model_id": "seedance",
+        "upstream_model_version": "seedance_2.0",
+        "duration": 8,
+        "aspect_ratio": "16:9",
+        "resolution": "720p",
+        "supported_resolutions": ("480p", "720p", "1080p"),
+        "generate_audio": True,
+        "prompt_max_length": 2500,
+        "description": "Firefly Seedance 2.0 video model (4-15s, 480p/720p/1080p)",
+    },
+    "firefly-seedance2-fast": {
+        "engine": "seedance2-fast",
+        "upstream_model_id": "seedance",
+        "upstream_model_version": "seedance_2.0_fast",
+        "duration": 8,
+        "aspect_ratio": "16:9",
+        "resolution": "720p",
+        "supported_resolutions": ("480p", "720p"),
+        "generate_audio": True,
+        "prompt_max_length": 2500,
+        "description": "Firefly Seedance 2.0 Fast video model (4-15s, 480p/720p)",
+    },
+    "grok-imagine-video": {
+        "engine": "seedance2-fast",
+        "upstream_model_id": "seedance",
+        "upstream_model_version": "seedance_2.0_fast",
+        "duration": 8,
+        "aspect_ratio": "16:9",
+        "resolution": "480p",
+        "supported_resolutions": ("480p", "720p"),
+        "generate_audio": True,
+        "prompt_max_length": 2500,
+        "description": "xAI Grok video async compatibility facade backed by Seedance 2.0 Fast",
+    },
+    "grok-imagine-video-1.5": {
+        "engine": "seedance2-fast",
+        "upstream_model_id": "seedance",
+        "upstream_model_version": "seedance_2.0_fast",
+        "duration": 8,
+        "aspect_ratio": "16:9",
+        "resolution": "480p",
+        "supported_resolutions": ("480p", "720p"),
+        "generate_audio": True,
+        "prompt_max_length": 2500,
+        "description": "xAI Grok Imagine Video 1.5 async compatibility facade backed by Seedance 2.0 Fast",
+    },
     "firefly-sora2-4s-9x16": {
         "duration": 4,
         "aspect_ratio": "9:16",
@@ -136,6 +184,58 @@ VIDEO_MODEL_CATALOG: dict[str, dict] = {
         "description": "Firefly Sora2 video model (12s 16:9)",
     },
 }
+
+
+def _register_seedance_preset_family(
+    prefix: str,
+    *,
+    engine: str,
+    upstream_model_version: str,
+    resolutions: tuple[str, ...],
+    family_label: str,
+) -> None:
+    for duration in (4, 6, 8):
+        for ratio in ("16:9", "9:16"):
+            for resolution in resolutions:
+                model_id = (
+                    f"{prefix}-{duration}s-{RATIO_SUFFIX_MAP[ratio]}-{resolution}"
+                )
+                VIDEO_MODEL_CATALOG[model_id] = {
+                    "engine": engine,
+                    "upstream_model_id": "seedance",
+                    "upstream_model_version": upstream_model_version,
+                    "duration": duration,
+                    "aspect_ratio": ratio,
+                    "resolution": resolution,
+                    "supported_resolutions": (resolution,),
+                    "fixed_parameters": True,
+                    "canonical_model": (
+                        "firefly-seedance2-fast"
+                        if engine == "seedance2-fast"
+                        else "firefly-seedance2"
+                    ),
+                    "generate_audio": True,
+                    "prompt_max_length": 2500,
+                    "description": (
+                        f"{family_label} ({duration}s {ratio} {resolution})"
+                    ),
+                }
+
+
+_register_seedance_preset_family(
+    "sd2",
+    engine="seedance2",
+    upstream_model_version="seedance_2.0",
+    resolutions=("720p", "1080p"),
+    family_label="Seedance 2.0",
+)
+_register_seedance_preset_family(
+    "sd2-fast",
+    engine="seedance2-fast",
+    upstream_model_version="seedance_2.0_fast",
+    resolutions=("480p", "720p"),
+    family_label="Seedance 2.0 Fast",
+)
 
 for dur in (4, 8, 12):
     for ratio in ("9:16", "16:9"):

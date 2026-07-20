@@ -123,3 +123,19 @@ def test_logging_fields_keep_full_prompt_and_build_short_preview():
 
     assert metadata["prompt"] == full_prompt
     assert metadata["prompt_preview"] == full_prompt.replace("\n", " ")[:180]
+
+
+def test_logging_fields_extract_seedance_content_prompt():
+    metadata = _extract_logging_fields(
+        json.dumps(
+            {
+                "model": "sd2-fast-4s-16x9-480p",
+                "content": [
+                    {"type": "text", "text": "First line"},
+                    {"type": "text", "text": "Second line"},
+                ],
+            }
+        ).encode("utf-8")
+    )
+
+    assert metadata["prompt"] == "First line\nSecond line"

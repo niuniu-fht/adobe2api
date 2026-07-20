@@ -44,6 +44,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById(btn.dataset.target).classList.add("active");
       if (btn.dataset.target === "logs") {
         logsCurrentPage = 1;
+        connectLogsStream();
         loadLogs();
       } else if (logsAutoTimer) {
         clearTimeout(logsAutoTimer);
@@ -717,6 +718,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const logsStatsVideoCount = document.getElementById("logsStatsVideoCount");
   const logsStatsTotalCount = document.getElementById("logsStatsTotalCount");
   const logsStatsFailCount = document.getElementById("logsStatsFailCount");
+  const logsLiveStatus = document.getElementById("logsLiveStatus");
   const imageStatsTbody = document.querySelector("#imageStatsTable tbody");
   const logsPrevBtn = document.getElementById("logsPrevBtn");
   const logsNextBtn = document.getElementById("logsNextBtn");
@@ -741,6 +743,49 @@ document.addEventListener("DOMContentLoaded", async () => {
   let logsErrorsOnly = false;
   let logsLoadSequence = 0;
   let logsSearchTimer = null;
+  let logsStream = null;
+  let latestLogRows = [];
+  let latestRunningRows = [];
+
+  function setLogsLiveStatus(text, connected = false) {
+    if (!logsLiveStatus) return;
+    logsLiveStatus.textContent = text;
+    logsLiveStatus.style.color = connected ? "#4de2c4" : "#f5c26b";
+  }
+
+  function connectLogsStream() {
+    if (typeof EventSource === "undefined") {
+      setLogsLiveStatus("实时连接不可用");
+      return;
+    }
+    if (logsStream) logsStream.close();
+    const params = new URLSearchParams();
+    const promptQuery = logPromptSearch ? String(logPromptSearch.value || "").trim() : "";
+    if (promptQuery) params.set("prompt", promptQuery);
+    if (logsErrorsOnly) params.set("errors_only", "true");
+    logsStream = new EventSource(`/api/v1/logs/stream?${params.toString()}`);
+    setLogsLiveStatus("实时连接中");
+    logsStream.onopen = () => setLogsLiveStatus("实时已连接", true);
+    logsStream.onerror = () => setLogsLiveStatus("实时重连中");
+    logsStream.addEventListener("logs", (event) => {
+      try {
+        const data = JSON.parse(event.data || "{}");
+        const nextRunning = Array.isArray(data.items) ? data.items : [];
+        const previousIds = new Set(latestRunningRows.map((item) => String(item.id || "")));
+        const nextIds = new Set(nextRunning.map((item) => String(item.id || "")));
+        const taskFinished = [...previousIds].some((id) => id && !nextIds.has(id));
+        latestRunningRows = nextRunning;
+        if (taskFinished) {
+          loadLogs();
+        } else if (isLogsTabActive()) {
+          renderLogs(latestLogRows, latestRunningRows);
+          renderLogFilterState();
+        }
+      } catch (_) {
+        // Keep the connection active when a single event is malformed.
+      }
+    });
+  }
 
   function switchConfigPane(targetId) {
     if (!targetId) return;
@@ -1274,8 +1319,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       logsCurrentPage = Math.max(1, Number(logsData.page || logsCurrentPage || 1));
       logsTotalPages = Math.max(1, Number(logsData.total_pages || 1));
       logsFilteredTotal = Math.max(0, Number(logsData.total || 0));
+      latestLogRows = Array.isArray(logsData.logs) ? logsData.logs : [];
+      latestRunningRows = runningItems;
       renderLogsPagination();
-      renderLogs(logsData.logs || [], runningItems);
+      renderLogs(latestLogRows, latestRunningRows);
       renderLogFilterState();
 
       if (statsResult.status === "fulfilled" && statsResult.value.ok) {
@@ -1508,7 +1555,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       logsTbody.appendChild(buildLogRow(item));
     });
 
-    if (logsRunningTotal > 0 && isLogsTabActive()) {
+    if (logsRunningTotal > 0 && isLogsTabActive() && !logsStream) {
       logsAutoTimer = setTimeout(() => {
         if (isLogsTabActive()) loadLogs();
       }, LOGS_POLL_MS);
@@ -1722,6 +1769,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       logsSearchTimer = setTimeout(() => {
         logsSearchTimer = null;
         logsCurrentPage = 1;
+        connectLogsStream();
         loadLogs();
       }, 300);
     });
@@ -1731,6 +1779,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (logsSearchTimer) clearTimeout(logsSearchTimer);
       logsSearchTimer = null;
       logsCurrentPage = 1;
+      connectLogsStream();
       loadLogs();
     });
   }
@@ -1744,6 +1793,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       logsSearchTimer = null;
       logsCurrentPage = 1;
       renderLogFilterState();
+      connectLogsStream();
       loadLogs();
     });
   }
@@ -1754,6 +1804,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       logsErrorsOnly = false;
       logsCurrentPage = 1;
       renderLogFilterState();
+      connectLogsStream();
       loadLogs();
     });
   }
@@ -1764,6 +1815,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       logsErrorsOnly = true;
       logsCurrentPage = 1;
       renderLogFilterState();
+      connectLogsStream();
       loadLogs();
     });
   }

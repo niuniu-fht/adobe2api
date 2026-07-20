@@ -62,6 +62,66 @@ class JobStore:
 
 
 @dataclass
+class SeedanceTaskRecord:
+    id: str
+    model: str
+    local_model: str
+    prompt: str
+    ratio: str
+    resolution: str
+    duration: int
+    generate_audio: bool
+    seed: Optional[int] = None
+    status: str = "queued"
+    progress: float = 0.0
+    video_url: Optional[str] = None
+    error: Optional[dict] = None
+    upstream_job_id: Optional[str] = None
+    callback_url: Optional[str] = None
+    user: Optional[str] = None
+    log_id: Optional[str] = None
+    log_started_at: float = 0.0
+    api_style: str = "seedance"
+    created_at: int = 0
+    updated_at: int = 0
+
+
+class SeedanceTaskStore:
+    def __init__(self, max_items: int = 500) -> None:
+        self._items: dict[str, SeedanceTaskRecord] = {}
+        self._lock = threading.Lock()
+        self._max_items = max_items
+
+    def create(self, **kwargs) -> SeedanceTaskRecord:
+        now = int(time.time())
+        item = SeedanceTaskRecord(
+            id=uuid.uuid4().hex,
+            created_at=now,
+            updated_at=now,
+            **kwargs,
+        )
+        with self._lock:
+            if len(self._items) >= self._max_items:
+                oldest = min(self._items.values(), key=lambda value: value.created_at)
+                self._items.pop(oldest.id, None)
+            self._items[item.id] = item
+        return item
+
+    def get(self, task_id: str) -> Optional[SeedanceTaskRecord]:
+        with self._lock:
+            return self._items.get(task_id)
+
+    def update(self, task_id: str, **kwargs) -> None:
+        with self._lock:
+            item = self._items.get(task_id)
+            if not item:
+                return
+            for key, value in kwargs.items():
+                setattr(item, key, value)
+            item.updated_at = int(time.time())
+
+
+@dataclass
 class RequestLogRecord:
     id: str
     ts: float
@@ -293,6 +353,8 @@ class RequestLogStore:
         # through the chat completion generation path.
         if path == "/v1/chat/completions" or operation == "chat.completions":
             video_prefixes = (
+                "firefly-seedance",
+                "grok-imagine-video",
                 "firefly-sora",
                 "firefly-veo",
                 "firefly-kling",
@@ -504,6 +566,14 @@ class LiveRequestStore:
             return
         with self._lock:
             self._items.pop(iid, None)
+
+    def get(self, item_id: str) -> Optional[dict]:
+        iid = str(item_id or "").strip()
+        if not iid:
+            return None
+        with self._lock:
+            item = self._items.get(iid)
+            return dict(item) if isinstance(item, dict) else None
 
     def list(self, limit: int = 200) -> list[dict]:
         safe_limit = min(max(int(limit or 200), 1), 1000)
