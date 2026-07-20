@@ -25,6 +25,8 @@ SUPPORTED_RESPONSE_FORMATS = {"url", "b64_json", "base64"}
 SUPPORTED_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
 DEFAULT_OUTPUT_FORMAT = "png"
 MAX_IMAGE_COUNT = 10
+MAX_GPT_IMAGE_LONG_EDGE = 4096
+GPT_IMAGE_EDGE_ALIGNMENT = 16
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 RATIO_RE = re.compile(r"^\d+:\d+$")
 DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP = {
@@ -65,7 +67,11 @@ def normalize_openai_gemini_model_id(model_id: object) -> str | None:
     return normalize_gemini_model_id(normalized[len(OPENAI_GEMINI_MODEL_PREFIX) :])
 
 
-def _nearest_supported_ratio(width: int, height: int) -> str:
+def _nearest_ratio(
+    width: int,
+    height: int,
+    supported_ratios: set[str],
+) -> str:
     target = width / height
 
     def distance(ratio: str) -> tuple[float, str]:
@@ -73,7 +79,11 @@ def _nearest_supported_ratio(width: int, height: int) -> str:
         candidate = int(left) / int(right)
         return abs(log(target / candidate)), ratio
 
-    return min(SUPPORTED_RATIOS, key=distance)
+    return min(supported_ratios, key=distance)
+
+
+def _nearest_supported_ratio(width: int, height: int) -> str:
+    return _nearest_ratio(width, height, SUPPORTED_RATIOS)
 
 
 def parse_openai_gemini_size(raw_size: object) -> Optional[tuple[str, str]]:
@@ -208,6 +218,21 @@ def aspect_ratio_from_size(size: Optional[dict[str, int]]) -> str:
     return f"{width // divisor}:{height // divisor}"
 
 
+def gpt_image_aspect_ratio_from_size(
+    size: Optional[dict[str, int]],
+) -> str:
+    if not size:
+        return "1:1"
+    exact_ratio = aspect_ratio_from_size(size)
+    if exact_ratio in GPT_IMAGE_RATIO_SUFFIX_MAP:
+        return exact_ratio
+    return _nearest_ratio(
+        int(size["width"]),
+        int(size["height"]),
+        set(GPT_IMAGE_RATIO_SUFFIX_MAP),
+    )
+
+
 def output_resolution_from_size(size: Optional[dict[str, int]]) -> str:
     if not size:
         return "2K"
@@ -226,9 +251,7 @@ def gpt_image_output_resolution_from_size(
         return "2K"
     width = int(size["width"])
     height = int(size["height"])
-    ratio = aspect_ratio_from_size(size)
-    if ratio not in GPT_IMAGE_RATIO_SUFFIX_MAP:
-        return output_resolution_from_size(size)
+    ratio = gpt_image_aspect_ratio_from_size(size)
 
     def distance(resolution: str) -> tuple[float, int]:
         candidate = gpt_image_pixels_from_ratio(ratio, resolution)
@@ -244,8 +267,33 @@ def gpt_image_output_resolution_from_size(
     return min(("1K", "2K", "4K"), key=distance)
 
 
+def normalize_gpt_image_size(
+    size: Optional[dict[str, int]],
+) -> Optional[dict[str, int]]:
+    if not size:
+        return None
+    width = int(size["width"])
+    height = int(size["height"])
+    longest_edge = max(width, height)
+    scale = min(1.0, MAX_GPT_IMAGE_LONG_EDGE / longest_edge)
+
+    def align_edge(value: float) -> int:
+        lower = int(value // GPT_IMAGE_EDGE_ALIGNMENT) * GPT_IMAGE_EDGE_ALIGNMENT
+        upper = lower + GPT_IMAGE_EDGE_ALIGNMENT
+        aligned = lower if value - lower <= upper - value else upper
+        return max(
+            GPT_IMAGE_EDGE_ALIGNMENT,
+            min(MAX_GPT_IMAGE_LONG_EDGE, aligned),
+        )
+
+    return {
+        "width": align_edge(width * scale),
+        "height": align_edge(height * scale),
+    }
+
+
 def gpt_image_model_id_from_size(size: Optional[dict[str, int]]) -> Optional[str]:
-    ratio = aspect_ratio_from_size(size)
+    ratio = gpt_image_aspect_ratio_from_size(size)
     suffix = GPT_IMAGE_RATIO_SUFFIX_MAP.get(ratio)
     if not suffix:
         return None
@@ -264,15 +312,18 @@ def build_native_gpt_image_options(
     if model_id not in OPENAI_GPT_IMAGE_MODEL_VERSIONS:
         raise OpenAIImageRequestError(f"Invalid model: {model_id}", "model")
 
-    requested_size = parse_requested_size(data.get("size"))
+    parsed_size = parse_requested_size(data.get("size"))
+    requested_size = normalize_gpt_image_size(parsed_size)
+    aspect_ratio = gpt_image_aspect_ratio_from_size(requested_size)
+    output_resolution = gpt_image_output_resolution_from_size(requested_size)
     output_format = parse_output_format(data.get("output_format"))
     model_version = str(
         upstream_model_version or OPENAI_GPT_IMAGE_MODEL_VERSIONS[model_id]
     )
     return OpenAIImageGenerationOptions(
         n=parse_image_count(data.get("n")),
-        aspect_ratio=aspect_ratio_from_size(requested_size),
-        output_resolution=gpt_image_output_resolution_from_size(requested_size),
+        aspect_ratio=aspect_ratio,
+        output_resolution=output_resolution,
         response_model=str(response_model or model_id).strip() or model_id,
         response_format=parse_response_format(
             data.get("response_format"),

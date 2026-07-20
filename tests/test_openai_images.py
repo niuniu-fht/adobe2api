@@ -23,7 +23,7 @@ from core.models.resolver import resolve_model, resolve_ratio_and_resolution
 from core.adobe_client import AdobeClient, ContentPolicyError
 
 
-def test_native_gpt_image_2_request_uses_requested_size():
+def test_native_gpt_image_2_request_converts_requested_size():
     options = build_native_gpt_image_options(
         {
             "model": "gpt-image-2",
@@ -147,7 +147,7 @@ def test_gpt_image_converts_large_size_to_ratio_and_resolution():
     assert payload["modelSpecificPayload"]["size"] == "3072x4096"
 
 
-def test_gpt_image_accepts_unbounded_pixels_and_keeps_requested_size():
+def test_gpt_image_caps_longest_edge_at_4096():
     options = build_native_gpt_image_options(
         {
             "model": "gpt-image-2-high",
@@ -160,8 +160,38 @@ def test_gpt_image_accepts_unbounded_pixels_and_keeps_requested_size():
 
     assert options.aspect_ratio == "1:1"
     assert options.output_resolution == "4K"
-    assert options.requested_size == {"width": 10000, "height": 10000}
+    assert options.requested_size == {"width": 4096, "height": 4096}
     assert options.response_model == "gpt-image-2-high"
+
+
+def test_gpt_image_normalizes_non_multiple_size_for_adobe():
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2",
+            "prompt": "draw a portrait",
+            "size": "1024x1448",
+        }
+    )
+
+    assert options.aspect_ratio == "3:4"
+    assert options.output_resolution == "1K"
+    assert options.requested_size == {"width": 1024, "height": 1440}
+    assert options.requested_size["width"] % 16 == 0
+    assert options.requested_size["height"] % 16 == 0
+
+
+def test_gpt_image_scales_oversized_dimensions_while_preserving_ratio():
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2",
+            "prompt": "draw a large poster",
+            "size": "6000x8000",
+        }
+    )
+
+    assert options.aspect_ratio == "3:4"
+    assert options.output_resolution == "4K"
+    assert options.requested_size == {"width": 3072, "height": 4096}
 
 
 def test_b64_json_response_item_matches_openai_images_shape():
