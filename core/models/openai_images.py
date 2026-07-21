@@ -243,7 +243,7 @@ def gpt_image_model_id_from_size(size: Optional[dict[str, int]]) -> Optional[str
     suffix = GPT_IMAGE_RATIO_SUFFIX_MAP.get(ratio)
     if not suffix:
         return None
-    return f"firefly-gpt-image-{output_resolution_from_size(size).lower()}-{suffix}"
+    return f"gpt-image-{output_resolution_from_size(size).lower()}-{suffix}"
 
 
 def build_native_gpt_image_options(

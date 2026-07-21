@@ -1,7 +1,7 @@
 # Seedance 2.0 标准版本机调用文档
 
 本文档对应 Adobe Firefly 的 Seedance 2.0 标准版接入。服务地址为
-`http://127.0.0.1:6001`，新请求统一使用 `sd2-{时长}-{比例}-{分辨率}` 模型名。
+`http://127.0.0.1:6002`，新请求统一使用 `sd2-{时长}-{比例}-{分辨率}` 模型名。
 
 新项目推荐使用官方兼容异步接口，详见
 [`SEEDANCE_OFFICIAL_API.md`](SEEDANCE_OFFICIAL_API.md)。本文件中的
@@ -16,8 +16,7 @@ Adobe modelVersion：seedance_2.0
 Adobe 创建任务：POST https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async
 ```
 
-`firefly-seedance2` 是旧客户端兼容别名。Fast 使用 `sd2-fast-*`，对应上游版本
-`seedance_2.0_fast`。
+Fast 使用 `sd2-fast-*`，对应上游版本 `seedance_2.0_fast`。
 
 前端固定参数模型名：
 
@@ -29,7 +28,7 @@ sd2-8s-9x16-1080p
 ```
 
 完整格式为 `sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}`，共 12 个组合。
-时长、比例和分辨率由模型名固定，请求体无需重复传入。
+时长、比例和分辨率由模型名固定。请求体不接收时长或比例字段。
 
 ## 实测结果
 
@@ -51,7 +50,7 @@ sd2-8s-9x16-1080p
 
 实测输出：
 
-`http://127.0.0.1:6001/generated/4fd3edb33c1e4b0da985accd1fc3e2cf.mp4`
+`http://127.0.0.1:6002/generated/4fd3edb33c1e4b0da985accd1fc3e2cf.mp4`
 
 成片内嵌 Adobe C2PA 清单：
 
@@ -89,7 +88,7 @@ Content-Type: application/json
 ### curl 示例
 
 ```bash
-curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
+curl -X POST "http://127.0.0.1:6002/v1/chat/completions" \
   -H "Authorization: Bearer <service_api_key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -115,7 +114,7 @@ curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
   "choices": [{
     "message": {
       "role": "assistant",
-      "content": "```html\n<video src='http://127.0.0.1:6001/generated/RESULT.mp4' controls></video>\n```"
+      "content": "```html\n<video src='http://127.0.0.1:6002/generated/RESULT.mp4' controls></video>\n```"
     },
     "finish_reason": "stop"
   }]

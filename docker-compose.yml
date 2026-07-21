@@ -1,18 +1,18 @@
-version: "3.8"
+name: adobe2api-video
 
 services:
-  adobe2api:
+  adobe2api-video:
     build: .
-    container_name: adobe2api
+    container_name: adobe2api-video
     ports:
-      - "6001:6001"
+      - "${VIDEO_PORT:-6002}:6001"
     environment:
       - TZ=Asia/Shanghai
       - PORT=6001
       - ADOBE_API_KEY=clio-playground-web
     volumes:
       # 持久化生成数据
-      - ./data:/app/data
+      - ./video-data:/app/data
       # 持久化配置数据
-      - ./config:/app/config
+      - ./video-config:/app/config
     restart: unless-stopped

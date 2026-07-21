@@ -14,7 +14,7 @@ from core.models.catalog import VIDEO_MODEL_CATALOG
 from core.stores import RequestLogStore
 
 
-SEEDANCE_CONF = VIDEO_MODEL_CATALOG["firefly-seedance2"]
+SEEDANCE_CONF = VIDEO_MODEL_CATALOG["seedance2"]
 
 
 def test_seedance_catalog_uses_adobe_standard_model_ids():
@@ -65,7 +65,7 @@ def test_grok_video_request_maps_to_seedance_fast_async_task():
     )
 
     assert parsed["response_model"] == "grok-imagine-video-1.5"
-    assert parsed["model"] == "firefly-seedance2-fast"
+    assert parsed["model"] == "seedance2-fast"
     assert parsed["duration"] == 8
     assert parsed["ratio"] == "16:9"
     assert parsed["resolution"] == "480p"
@@ -110,7 +110,7 @@ def test_grok_video_1080p_maps_to_seedance_standard():
         VIDEO_MODEL_CATALOG,
     )
 
-    assert parsed["model"] == "firefly-seedance2"
+    assert parsed["model"] == "seedance2"
     assert parsed["resolution"] == "1080p"
 
 
@@ -187,8 +187,8 @@ def test_official_seedance_preset_model_decodes_parameters_from_model_name():
     assert parsed["resolution"] == "480p"
 
 
-def test_official_seedance_preset_rejects_conflicting_duplicate_parameters():
-    with pytest.raises(ValueError, match="fixes duration"):
+def test_official_seedance_preset_rejects_duplicate_model_parameters():
+    with pytest.raises(ValueError, match="encoded in model"):
         parse_seedance_official_request(
             {
                 "model": "sd2-4s-16x9-1080p",
@@ -253,7 +253,7 @@ def test_seedance_standard_chat_requests_are_counted_as_video():
     assert not RequestLogStore._is_image_generation_request(
         {
             "path": "/v1/chat/completions",
-            "model": "firefly-seedance2",
+            "model": "seedance2",
         }
     )
 
@@ -271,7 +271,7 @@ def test_official_seedance_request_uses_current_model_id_and_adaptive_ratio():
         VIDEO_MODEL_CATALOG,
     )
 
-    assert parsed["model"] == "firefly-seedance2"
+    assert parsed["model"] == "seedance2"
     assert parsed["official_model"] == "dreamina-seedance-2-0-260128"
     assert parsed["ratio"] == "adaptive"
     assert parsed["upstream_ratio"] == "auto"

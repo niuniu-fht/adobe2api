@@ -353,11 +353,12 @@ class RequestLogStore:
         # through the chat completion generation path.
         if path == "/v1/chat/completions" or operation == "chat.completions":
             video_prefixes = (
-                "firefly-seedance",
+                "seedance",
+                "sd2-",
                 "grok-imagine-video",
-                "firefly-sora",
-                "firefly-veo",
-                "firefly-kling",
+                "sora",
+                "veo",
+                "kling",
             )
             return bool(model) and not model.startswith(video_prefixes)
 

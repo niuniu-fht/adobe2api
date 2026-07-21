@@ -58,20 +58,20 @@ SEEDANCE2_RATIOS = {
     "9:16",
 }
 SEEDANCE_OFFICIAL_MODEL_ALIASES = {
-    "seedance-2.0": "firefly-seedance2",
-    "seedance-2-0": "firefly-seedance2",
-    "seedance-2-0-260128": "firefly-seedance2",
-    "dreamina-seedance-2-0": "firefly-seedance2",
-    "dreamina-seedance-2-0-260128": "firefly-seedance2",
-    "seedance-2.0-fast": "firefly-seedance2-fast",
-    "seedance-2-0-fast": "firefly-seedance2-fast",
-    "seedance-2-0-fast-260128": "firefly-seedance2-fast",
-    "dreamina-seedance-2-0-fast": "firefly-seedance2-fast",
-    "dreamina-seedance-2-0-fast-260128": "firefly-seedance2-fast",
+    "seedance-2.0": "seedance2",
+    "seedance-2-0": "seedance2",
+    "seedance-2-0-260128": "seedance2",
+    "dreamina-seedance-2-0": "seedance2",
+    "dreamina-seedance-2-0-260128": "seedance2",
+    "seedance-2.0-fast": "seedance2-fast",
+    "seedance-2-0-fast": "seedance2-fast",
+    "seedance-2-0-fast-260128": "seedance2-fast",
+    "dreamina-seedance-2-0-fast": "seedance2-fast",
+    "dreamina-seedance-2-0-fast-260128": "seedance2-fast",
 }
 SEEDANCE_OFFICIAL_MODEL_IDS = {
-    "firefly-seedance2": "dreamina-seedance-2-0-260128",
-    "firefly-seedance2-fast": "dreamina-seedance-2-0-fast-260128",
+    "seedance2": "dreamina-seedance-2-0-260128",
+    "seedance2-fast": "dreamina-seedance-2-0-fast-260128",
 }
 SEEDANCE_VIDEO_MAX_BYTES = 50 * 1024 * 1024
 SEEDANCE_AUDIO_MAX_BYTES = 50 * 1024 * 1024
@@ -115,6 +115,23 @@ SEEDANCE_MEDIA_EXTENSION_MIMES = {
         ".wav": "audio/wav",
     },
 }
+
+VIDEO_MODEL_DIMENSION_FIELDS = (
+    "duration",
+    "seconds",
+    "ratio",
+    "aspect_ratio",
+    "aspectRatio",
+)
+
+
+def reject_video_model_dimensions(data: dict) -> None:
+    supplied = [field for field in VIDEO_MODEL_DIMENSION_FIELDS if field in data]
+    if supplied:
+        raise ValueError(
+            "duration and ratio are encoded in model; remove: "
+            + ", ".join(supplied)
+        )
 
 
 def _normalize_seedance_media_mime(
@@ -232,7 +249,7 @@ def normalize_seedance_official_model(
     model: str, video_model_catalog: dict | None = None
 ) -> str:
     value = str(model or "").strip().lower()
-    if value in {"firefly-seedance2", "firefly-seedance2-fast"}:
+    if value in {"seedance2", "seedance2-fast"}:
         return value
     alias = SEEDANCE_OFFICIAL_MODEL_ALIASES.get(value, "")
     if alias:
@@ -342,6 +359,8 @@ def parse_seedance_official_request(data: dict, video_model_catalog: dict) -> di
 
     conf = video_model_catalog[model]
     is_fixed_preset = bool(conf.get("fixed_parameters", False))
+    if is_fixed_preset:
+        reject_video_model_dimensions(data)
     default_ratio = str(conf.get("aspect_ratio") or "adaptive") if is_fixed_preset else "adaptive"
     ratio = str(data.get("ratio") or default_ratio).strip().lower()
     if ratio == "adaptive":
@@ -470,6 +489,9 @@ def parse_grok_video_request(data: dict, video_model_catalog: dict) -> dict:
             "model must be grok-imagine-video, grok-imagine-video-1.5, or an sd2-* / sd2-fast-* fixed model"
         )
 
+    if is_seedance_preset:
+        reject_video_model_dimensions(data)
+
     default_duration = int(seedance_preset.get("duration") or 8) if is_seedance_preset else 8
     raw_duration = data.get(
         "duration",
@@ -506,7 +528,7 @@ def parse_grok_video_request(data: dict, video_model_catalog: dict) -> dict:
     internal_model = (
         requested_model
         if is_seedance_preset
-        else ("firefly-seedance2" if resolution == "1080p" else "firefly-seedance2-fast")
+        else ("seedance2" if resolution == "1080p" else "seedance2-fast")
     )
 
     prompt = str(data.get("prompt") or "").strip()
@@ -552,13 +574,14 @@ def parse_grok_video_request(data: dict, video_model_catalog: dict) -> dict:
     bridge_request = {
         "model": internal_model,
         "content": content,
-        "duration": duration,
-        "ratio": ratio,
         "resolution": resolution,
         "generate_audio": bool(data.get("generate_audio", True)),
         "seed": data.get("seed"),
         "user": data.get("user"),
     }
+    if not is_seedance_preset:
+        bridge_request["duration"] = duration
+        bridge_request["ratio"] = ratio
     normalized = parse_seedance_official_request(
         bridge_request, video_model_catalog
     )
@@ -611,22 +634,11 @@ def resolve_video_request_parameters(
     resolution = str(video_conf.get("resolution") or "720p").lower()
     seed = None
 
-    engine = str(video_conf.get("engine") or "")
-    if engine not in {"seedance2", "seedance2-fast"}:
-        return duration, ratio, resolution, seed
-
     if bool(video_conf.get("fixed_parameters", False)):
+        reject_video_model_dimensions(data)
         fixed_duration = int(video_conf.get("duration") or duration)
         fixed_ratio = str(video_conf.get("aspect_ratio") or ratio)
         fixed_resolution = str(video_conf.get("resolution") or resolution).lower()
-        requested_duration = data.get("duration")
-        if requested_duration is not None and int(requested_duration) != fixed_duration:
-            raise ValueError(f"model fixes duration to {fixed_duration} seconds")
-        requested_ratio = str(
-            data.get("aspect_ratio") or data.get("aspectRatio") or fixed_ratio
-        ).strip()
-        if requested_ratio != fixed_ratio:
-            raise ValueError(f"model fixes aspect_ratio to {fixed_ratio}")
         requested_resolution = str(
             data.get("resolution") or data.get("output_resolution") or fixed_resolution
         ).strip().lower()
@@ -643,6 +655,10 @@ def resolve_video_request_parameters(
             if seed < 0 or seed > 4294967295:
                 raise ValueError("seed must be an integer between 0 and 4294967295")
         return fixed_duration, fixed_ratio, fixed_resolution, seed
+
+    engine = str(video_conf.get("engine") or "")
+    if engine not in {"seedance2", "seedance2-fast"}:
+        return duration, ratio, resolution, seed
 
     try:
         duration = int(data.get("duration", duration))
@@ -905,7 +921,7 @@ def build_generation_router(
                 {
                     "id": model_id,
                     "object": "model",
-                    "owned_by": "adobe2api",
+                    "owned_by": str(conf.get("provider") or "adobe2api"),
                     "description": conf["description"],
                 }
             )
@@ -916,7 +932,7 @@ def build_generation_router(
                 {
                     "id": model_id,
                     "object": "model",
-                    "owned_by": "adobe2api",
+                    "owned_by": str(conf.get("provider") or "adobe2api"),
                     "description": conf["description"],
                 }
             )
@@ -2725,7 +2741,8 @@ def build_generation_router(
         require_service_api_key(request)
 
         requested_model_id = str(data.get("model") or "").strip()
-        if requested_model_id not in video_model_catalog:
+        requested_video_conf = video_model_catalog.get(requested_model_id)
+        if not requested_video_conf or bool(requested_video_conf.get("hidden", False)):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -2750,23 +2767,7 @@ def build_generation_router(
                 },
             )
 
-        model_id = str(data.get("model") or "").strip()
-        if (
-            model_id.startswith("firefly-seedance")
-            or model_id.startswith("firefly-sora2")
-            or model_id.startswith("firefly-veo31-fast")
-            or model_id.startswith("firefly-veo31-")
-            or model_id.startswith("firefly-kling-")
-        ) and model_id not in video_model_catalog:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "message": "Invalid video model. Use /v1/models to get supported sd2-*, sd2-fast-*, firefly-seedance2, firefly-seedance2-fast, firefly-sora2-*, firefly-veo31-*, firefly-veo31-fast-* or firefly-kling-* models",
-                        "type": "invalid_request_error",
-                    }
-                },
-            )
+        model_id = requested_model_id
         video_conf = video_model_catalog.get(model_id)
         is_video_model = video_conf is not None
         is_gpt_image_alias_model = (

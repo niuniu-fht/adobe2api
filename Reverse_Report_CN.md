@@ -52,7 +52,7 @@
 ## 4. 调用链
 
 ```text
-POST http://127.0.0.1:6001/v1/chat/completions
+POST http://127.0.0.1:6002/v1/chat/completions
   -> 参数校验与 Adobe payload 映射
   -> POST https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async
   -> 读取 x-override-status-link / links.result.href

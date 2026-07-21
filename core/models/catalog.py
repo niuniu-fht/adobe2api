@@ -70,8 +70,9 @@ def _register_nano_banana_family(
 def _register_gpt_image_family() -> None:
     for res in ("1k", "2k", "4k"):
         for ratio, suffix in GPT_IMAGE_RATIO_SUFFIX_MAP.items():
-            model_id = f"firefly-gpt-image-{res}-{suffix}"
+            model_id = f"gpt-image-{res}-{suffix}"
             MODEL_CATALOG[model_id] = {
+                "provider": "openai",
                 "upstream_model": "openai:firefly:gpt-image",
                 "upstream_model_id": "gpt-image",
                 "upstream_model_version": "2",
@@ -82,19 +83,19 @@ def _register_gpt_image_family() -> None:
 
 
 _register_nano_banana_family(
-    "firefly-nano-banana-pro",
+    "nano-banana-pro",
     upstream_model_id="gemini-flash",
     upstream_model_version="nano-banana-2",
     family_label="Firefly Nano Banana Pro",
 )
 _register_nano_banana_family(
-    "firefly-nano-banana",
+    "nano-banana",
     upstream_model_id="gemini-flash",
     upstream_model_version="nano-banana-2",
     family_label="Firefly Nano Banana",
 )
 _register_nano_banana_family(
-    "firefly-nano-banana2",
+    "nano-banana2",
     upstream_model_id="gemini-flash",
     upstream_model_version="nano-banana-3",
     family_label="Firefly Nano Banana 2",
@@ -102,10 +103,16 @@ _register_nano_banana_family(
 )
 _register_gpt_image_family()
 
-DEFAULT_MODEL_ID = "firefly-nano-banana-pro-2k-16x9"
+for _image_conf in MODEL_CATALOG.values():
+    _image_conf.setdefault("provider", "google")
+
+
+DEFAULT_MODEL_ID = "nano-banana-pro-2k-16x9"
 
 VIDEO_MODEL_CATALOG: dict[str, dict] = {
-    "firefly-seedance2": {
+    "seedance2": {
+        "hidden": True,
+        "provider": "bytedance",
         "engine": "seedance2",
         "upstream_model_id": "seedance",
         "upstream_model_version": "seedance_2.0",
@@ -117,7 +124,9 @@ VIDEO_MODEL_CATALOG: dict[str, dict] = {
         "prompt_max_length": 2500,
         "description": "Firefly Seedance 2.0 video model (4-15s, 480p/720p/1080p)",
     },
-    "firefly-seedance2-fast": {
+    "seedance2-fast": {
+        "hidden": True,
+        "provider": "bytedance",
         "engine": "seedance2-fast",
         "upstream_model_id": "seedance",
         "upstream_model_version": "seedance_2.0_fast",
@@ -128,60 +137,6 @@ VIDEO_MODEL_CATALOG: dict[str, dict] = {
         "generate_audio": True,
         "prompt_max_length": 2500,
         "description": "Firefly Seedance 2.0 Fast video model (4-15s, 480p/720p)",
-    },
-    "grok-imagine-video": {
-        "engine": "seedance2-fast",
-        "upstream_model_id": "seedance",
-        "upstream_model_version": "seedance_2.0_fast",
-        "duration": 8,
-        "aspect_ratio": "16:9",
-        "resolution": "480p",
-        "supported_resolutions": ("480p", "720p"),
-        "generate_audio": True,
-        "prompt_max_length": 2500,
-        "description": "xAI Grok video async compatibility facade backed by Seedance 2.0 Fast",
-    },
-    "grok-imagine-video-1.5": {
-        "engine": "seedance2-fast",
-        "upstream_model_id": "seedance",
-        "upstream_model_version": "seedance_2.0_fast",
-        "duration": 8,
-        "aspect_ratio": "16:9",
-        "resolution": "480p",
-        "supported_resolutions": ("480p", "720p"),
-        "generate_audio": True,
-        "prompt_max_length": 2500,
-        "description": "xAI Grok Imagine Video 1.5 async compatibility facade backed by Seedance 2.0 Fast",
-    },
-    "firefly-sora2-4s-9x16": {
-        "duration": 4,
-        "aspect_ratio": "9:16",
-        "description": "Firefly Sora2 video model (4s 9:16)",
-    },
-    "firefly-sora2-4s-16x9": {
-        "duration": 4,
-        "aspect_ratio": "16:9",
-        "description": "Firefly Sora2 video model (4s 16:9)",
-    },
-    "firefly-sora2-8s-9x16": {
-        "duration": 8,
-        "aspect_ratio": "9:16",
-        "description": "Firefly Sora2 video model (8s 9:16)",
-    },
-    "firefly-sora2-8s-16x9": {
-        "duration": 8,
-        "aspect_ratio": "16:9",
-        "description": "Firefly Sora2 video model (8s 16:9)",
-    },
-    "firefly-sora2-12s-9x16": {
-        "duration": 12,
-        "aspect_ratio": "9:16",
-        "description": "Firefly Sora2 video model (12s 9:16)",
-    },
-    "firefly-sora2-12s-16x9": {
-        "duration": 12,
-        "aspect_ratio": "16:9",
-        "description": "Firefly Sora2 video model (12s 16:9)",
     },
 }
 
@@ -201,6 +156,7 @@ def _register_seedance_preset_family(
                     f"{prefix}-{duration}s-{RATIO_SUFFIX_MAP[ratio]}-{resolution}"
                 )
                 VIDEO_MODEL_CATALOG[model_id] = {
+                    "provider": "bytedance",
                     "engine": engine,
                     "upstream_model_id": "seedance",
                     "upstream_model_version": upstream_model_version,
@@ -210,9 +166,9 @@ def _register_seedance_preset_family(
                     "supported_resolutions": (resolution,),
                     "fixed_parameters": True,
                     "canonical_model": (
-                        "firefly-seedance2-fast"
+                        "seedance2-fast"
                         if engine == "seedance2-fast"
-                        else "firefly-seedance2"
+                        else "seedance2"
                     ),
                     "generate_audio": True,
                     "prompt_max_length": 2500,
@@ -237,77 +193,111 @@ _register_seedance_preset_family(
     family_label="Seedance 2.0 Fast",
 )
 
-for dur in (4, 8, 12):
-    for ratio in ("9:16", "16:9"):
-        model_id = f"firefly-sora2-pro-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
-        VIDEO_MODEL_CATALOG[model_id] = {
-            "duration": dur,
-            "aspect_ratio": ratio,
-            "upstream_model": "openai:firefly:colligo:sora2-pro",
-            "description": f"Firefly Sora2 Pro video model ({dur}s {ratio})",
-        }
+
+def _register_sora_family(
+    prefix: str,
+    *,
+    upstream_model: str,
+    family_label: str,
+) -> None:
+    for duration in (4, 8, 12):
+        for ratio in ("9:16", "16:9"):
+            model_id = f"{prefix}-{duration}s-{RATIO_SUFFIX_MAP[ratio]}"
+            VIDEO_MODEL_CATALOG[model_id] = {
+                "provider": "openai",
+                "engine": "sora2",
+                "upstream_model": upstream_model,
+                "duration": duration,
+                "aspect_ratio": ratio,
+                "resolution": "720p",
+                "fixed_parameters": True,
+                "description": f"{family_label} ({duration}s {ratio})",
+            }
+
+
+_register_sora_family(
+    "sora2",
+    upstream_model="openai:firefly:colligo:sora2",
+    family_label="Sora 2 video model",
+)
+_register_sora_family(
+    "sora2-pro",
+    upstream_model="openai:firefly:colligo:sora2-pro",
+    family_label="Sora 2 Pro video model",
+)
+
 
 for dur in (4, 6, 8):
     for ratio in ("16:9", "9:16"):
         for res in ("1080p", "720p"):
-            model_id = f"firefly-veo31-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
+            model_id = f"veo31-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
             VIDEO_MODEL_CATALOG[model_id] = {
+                "provider": "google",
                 "engine": "veo31-standard",
                 "upstream_model": "google:firefly:colligo:veo31",
                 "duration": dur,
                 "aspect_ratio": ratio,
                 "resolution": res,
-                "description": f"Firefly Veo31 video model ({dur}s {ratio} {res})",
+                "fixed_parameters": True,
+                "description": f"Veo 3.1 video model ({dur}s {ratio} {res})",
             }
 
 for dur in (4, 6, 8):
     for ratio in ("16:9", "9:16"):
         for res in ("1080p", "720p"):
-            model_id = f"firefly-veo31-ref-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
+            model_id = f"veo31-ref-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
             VIDEO_MODEL_CATALOG[model_id] = {
+                "provider": "google",
                 "engine": "veo31-standard",
                 "upstream_model": "google:firefly:colligo:veo31",
                 "duration": dur,
                 "aspect_ratio": ratio,
                 "resolution": res,
                 "reference_mode": "image",
-                "description": f"Firefly Veo31 Ref video model ({dur}s {ratio} {res})",
+                "fixed_parameters": True,
+                "description": f"Veo 3.1 reference video model ({dur}s {ratio} {res})",
             }
 
 for dur in (4, 6, 8):
     for ratio in ("16:9", "9:16"):
         for res in ("1080p", "720p"):
-            model_id = f"firefly-veo31-fast-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
+            model_id = f"veo31-fast-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
             VIDEO_MODEL_CATALOG[model_id] = {
+                "provider": "google",
                 "engine": "veo31-fast",
                 "upstream_model": "google:firefly:colligo:veo31-fast",
                 "duration": dur,
                 "aspect_ratio": ratio,
                 "resolution": res,
-                "description": f"Firefly Veo31 Fast video model ({dur}s {ratio} {res})",
+                "fixed_parameters": True,
+                "description": f"Veo 3.1 Fast video model ({dur}s {ratio} {res})",
             }
 
 for dur in (5, 15):
     for ratio in ("16:9", "9:16"):
-        model_id = f"firefly-kling-o3-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
+        model_id = f"kling-o3-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
         VIDEO_MODEL_CATALOG[model_id] = {
+            "provider": "kling",
             "engine": "kling-o3",
             "upstream_model": "kling:firefly:colligo:o3",
             "duration": dur,
             "aspect_ratio": ratio,
             "resolution": "1080p",
-            "description": f"Firefly Kling O3 video model ({dur}s {ratio})",
+            "fixed_parameters": True,
+            "description": f"Kling O3 video model ({dur}s {ratio})",
         }
 
 for dur in (5, 10, 15):
     for ratio in ("16:9", "9:16"):
-        model_id = f"firefly-kling3-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
+        model_id = f"kling3-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
         VIDEO_MODEL_CATALOG[model_id] = {
+            "provider": "kling",
             "engine": "kling3",
             "upstream_model": "kling:firefly:colligo:3.0",
             "duration": dur,
             "aspect_ratio": ratio,
             "resolution": "720p",
             "generate_audio": True,
-            "description": f"Firefly Kling 3.0 video model ({dur}s {ratio} 720p)",
+            "fixed_parameters": True,
+            "description": f"Kling 3.0 video model ({dur}s {ratio} 720p)",
         }

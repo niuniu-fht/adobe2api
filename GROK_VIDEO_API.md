@@ -18,7 +18,7 @@ xAI 官方协议参考：
 ## 创建任务
 
 ```text
-POST http://127.0.0.1:6001/v1/videos/generations
+POST http://127.0.0.1:6002/v1/videos/generations
 Authorization: Bearer <service_api_key>
 Content-Type: application/json
 ```
@@ -80,7 +80,7 @@ Content-Type: application/json
 ## 查询任务
 
 ```text
-GET http://127.0.0.1:6001/v1/videos/REQUEST_ID
+GET http://127.0.0.1:6002/v1/videos/REQUEST_ID
 Authorization: Bearer <service_api_key>
 ```
 
@@ -102,7 +102,7 @@ Authorization: Bearer <service_api_key>
   "progress": 100,
   "model": "grok-imagine-video-1.5",
   "video": {
-    "url": "http://127.0.0.1:6001/generated/REQUEST_ID.mp4",
+    "url": "http://127.0.0.1:6002/generated/REQUEST_ID.mp4",
     "duration": 8,
     "respect_moderation": true
   }

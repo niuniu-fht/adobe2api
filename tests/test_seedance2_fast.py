@@ -6,7 +6,7 @@ from core.models.catalog import VIDEO_MODEL_CATALOG
 from core.stores import RequestLogStore
 
 
-SEEDANCE_CONF = VIDEO_MODEL_CATALOG["firefly-seedance2-fast"]
+SEEDANCE_CONF = VIDEO_MODEL_CATALOG["seedance2-fast"]
 
 
 def test_seedance_fast_catalog_uses_adobe_model_ids():
@@ -118,6 +118,6 @@ def test_seedance_chat_requests_are_counted_as_video():
     assert not RequestLogStore._is_image_generation_request(
         {
             "path": "/v1/chat/completions",
-            "model": "firefly-seedance2-fast",
+            "model": "seedance2-fast",
         }
     )

@@ -32,7 +32,7 @@ C2PA：com.adobe.modelVersion=seedance_2.0_fast
 
 实测视频：
 
-`http://127.0.0.1:6001/generated/b1d1a2ed2b08431ea0a5ba5d1065fd2a.mp4`
+`http://127.0.0.1:6002/generated/b1d1a2ed2b08431ea0a5ba5d1065fd2a.mp4`
 
 ## 1. 快速开始
 
@@ -48,7 +48,7 @@ X-API-Key: <service_api_key>
 服务地址：
 
 ```text
-http://127.0.0.1:6001
+http://127.0.0.1:6002
 ```
 
 ### 1.2 模型
@@ -58,8 +58,7 @@ http://127.0.0.1:6001
 | Seedance 2.0 | `sd2-4s-16x9-1080p` | `seedance / seedance_2.0` |
 | Seedance 2.0 Fast | `sd2-fast-4s-16x9-480p` | `seedance / seedance_2.0_fast` |
 
-接口也接受 `firefly-seedance2`、`firefly-seedance2-fast` 和不带日期的
-Seedance 别名作为兼容入口；新请求统一使用下面的固定参数模型名。
+新请求统一使用下面的固定参数模型名。
 
 ### 1.3 前端固定模型名
 
@@ -79,15 +78,15 @@ sd2-fast-4s-16x9-480p
 sd2-fast-8s-9x16-720p
 ```
 
-模型名是固定配置的唯一来源，新请求只传模型名即可。遗留客户端重复传入
-`duration`、`ratio`、`resolution` 时，值与模型名一致会被接受，冲突值返回 HTTP 400。
+模型名是固定配置的唯一来源，新请求只传模型名即可。请求体出现
+`duration`、`seconds`、`ratio`、`aspect_ratio` 或 `aspectRatio` 时返回 HTTP 400。
 Fast 的 Adobe schema 当前没有 1080p，因此目录中不会注册
 `sd2-fast-*-*-1080p`。
 
 ### 1.4 创建文字生成视频任务
 
 ```bash
-curl -X POST "http://127.0.0.1:6001/api/v3/contents/generations/tasks" \
+curl -X POST "http://127.0.0.1:6002/api/v3/contents/generations/tasks" \
   -H "Authorization: Bearer <service_api_key>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -113,7 +112,7 @@ curl -X POST "http://127.0.0.1:6001/api/v3/contents/generations/tasks" \
 ### 1.5 查询任务
 
 ```bash
-curl "http://127.0.0.1:6001/api/v3/contents/generations/tasks/TASK_ID" \
+curl "http://127.0.0.1:6002/api/v3/contents/generations/tasks/TASK_ID" \
   -H "Authorization: Bearer <service_api_key>"
 ```
 
@@ -143,7 +142,7 @@ curl "http://127.0.0.1:6001/api/v3/contents/generations/tasks/TASK_ID" \
   "status": "succeeded",
   "error": null,
   "content": {
-    "video_url": "http://127.0.0.1:6001/generated/RESULT.mp4"
+    "video_url": "http://127.0.0.1:6002/generated/RESULT.mp4"
   },
   "resolution": "720p",
   "ratio": "16:9",

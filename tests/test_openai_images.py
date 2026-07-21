@@ -61,7 +61,7 @@ def test_native_gpt_image_2_request_uses_requested_size():
 def test_native_gpt_image_size_can_map_to_internal_model_alias():
     assert (
         gpt_image_model_id_from_size({"width": 2560, "height": 1440})
-        == "firefly-gpt-image-2k-16x9"
+        == "gpt-image-2k-16x9"
     )
 
 
@@ -77,7 +77,7 @@ def test_native_gpt_image_accepts_16x9_ratio_size_as_2k():
     assert options.aspect_ratio == "16:9"
     assert options.output_resolution == "2K"
     assert options.requested_size == {"width": 2560, "height": 1440}
-    assert options.resolved_model_id == "firefly-gpt-image-2k-16x9"
+    assert options.resolved_model_id == "gpt-image-2k-16x9"
 
     payload = build_image_payload_candidates(
         prompt="draw a dashboard",

@@ -1,4 +1,6 @@
 data
+/video-data/
+/video-config/
 __pycache__
 config/config.json
 config/tokens.json

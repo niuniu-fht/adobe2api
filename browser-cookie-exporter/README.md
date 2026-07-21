@@ -36,7 +36,7 @@ loaded `https://firefly.adobe.com/` page with Firefly session data available.
 ## Import Into adobe2api
 
 ```bash
-curl -X POST "http://127.0.0.1:6001/api/v1/refresh-profiles/import-cookie" \
+curl -X POST "http://127.0.0.1:6002/api/v1/refresh-profiles/import-cookie" \
   -H "Content-Type: application/json" \
   -d '{"name":"my-account","cookie":"k1=v1; k2=v2"}'
 ```

@@ -16,12 +16,12 @@ from .image_limits import (
 
 GEMINI_IMAGE_MODELS: dict[str, dict[str, str]] = {
     "gemini-3.1-flash-image": {
-        "family_prefix": "firefly-nano-banana2",
+        "family_prefix": "nano-banana2",
         "display_name": "Nano Banana 2",
         "description": "Gemini 3.1 Flash Image compatible Nano Banana 2 model",
     },
     "gemini-3-pro-image": {
-        "family_prefix": "firefly-nano-banana-pro",
+        "family_prefix": "nano-banana-pro",
         "display_name": "Nano Banana Pro",
         "description": "Gemini 3 Pro Image compatible Nano Banana Pro model",
     },
