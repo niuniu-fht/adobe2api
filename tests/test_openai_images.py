@@ -57,6 +57,52 @@ def test_native_gpt_image_2_request_converts_requested_size():
     assert payload["modelSpecificPayload"]["size"] == "1536x1024"
 
 
+@pytest.mark.parametrize("raw_size", [None, "", "auto", "not-a-size"])
+def test_native_gpt_image_forwards_auto_without_default_dimensions(raw_size):
+    data = {"model": "gpt-image-2", "prompt": "draw freely"}
+    if raw_size is not None:
+        data["size"] = raw_size
+
+    options = build_native_gpt_image_options(data)
+    payload = build_image_payload_candidates(
+        prompt="draw freely",
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.output_resolution,
+        upstream_model_id=options.upstream_model_id or "",
+        upstream_model_version=options.upstream_model_version or "",
+        requested_size=options.requested_size,
+    )[0]
+
+    assert options.aspect_ratio == "auto"
+    assert options.output_resolution == "auto"
+    assert options.requested_size is None
+    assert options.resolved_model_id is None
+    assert payload["modelSpecificPayload"]["size"] == "auto"
+    assert "size" not in payload
+    assert "outputResolution" not in payload
+
+
+def test_custom_gpt_image_alias_forwards_auto_size():
+    options = build_native_gpt_image_options(
+        {"model": "gpt-image-2-high", "prompt": "draw freely", "size": "auto"},
+        model_id_override="gpt-image-2",
+        response_model="gpt-image-2-high",
+    )
+    payload = build_image_payload_candidates(
+        prompt="draw freely",
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.output_resolution,
+        upstream_model_id=options.upstream_model_id or "",
+        upstream_model_version=options.upstream_model_version or "",
+        requested_size=options.requested_size,
+    )[0]
+
+    assert options.response_model == "gpt-image-2-high"
+    assert payload["modelSpecificPayload"]["size"] == "auto"
+    assert "size" not in payload
+    assert "outputResolution" not in payload
+
+
 def test_native_gpt_image_size_can_map_to_internal_model_alias():
     assert (
         gpt_image_model_id_from_size({"width": 2560, "height": 1440})

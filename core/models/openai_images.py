@@ -341,10 +341,24 @@ def build_native_gpt_image_options(
     if model_id not in OPENAI_GPT_IMAGE_MODEL_VERSIONS:
         raise OpenAIImageRequestError(f"Invalid model: {model_id}", "model")
 
-    parsed_size = parse_requested_size(data.get("size"))
+    raw_size = data.get("size")
+    is_auto_size = raw_size is None or str(raw_size or "").strip().lower() in {
+        "",
+        "auto",
+    }
+    try:
+        parsed_size = None if is_auto_size else parse_requested_size(raw_size)
+    except OpenAIImageRequestError:
+        is_auto_size = True
+        parsed_size = None
+
     requested_size = normalize_gpt_image_size(parsed_size)
-    aspect_ratio = gpt_image_aspect_ratio_from_size(requested_size)
-    output_resolution = gpt_image_output_resolution_from_size(requested_size)
+    aspect_ratio = (
+        "auto" if is_auto_size else gpt_image_aspect_ratio_from_size(requested_size)
+    )
+    output_resolution = (
+        "auto" if is_auto_size else gpt_image_output_resolution_from_size(requested_size)
+    )
     output_format = parse_output_format(data.get("output_format"))
     model_version = str(
         upstream_model_version or OPENAI_GPT_IMAGE_MODEL_VERSIONS[model_id]
@@ -364,7 +378,9 @@ def build_native_gpt_image_options(
         is_native_gpt_image=True,
         upstream_model_id="gpt-image",
         upstream_model_version=model_version,
-        resolved_model_id=gpt_image_model_id_from_size(requested_size),
+        resolved_model_id=(
+            None if is_auto_size else gpt_image_model_id_from_size(requested_size)
+        ),
     )
 
 

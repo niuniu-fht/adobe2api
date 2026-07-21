@@ -148,14 +148,17 @@ def build_image_payload_candidates(
     normalized_ratio = str(aspect_ratio or "").strip().lower()
     effective_ratio = normalized_ratio or "1:1"
     if str(upstream_model_id or "").strip().lower() == "gpt-image":
+        is_auto_size = requested_size is None and effective_ratio == "auto"
         effective_seed = int(seed) if seed is not None else random_image_seed()
         effective_detail_level = detail_level
         if effective_detail_level is None:
             effective_detail_level = gpt_image_detail_level_from_quality(quality_level)
-        pixel_size = requested_size or gpt_image_pixels_from_ratio(
-            effective_ratio, output_resolution
-        )
-        if pixel_size is None:
+        pixel_size = None
+        if not is_auto_size:
+            pixel_size = requested_size or gpt_image_pixels_from_ratio(
+                effective_ratio, output_resolution
+            )
+        if not is_auto_size and pixel_size is None:
             raise ValueError(f"unsupported gpt-image ratio: {effective_ratio}")
         base_payload = {
             "modelId": upstream_model_id,
@@ -170,14 +173,19 @@ def build_image_payload_candidates(
                 "submodule": "ff-image-generate",
             },
             "modelSpecificPayload": {
-                "size": gpt_image_size_string(pixel_size),
+                "size": (
+                    "auto" if is_auto_size else gpt_image_size_string(pixel_size)
+                ),
             },
-            "outputResolution": str(output_resolution or "2K").upper(),
             "generationSettings": {
                 "detailLevel": int(effective_detail_level),
             },
         }
-        base_payload["size"] = pixel_size
+        if not is_auto_size:
+            base_payload["outputResolution"] = str(
+                output_resolution or "2K"
+            ).upper()
+            base_payload["size"] = pixel_size
         if not source_image_ids:
             return [base_payload]
 
