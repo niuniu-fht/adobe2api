@@ -16,7 +16,7 @@ sd2-fast-8s-9x16-480p
 sd2-fast-8s-9x16-720p
 ```
 
-完整格式为 `sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}`，共 12 个组合。
+完整格式为 `sd2-fast-{4s..15s}-{16x9|9x16}-{480p|720p}`，共 48 个组合。
 Fast 的 Adobe schema 当前没有 1080p，因此不注册 Fast 1080p 模型名。
 请求体不接收时长或比例字段，两个值均由模型名确定。
 
@@ -70,7 +70,7 @@ Content-Type: application/json
 
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---:|---:|---|
-| `model` | string | 必填 | `sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}` |
+| `model` | string | 必填 | `sd2-fast-{4s..15s}-{16x9|9x16}-{480p|720p}` |
 | `messages` | array | 必填 | OpenAI Chat 格式，最后一条用户消息提供提示词 |
 | `generate_audio` | boolean | `true` | 是否生成同步音频 |
 | `seed` | integer | 随机 | 0 到 4294967295 |

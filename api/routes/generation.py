@@ -265,8 +265,8 @@ def parse_seedance_official_request(data: dict, video_model_catalog: dict) -> di
     model = normalize_seedance_official_model(requested_model, video_model_catalog)
     if not model or model not in video_model_catalog:
         raise ValueError(
-            "model must be a Seedance official ID or sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}, "
-            "or sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}"
+            "model must be a Seedance official ID or sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}, "
+            "or sd2-fast-{4s..15s}-{16x9|9x16}-{480p|720p}"
         )
 
     content = data.get("content")

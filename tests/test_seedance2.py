@@ -34,10 +34,10 @@ def test_seedance_standard_preset_model_ids_are_frontend_friendly():
         for model_id in VIDEO_MODEL_CATALOG
         if model_id.startswith("sd2-") and not model_id.startswith("sd2-fast-")
     )
-    assert len(preset_ids) == 12
-    assert preset_ids[0] == "sd2-4s-16x9-1080p"
+    assert len(preset_ids) == 48
+    assert "sd2-4s-16x9-1080p" in preset_ids
     assert "sd2-6s-9x16-720p" in preset_ids
-    assert all("4s" in model_id or "6s" in model_id or "8s" in model_id for model_id in preset_ids)
+    assert "sd2-15s-9x16-1080p" in preset_ids
 
 
 def test_seedance_fast_preset_model_ids_only_expose_adobe_resolutions():
@@ -46,9 +46,10 @@ def test_seedance_fast_preset_model_ids_only_expose_adobe_resolutions():
         for model_id in VIDEO_MODEL_CATALOG
         if model_id.startswith("sd2-fast-")
     )
-    assert len(preset_ids) == 12
+    assert len(preset_ids) == 48
     assert "sd2-fast-4s-16x9-480p" in preset_ids
     assert "sd2-fast-8s-9x16-720p" in preset_ids
+    assert "sd2-fast-15s-16x9-720p" in preset_ids
     assert not any(model_id.endswith("-1080p") for model_id in preset_ids)
 
 
@@ -185,6 +186,20 @@ def test_official_seedance_preset_model_decodes_parameters_from_model_name():
     assert parsed["duration"] == 4
     assert parsed["ratio"] == "16:9"
     assert parsed["resolution"] == "480p"
+
+
+def test_official_seedance_fast_preset_supports_fifteen_seconds():
+    parsed = parse_seedance_official_request(
+        {
+            "model": "sd2-fast-15s-16x9-720p",
+            "content": [{"type": "text", "text": "A paper boat"}],
+        },
+        VIDEO_MODEL_CATALOG,
+    )
+
+    assert parsed["duration"] == 15
+    assert parsed["ratio"] == "16:9"
+    assert parsed["resolution"] == "720p"
 
 
 def test_official_seedance_preset_rejects_duplicate_model_parameters():

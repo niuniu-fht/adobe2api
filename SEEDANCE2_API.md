@@ -10,7 +10,7 @@
 ## 模型映射
 
 ```text
-前端模型：sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}
+前端模型：sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}
 Adobe modelId：seedance
 Adobe modelVersion：seedance_2.0
 Adobe 创建任务：POST https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async
@@ -27,7 +27,7 @@ sd2-6s-9x16-720p
 sd2-8s-9x16-1080p
 ```
 
-完整格式为 `sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}`，共 12 个组合。
+完整格式为 `sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}`，共 48 个组合。
 时长、比例和分辨率由模型名固定。请求体不接收时长或比例字段。
 
 ## 实测结果
@@ -75,7 +75,7 @@ Content-Type: application/json
 
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---:|---:|---|
-| `model` | string | 必填 | `sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}` |
+| `model` | string | 必填 | `sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}` |
 | `messages` | array | 必填 | OpenAI Chat 格式，最后一条用户消息提供提示词和参考图 |
 | `generate_audio` | boolean | `true` | 是否生成同步音频 |
 | `seed` | integer | 随机 | 0 到 4294967295 |

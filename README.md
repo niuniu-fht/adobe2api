@@ -77,8 +77,8 @@ Video 分支 Compose 默认使用宿主机端口 `6002`，持久化目录为
 - `gemini-3.1-flash-image` / `nano-banana-2`（Nano Banana 2 兼容别名）
 - `gemini-3-pro-image` / `nano-banana-pro`（Nano Banana Pro 兼容别名）
 - `gpt-image-*`（图像，对应上游 `gpt-image:2`）
-- `sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}`（前端固定参数模型名）
-- `sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}`（前端固定参数模型名）
+- `sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}`（前端固定参数模型名）
+- `sd2-fast-{4s..15s}-{16x9|9x16}-{480p|720p}`（前端固定参数模型名）
 - `sora2-*`（OpenAI 视频）
 - `sora2-pro-*`（OpenAI 视频）
 - `veo31-*`（Google 视频）
@@ -234,8 +234,8 @@ Kling O3 视频模型：
   - `kling-o3-15s-9x16`
 
 Seedance 2.0 系列使用固定参数模型名。标准版格式为
-`sd2-{4s|6s|8s}-{16x9|9x16}-{720p|1080p}`，Fast 格式为
-`sd2-fast-{4s|6s|8s}-{16x9|9x16}-{480p|720p}`。模型名直接确定时长、比例和
+`sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}`，Fast 格式为
+`sd2-fast-{4s..15s}-{16x9|9x16}-{480p|720p}`。模型名直接确定时长、比例和
 分辨率。所有公开视频模型的时长和比例都只由模型 ID 决定；请求体出现
 `duration`、`seconds`、`ratio`、`aspect_ratio` 或 `aspectRatio` 会返回参数错误。
 两者均支持音频开关、seed、首尾帧和

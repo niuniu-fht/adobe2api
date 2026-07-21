@@ -149,7 +149,7 @@ def _register_seedance_preset_family(
     resolutions: tuple[str, ...],
     family_label: str,
 ) -> None:
-    for duration in (4, 6, 8):
+    for duration in range(4, 16):
         for ratio in ("16:9", "9:16"):
             for resolution in resolutions:
                 model_id = (
