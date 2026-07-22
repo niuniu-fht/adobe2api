@@ -690,13 +690,6 @@ class AdobeClient:
     def upload_image(
         self, token: str, image_bytes: bytes, mime_type: str = "image/jpeg"
     ) -> str:
-        return str(
-            self.upload_image_reference(token, image_bytes, mime_type).get("id") or ""
-        )
-
-    def upload_image_reference(
-        self, token: str, image_bytes: bytes, mime_type: str = "image/jpeg"
-    ) -> dict:
         if not image_bytes:
             raise AdobeRequestError("image is empty")
 
@@ -726,17 +719,10 @@ class AdobeClient:
         except Exception:
             raise AdobeRequestError("upload image failed: invalid response")
 
-        image = ((data.get("images") or [{}])[0]) or {}
-        image_id = image.get("id")
+        image_id = (((data.get("images") or [{}])[0]) or {}).get("id")
         if not image_id:
             raise AdobeRequestError("upload image succeeded but no image id returned")
-        reference = {"id": str(image_id)}
-        presigned_url = str(
-            image.get("presignedUrl") or image.get("presigned_url") or ""
-        ).strip()
-        if presigned_url:
-            reference["presignedUrl"] = presigned_url
-        return reference
+        return str(image_id)
 
     @staticmethod
     def _json_or_empty(resp) -> Any:
