@@ -66,6 +66,14 @@ class RefreshProfileEnabledRequest(BaseModel):
     enabled: bool
 
 
+class RefreshProfileBatchRequest(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=1000)
+
+
+class RefreshProfileBatchEnabledRequest(RefreshProfileBatchRequest):
+    enabled: bool
+
+
 class AdminLoginRequest(BaseModel):
     username: str
     password: str

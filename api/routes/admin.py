@@ -14,6 +14,8 @@ from api.schemas import (
     ExportSelectionRequest,
     RefreshCookieBatchImportRequest,
     RefreshCookieImportRequest,
+    RefreshProfileBatchEnabledRequest,
+    RefreshProfileBatchRequest,
     RefreshProfileEnabledRequest,
     TokenAddRequest,
     TokenBatchAddRequest,
@@ -840,6 +842,63 @@ def build_admin_router(
             raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
+
+    @router.post("/api/v1/refresh-profiles/delete-batch")
+    def refresh_profiles_delete_batch(
+        req: RefreshProfileBatchRequest, request: Request
+    ):
+        require_admin_auth(request)
+        profile_ids = list(
+            dict.fromkeys(
+                str(value or "").strip() for value in req.ids if str(value or "").strip()
+            )
+        )
+        if not profile_ids:
+            raise HTTPException(status_code=400, detail="ids is required")
+        deleted = []
+        missing = []
+        for profile_id in profile_ids:
+            try:
+                refresh_manager.remove_profile(profile_id)
+                deleted.append(profile_id)
+            except KeyError:
+                missing.append(profile_id)
+        return {
+            "status": "ok" if not missing else "partial",
+            "deleted_count": len(deleted),
+            "missing_count": len(missing),
+            "deleted_ids": deleted,
+            "missing_ids": missing,
+        }
+
+    @router.put("/api/v1/refresh-profiles/enabled-batch")
+    def refresh_profiles_set_enabled_batch(
+        req: RefreshProfileBatchEnabledRequest, request: Request
+    ):
+        require_admin_auth(request)
+        profile_ids = list(
+            dict.fromkeys(
+                str(value or "").strip() for value in req.ids if str(value or "").strip()
+            )
+        )
+        if not profile_ids:
+            raise HTTPException(status_code=400, detail="ids is required")
+        updated = []
+        missing = []
+        for profile_id in profile_ids:
+            try:
+                refresh_manager.set_enabled(profile_id, req.enabled)
+                updated.append(profile_id)
+            except KeyError:
+                missing.append(profile_id)
+        return {
+            "status": "ok" if not missing else "partial",
+            "enabled": req.enabled,
+            "updated_count": len(updated),
+            "missing_count": len(missing),
+            "updated_ids": updated,
+            "missing_ids": missing,
+        }
 
     @router.put("/api/v1/refresh-profiles/{profile_id}/enabled")
     def refresh_profiles_set_enabled(

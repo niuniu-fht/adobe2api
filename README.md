@@ -19,7 +19,7 @@ English README: `README_EN.md`
 - Gemini 原生兼容：`/v1beta/models`、`/v1beta/models/{model}:generateContent`
 - Token 池管理（手动 Token + 自动刷新 Token）
 - 管理后台 Web UI：Token / 配置 / 日志 / 刷新配置导入
-- 中心运维接口：机器密钥鉴权、运行快照和游标日志
+- 中心运维接口：机器密钥鉴权、运行快照、Cookie 账号健康和游标日志
 
 ### 多实例统一运维
 
@@ -37,6 +37,15 @@ ADOBE2API_OPS_KEY=replace-with-a-long-operations-key
 curl http://127.0.0.1:6001/api/v1/ops/snapshot \
   -H "X-Adobe2API-Ops-Key: replace-with-a-long-operations-key"
 ```
+
+Cookie 账号健康列表（仅返回脱敏身份、积分和刷新状态）：
+
+```bash
+curl "http://127.0.0.1:6001/api/v1/ops/accounts?low_credit_threshold=100" \
+  -H "X-Adobe2API-Ops-Key: replace-with-a-long-operations-key"
+```
+
+快照同样接受 `low_credit_threshold`，并在 `accounts` 字段返回账号总数、可用数、低积分数、余额未知数和积分合计。
 
 游标日志：
 
