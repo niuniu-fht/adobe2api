@@ -1119,10 +1119,20 @@ def _normalize_input_image(image_bytes: bytes, mime_type: str) -> tuple[bytes, s
                 "PNG": "image/png",
                 "WEBP": "image/webp",
             }.get(actual_format)
-            if actual_mime and normalized_mime == actual_mime:
+            is_animated = bool(
+                getattr(source, "is_animated", False)
+                and int(getattr(source, "n_frames", 1) or 1) > 1
+            )
+            if (
+                actual_mime
+                and normalized_mime == actual_mime
+                and source.mode in {"RGB", "RGBA"}
+                and not is_animated
+            ):
                 return image_bytes, actual_mime
 
-            converted = source.convert("RGBA" if "A" in source.getbands() else "RGB")
+            has_alpha = "A" in source.getbands() or "transparency" in source.info
+            converted = source.convert("RGBA" if has_alpha else "RGB")
             output = io.BytesIO()
             converted.save(output, format="PNG")
             return output.getvalue(), "image/png"

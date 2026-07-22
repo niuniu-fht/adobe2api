@@ -23,7 +23,7 @@ from core.models.resolver import resolve_model, resolve_ratio_and_resolution
 from core.adobe_client import AdobeClient, ContentPolicyError
 
 
-def test_input_image_format_is_converted_to_png(monkeypatch):
+def test_input_image_format_is_converted_to_png():
     import app
     from PIL import Image
     from io import BytesIO
@@ -37,6 +37,28 @@ def test_input_image_format_is_converted_to_png(monkeypatch):
     assert mime_type == "image/png"
     with Image.open(BytesIO(converted)) as result:
         assert result.format == "PNG"
+
+
+@pytest.mark.parametrize("source_mode", ["CMYK", "L", "P"])
+def test_input_image_unsupported_mode_is_converted_to_rgb_png(source_mode):
+    import app
+    from PIL import Image
+    from io import BytesIO
+
+    source = Image.new(source_mode, (2, 2))
+    encoded = BytesIO()
+    source_format = "JPEG" if source_mode == "CMYK" else "PNG"
+    source.save(encoded, format=source_format)
+
+    converted, mime_type = app._normalize_input_image(
+        encoded.getvalue(),
+        "image/jpeg" if source_format == "JPEG" else "image/png",
+    )
+
+    assert mime_type == "image/png"
+    with Image.open(BytesIO(converted)) as result:
+        assert result.format == "PNG"
+        assert result.mode == "RGB"
 
 
 def test_input_image_format_rejects_invalid_bytes():
