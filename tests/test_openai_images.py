@@ -20,7 +20,7 @@ from core.models.image_limits import (
     validate_input_image_count,
 )
 from core.models.resolver import resolve_model, resolve_ratio_and_resolution
-from core.adobe_client import AdobeClient, ContentPolicyError
+from core.adobe_client import AdobeClient, AdobeRequestError, ContentPolicyError
 
 
 def test_input_image_format_is_converted_to_png():
@@ -371,15 +371,20 @@ def test_gpt_image_references_use_storage_blobs_only():
         source_image_ids=["blob-1", "blob-2"],
     )
 
-    assert len(payloads) == 1
-    assert payloads[0]["generationMetadata"]["module"] == "text2image"
+    assert len(payloads) == 2
+    assert payloads[0]["generationMetadata"]["module"] == "image2image"
     assert payloads[0]["referenceBlobs"] == [
+        {"id": "blob-1", "usage": "general"},
+        {"id": "blob-2", "usage": "general"},
+    ]
+    assert payloads[1]["generationMetadata"]["module"] == "text2image"
+    assert payloads[1]["referenceBlobs"] == [
         {"id": "blob-1", "usage": "subject"},
         {"id": "blob-2", "usage": "subject"},
     ]
-    assert payloads[0]["modelSpecificPayload"] == {}
-    assert "referenceImages" not in payloads[0]
-    assert "referenceVideos" not in payloads[0]
+    assert payloads[1]["modelSpecificPayload"] == {}
+    assert all("referenceImages" not in payload for payload in payloads)
+    assert all("referenceVideos" not in payload for payload in payloads)
 
 
 def test_gpt_image_unsafe_retries_with_new_seeds(monkeypatch):
@@ -412,6 +417,35 @@ def test_gpt_image_unsafe_retries_with_new_seeds(monkeypatch):
     assert image_bytes == b"image"
     assert meta["status"] == "succeeded"
     assert attempted_seeds == [101, 202, 303]
+
+
+def test_gpt_image_candidate_fallback_preserves_primary_error(monkeypatch):
+    client = AdobeClient()
+
+    class FakeResponse:
+        def __init__(self, message):
+            self.status_code = 400
+            self.text = message
+            self.headers = {}
+
+    responses = iter(
+        [
+            FakeResponse("primary general-reference failure"),
+            FakeResponse("fallback subject-reference failure"),
+        ]
+    )
+    monkeypatch.setattr(
+        client,
+        "_build_payload_candidates",
+        lambda **kwargs: [{"candidate": "general"}, {"candidate": "subject"}],
+    )
+    monkeypatch.setattr(client, "_post_json", lambda *args, **kwargs: next(responses))
+
+    with pytest.raises(
+        AdobeRequestError,
+        match="primary general-reference failure",
+    ):
+        client._generate_once(token="TOKEN", prompt="edit the image")
 
 
 def test_content_policy_error_keeps_plain_http_detail(monkeypatch):

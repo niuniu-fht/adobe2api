@@ -1568,7 +1568,8 @@ class AdobeClient:
         progress_cb: Optional[Callable[[dict], None]] = None,
     ) -> tuple[Optional[bytes], dict]:
         submit_resp = None
-        last_error = ""
+        first_error = ""
+        first_error_status: Optional[int] = None
         for payload in self._build_payload_candidates(
             prompt=prompt,
             aspect_ratio=aspect_ratio,
@@ -1593,7 +1594,9 @@ class AdobeClient:
                 break
 
             self._raise_if_image_unsafe(submit_resp, param="prompt")
-            last_error = submit_resp.text[:300]
+            if not first_error:
+                first_error = submit_resp.text[:300]
+                first_error_status = submit_resp.status_code
 
         if submit_resp is None:
             raise AdobeRequestError("submit failed: no response")
@@ -1623,9 +1626,9 @@ class AdobeClient:
                     status_code=submit_resp.status_code,
                     error_type="status",
                 )
-            if last_error:
+            if first_error:
                 raise AdobeRequestError(
-                    f"submit failed: {submit_resp.status_code} {last_error}"
+                    f"submit failed: {first_error_status or submit_resp.status_code} {first_error}"
                 )
             raise AdobeRequestError(
                 f"submit failed: {submit_resp.status_code} {submit_resp.text[:300]}"
