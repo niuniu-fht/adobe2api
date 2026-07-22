@@ -1100,6 +1100,36 @@ def _normalize_image_mime(mime_type: str) -> str:
     return normalized
 
 
+def _normalize_input_image(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+    normalized_mime = _normalize_image_mime(mime_type)
+    if Image is None:
+        if normalized_mime not in {"image/jpeg", "image/png", "image/webp"}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported image format: {mime_type or 'unknown'}",
+            )
+        return image_bytes, normalized_mime
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            actual_format = str(source.format or "").upper()
+            actual_mime = {
+                "JPEG": "image/jpeg",
+                "PNG": "image/png",
+                "WEBP": "image/webp",
+            }.get(actual_format)
+            if actual_mime and normalized_mime == actual_mime:
+                return image_bytes, actual_mime
+
+            converted = source.convert("RGBA" if "A" in source.getbands() else "RGB")
+            output = io.BytesIO()
+            converted.save(output, format="PNG")
+            return output.getvalue(), "image/png"
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"unsupported or invalid image format: {exc}")
+
+
 def _load_input_images(messages) -> list[tuple[bytes, str]]:
     image_urls = _extract_image_urls_from_messages(messages, max_items=6)
     if not image_urls:
@@ -1134,7 +1164,10 @@ def _load_input_images(messages) -> list[tuple[bytes, str]]:
         if len(image_bytes) > 10 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="image too large, max 10MB")
 
-        loaded.append((image_bytes, _normalize_image_mime(mime_type)))
+        image_bytes, mime_type = _normalize_input_image(image_bytes, mime_type)
+        if len(image_bytes) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="image too large after conversion, max 10MB")
+        loaded.append((image_bytes, mime_type))
 
     return loaded
 

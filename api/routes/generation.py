@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import binascii
+import io
 import re
 import secrets
 import threading
@@ -14,6 +15,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import requests
 from starlette.concurrency import run_in_threadpool
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 from api.schemas import GenerateRequest
 from core.entity_store import entity_store
@@ -421,6 +427,32 @@ def build_generation_router(
             normalized = "image/jpeg"
         return normalized
 
+    def _normalize_edit_image(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+        normalized_mime = _normalize_edit_image_mime(mime_type)
+        if Image is None:
+            return image_bytes, normalized_mime
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                source.load()
+                actual_mime = {
+                    "JPEG": "image/jpeg",
+                    "PNG": "image/png",
+                    "WEBP": "image/webp",
+                }.get(str(source.format or "").upper())
+                if actual_mime and actual_mime == normalized_mime:
+                    return image_bytes, actual_mime
+                converted = source.convert(
+                    "RGBA" if "A" in source.getbands() else "RGB"
+                )
+                output = io.BytesIO()
+                converted.save(output, format="PNG")
+                return output.getvalue(), "image/png"
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported or invalid image format: {exc}",
+            ) from exc
+
     def _decode_edit_data_url(raw_value: str) -> tuple[bytes, str]:
         head, sep, body = raw_value.partition(",")
         if not sep:
@@ -478,9 +510,10 @@ def build_generation_router(
 
         if not image_bytes:
             raise HTTPException(status_code=400, detail="image is empty")
+        image_bytes, mime_type = _normalize_edit_image(image_bytes, mime_type)
         if len(image_bytes) > MAX_SINGLE_IMAGE_BYTES:
             raise HTTPException(status_code=400, detail="image too large, max 30MB")
-        return image_bytes, _normalize_edit_image_mime(mime_type)
+        return image_bytes, mime_type
 
     def _extract_edit_image_urls(raw_images: Any) -> list[str]:
         urls: list[str] = []
@@ -640,10 +673,7 @@ def build_generation_router(
                         status_code=400,
                         detail="image too large, max 30MB",
                     )
-                loaded_image = (
-                    image_bytes,
-                    _normalize_edit_image_mime(str(mime_type)),
-                )
+                loaded_image = _normalize_edit_image(image_bytes, str(mime_type))
             else:
                 loaded_image = await run_in_threadpool(
                     lambda: _load_edit_image_value(value)

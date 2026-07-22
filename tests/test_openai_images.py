@@ -23,6 +23,29 @@ from core.models.resolver import resolve_model, resolve_ratio_and_resolution
 from core.adobe_client import AdobeClient, ContentPolicyError
 
 
+def test_input_image_format_is_converted_to_png(monkeypatch):
+    import app
+    from PIL import Image
+    from io import BytesIO
+
+    source = Image.new("RGBA", (2, 2), (255, 0, 0, 128))
+    encoded = BytesIO()
+    source.save(encoded, format="PNG")
+
+    converted, mime_type = app._normalize_input_image(encoded.getvalue(), "image/avif")
+
+    assert mime_type == "image/png"
+    with Image.open(BytesIO(converted)) as result:
+        assert result.format == "PNG"
+
+
+def test_input_image_format_rejects_invalid_bytes():
+    import app
+
+    with pytest.raises(app.HTTPException, match="unsupported or invalid image format"):
+        app._normalize_input_image(b"not an image", "image/jpeg")
+
+
 def test_native_gpt_image_2_request_converts_requested_size():
     options = build_native_gpt_image_options(
         {
@@ -314,6 +337,26 @@ def test_gpt_image_seed_is_randomized():
     generated_seeds = {random_image_seed() for _ in range(20)}
     assert all(0 <= value <= 999999 for value in generated_seeds)
     assert len(generated_seeds) > 1
+
+
+def test_gpt_image_references_use_storage_blobs_only():
+    payloads = build_image_payload_candidates(
+        prompt="edit the reference image",
+        aspect_ratio="1:1",
+        output_resolution="1K",
+        upstream_model_id="gpt-image",
+        upstream_model_version="2",
+        source_image_ids=["blob-1", "blob-2"],
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["generationMetadata"]["module"] == "image2image"
+    assert payloads[0]["referenceBlobs"] == [
+        {"id": "blob-1", "usage": "general"},
+        {"id": "blob-2", "usage": "general"},
+    ]
+    assert "referenceImages" not in payloads[0]
+    assert "referenceVideos" not in payloads[0]
 
 
 def test_gpt_image_unsafe_retries_with_new_seeds(monkeypatch):
