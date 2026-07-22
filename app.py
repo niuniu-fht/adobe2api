@@ -8,6 +8,7 @@ import traceback
 import base64
 import binascii
 import io
+import hmac
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, Any, Callable
@@ -23,6 +24,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from api.routes.admin import build_admin_router
 from api.routes.entity import build_entity_router
 from api.routes.generation import build_generation_router
+from api.routes.ops import build_ops_router
 
 try:
     from PIL import Image
@@ -58,6 +60,9 @@ from core.models import (
 
 logger = logging.getLogger("adobe2api")
 
+APP_VERSION = str(os.getenv("ADOBE2API_VERSION") or "0.2.0").strip()
+APP_STARTED_AT = time.time()
+
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -89,7 +94,7 @@ def _drop_generated_file_cache(file_path: Path) -> None:
 # 极简配置启动
 app = FastAPI(
     title="adobe2api",
-    version="0.1.0",
+    version=APP_VERSION,
     docs_url=None,  # 关闭 swagger，节省资源
     redoc_url=None,
 )
@@ -1259,8 +1264,21 @@ def _is_admin_authenticated(request: Request) -> bool:
     return bool(username) and username == required_username
 
 
+def _is_ops_authenticated(request: Request) -> bool:
+    required = str(os.getenv("ADOBE2API_OPS_KEY") or "").strip()
+    if not required:
+        return False
+    provided = str(request.headers.get("x-adobe2api-ops-key") or "").strip()
+    return bool(provided) and hmac.compare_digest(provided, required)
+
+
+def _require_ops_auth(request: Request) -> None:
+    if not _is_ops_authenticated(request):
+        raise HTTPException(status_code=401, detail="Invalid operations key")
+
+
 def _require_admin_auth(request: Request) -> None:
-    if not _is_admin_authenticated(request):
+    if not (_is_admin_authenticated(request) or _is_ops_authenticated(request)):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -1505,8 +1523,22 @@ app.include_router(
         live_log_store=live_log_store,
         require_admin_auth=_require_admin_auth,
         is_admin_authenticated=_is_admin_authenticated,
+        is_ops_authenticated=_is_ops_authenticated,
         apply_client_config=_apply_client_config,
         get_generated_storage_stats=_get_generated_storage_stats,
+    )
+)
+
+app.include_router(
+    build_ops_router(
+        token_manager=token_manager,
+        refresh_manager=refresh_manager,
+        log_store=log_store,
+        live_log_store=live_log_store,
+        require_ops_auth=_require_ops_auth,
+        get_generated_storage_stats=_get_generated_storage_stats,
+        app_started_at=APP_STARTED_AT,
+        app_version=APP_VERSION,
     )
 )
 

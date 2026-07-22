@@ -10,6 +10,9 @@ services:
       - TZ=Asia/Shanghai
       - PORT=6001
       - ADOBE_API_KEY=clio-playground-web
+      - ADOBE2API_OPS_KEY=${ADOBE2API_OPS_KEY:-}
+      - ADOBE2API_VERSION=0.2.0
+      - ADOBE2API_BUILD_SHA=${ADOBE2API_BUILD_SHA:-}
     volumes:
       # 持久化生成数据
       - ./data:/app/data

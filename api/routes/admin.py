@@ -32,10 +32,22 @@ def build_admin_router(
     live_log_store,
     require_admin_auth: Callable[[Request], None],
     is_admin_authenticated: Callable[[Request], bool],
+    is_ops_authenticated: Callable[[Request], bool],
     apply_client_config: Callable[[], None],
     get_generated_storage_stats: Callable[[], dict[str, Any]],
 ) -> APIRouter:
     router = APIRouter()
+
+    def config_response(request: Request, config: dict) -> dict:
+        payload = dict(config)
+        payload.pop("admin_session_secret", None)
+        if is_ops_authenticated(request):
+            payload["api_key_configured"] = bool(
+                str(payload.get("api_key") or "").strip()
+            )
+            payload.pop("api_key", None)
+            payload.pop("admin_password", None)
+        return payload
 
     def get_batch_concurrency() -> int:
         try:
@@ -438,8 +450,7 @@ def build_admin_router(
     @router.get("/api/v1/config")
     def get_config(request: Request):
         require_admin_auth(request)
-        cfg = config_manager.get_all()
-        cfg.pop("admin_session_secret", None)
+        cfg = config_response(request, config_manager.get_all())
         try:
             cfg.update(get_generated_storage_stats())
         except Exception:
@@ -451,7 +462,7 @@ def build_admin_router(
         require_admin_auth(request)
         incoming = req.model_dump(exclude_unset=True)
         if not incoming:
-            return config_manager.get_all()
+            return config_response(request, config_manager.get_all())
 
         update_data = {}
         if "api_key" in incoming:
@@ -666,7 +677,7 @@ def build_admin_router(
             )
         config_manager.update_all(update_data)
         apply_client_config()
-        return config_manager.get_all()
+        return config_response(request, config_manager.get_all())
 
     @router.get("/api/v1/refresh-profiles")
     def refresh_profiles_list(request: Request):

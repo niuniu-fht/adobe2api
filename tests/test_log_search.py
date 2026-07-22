@@ -123,3 +123,51 @@ def test_logging_fields_keep_full_prompt_and_build_short_preview():
 
     assert metadata["prompt"] == full_prompt
     assert metadata["prompt_preview"] == full_prompt.replace("\n", " ")[:180]
+
+
+def test_cursor_logs_return_newest_page_and_next_cursor(tmp_path):
+    store = RequestLogStore(tmp_path / "requests.jsonl", max_items=100)
+    for index in range(4):
+        store.add_payload(
+            {
+                "id": f"log-{index}",
+                "ts": 100.0 + index,
+                "prompt": "fleet test",
+                "status_code": 200,
+                "task_status": "COMPLETED",
+                "duration_sec": index,
+            }
+        )
+
+    first, cursor = store.list_cursor(limit=2)
+    second, second_cursor = store.list_cursor(limit=2, before_ts=cursor)
+
+    assert [item["id"] for item in first] == ["log-3", "log-2"]
+    assert cursor == 102.0
+    assert [item["id"] for item in second] == ["log-1", "log-0"]
+    assert second_cursor is None
+
+
+def test_window_metrics_calculate_failures_and_percentiles(tmp_path):
+    store = RequestLogStore(tmp_path / "requests.jsonl", max_items=100)
+    for index, status in enumerate((200, 200, 500)):
+        store.add_payload(
+            {
+                "id": f"metric-{index}",
+                "ts": 200.0 + index,
+                "status_code": status,
+                "task_status": "FAILED" if status >= 400 else "COMPLETED",
+                "duration_sec": index + 1,
+                "preview_kind": "image",
+            }
+        )
+
+    metrics = store.window_metrics(start_ts=199.0, end_ts=204.0)
+
+    assert metrics["total"] == 3
+    assert metrics["successful"] == 2
+    assert metrics["failed"] == 1
+    assert metrics["error_rate"] == 0.3333
+    assert metrics["duration_p50_seconds"] == 2.0
+    assert metrics["duration_p95_seconds"] == 2.9
+    assert metrics["generated_images"] == 2

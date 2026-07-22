@@ -209,6 +209,126 @@ class RequestLogStore:
         start_idx = max(0, end_idx - safe_limit)
         return list(reversed(matching_items[start_idx:end_idx])), total
 
+    def list_cursor(
+        self,
+        *,
+        before_ts: Optional[float] = None,
+        limit: int = 100,
+        prompt: str = "",
+        errors_only: bool = False,
+    ) -> tuple[list[dict], Optional[float]]:
+        """Return a newest-first page suitable for cross-instance log merging."""
+        safe_limit = min(max(int(limit or 100), 1), 500)
+        items: list[dict] = []
+        with self._lock:
+            with self._file_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        item = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        ts_value = float(item.get("ts") or 0)
+                    except (TypeError, ValueError):
+                        ts_value = 0.0
+                    if before_ts is not None and ts_value >= float(before_ts):
+                        continue
+                    if not self.matches_filters(
+                        item,
+                        prompt=prompt,
+                        errors_only=errors_only,
+                    ):
+                        continue
+                    items.append(item)
+
+        items.sort(key=lambda row: float(row.get("ts") or 0), reverse=True)
+        page = items[:safe_limit]
+        next_before_ts = None
+        if len(items) > safe_limit and page:
+            next_before_ts = float(page[-1].get("ts") or 0)
+        return page, next_before_ts
+
+    @staticmethod
+    def _percentile(values: list[float], quantile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return float(ordered[0])
+        position = max(0.0, min(1.0, quantile)) * (len(ordered) - 1)
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        fraction = position - lower
+        return float(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction)
+
+    def window_metrics(self, *, start_ts: float, end_ts: float) -> dict:
+        total = 0
+        failed = 0
+        generated_images = 0
+        generated_videos = 0
+        durations: list[float] = []
+
+        with self._lock:
+            with self._file_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        item = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        ts_value = float(item.get("ts") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if ts_value < float(start_ts) or ts_value > float(end_ts):
+                        continue
+
+                    total += 1
+                    try:
+                        status_code = int(item.get("status_code") or 0)
+                    except (TypeError, ValueError):
+                        status_code = 0
+                    task_status = str(item.get("task_status") or "").upper()
+                    if status_code >= 400 or task_status == "FAILED":
+                        failed += 1
+                    try:
+                        duration = float(item.get("duration_sec") or 0)
+                    except (TypeError, ValueError):
+                        duration = 0.0
+                    if duration >= 0:
+                        durations.append(duration)
+                    if 200 <= status_code < 300 and task_status not in {
+                        "FAILED",
+                        "ERROR",
+                        "CANCELLED",
+                    }:
+                        preview_kind = str(item.get("preview_kind") or "").lower()
+                        if preview_kind == "image":
+                            generated_images += 1
+                        elif preview_kind == "video":
+                            generated_videos += 1
+
+        return {
+            "window_seconds": max(0, int(end_ts - start_ts)),
+            "total": total,
+            "successful": max(0, total - failed),
+            "failed": failed,
+            "error_rate": round(failed / total, 4) if total else 0.0,
+            "duration_p50_seconds": round(self._percentile(durations, 0.50), 3),
+            "duration_p95_seconds": round(self._percentile(durations, 0.95), 3),
+            "generated_images": generated_images,
+            "generated_videos": generated_videos,
+        }
+
     def stats(
         self,
         start_ts: Optional[float] = None,

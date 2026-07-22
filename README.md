@@ -19,6 +19,31 @@ English README: `README_EN.md`
 - Gemini 原生兼容：`/v1beta/models`、`/v1beta/models/{model}:generateContent`
 - Token 池管理（手动 Token + 自动刷新 Token）
 - 管理后台 Web UI：Token / 配置 / 日志 / 刷新配置导入
+- 中心运维接口：机器密钥鉴权、运行快照和游标日志
+
+### 多实例统一运维
+
+需要接入 `adobe2api-manager` 时，在每个实例设置相同的环境变量：
+
+```env
+ADOBE2API_OPS_KEY=replace-with-a-long-operations-key
+```
+
+中心通过 `X-Adobe2API-Ops-Key` 请求头访问管理 API。未配置该变量时，机器管理入口保持关闭，原有管理后台 Session 登录不受影响。
+
+监控快照：
+
+```bash
+curl http://127.0.0.1:6001/api/v1/ops/snapshot \
+  -H "X-Adobe2API-Ops-Key: replace-with-a-long-operations-key"
+```
+
+游标日志：
+
+```bash
+curl "http://127.0.0.1:6001/api/v1/ops/logs?limit=100&errors_only=false" \
+  -H "X-Adobe2API-Ops-Key: replace-with-a-long-operations-key"
+```
 
 ## 1）部署方式
 
