@@ -804,23 +804,25 @@ def build_generation_router(
     def _upload_edit_source_images(
         token: str,
         input_images: list[tuple[bytes, str]],
-    ) -> list[str]:
+    ) -> list[dict]:
         if not input_images:
             return []
         max_workers = min(3, len(input_images))
         if max_workers <= 1:
             return [
-                client.upload_image(token, image_bytes, image_mime or "image/jpeg")
+                client.upload_image_reference(
+                    token, image_bytes, image_mime or "image/jpeg"
+                )
                 for image_bytes, image_mime in input_images
             ]
         indexed_images = list(enumerate(input_images))
-        source_pairs: list[tuple[int, str]] = []
+        source_pairs: list[tuple[int, dict]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
                     lambda idx=idx, item=item: (
                         idx,
-                        client.upload_image(
+                        client.upload_image_reference(
                             token,
                             item[0],
                             item[1] or "image/jpeg",

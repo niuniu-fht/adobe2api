@@ -2,7 +2,24 @@ from __future__ import annotations
 
 import secrets
 import time
-from typing import Optional
+from typing import Any, Optional
+
+
+def _reference_blob(reference: Any, usage: str) -> dict:
+    if isinstance(reference, dict):
+        blob_id = str(reference.get("id") or "").strip()
+        presigned_url = str(
+            reference.get("presignedUrl") or reference.get("presigned_url") or ""
+        ).strip()
+    else:
+        blob_id = str(reference or "").strip()
+        presigned_url = ""
+    if not blob_id:
+        raise ValueError("reference blob id is required")
+    blob = {"id": blob_id, "usage": usage}
+    if presigned_url:
+        blob["presignedUrl"] = presigned_url
+    return blob
 
 
 def size_from_ratio(ratio: str, output_resolution: str = "2K") -> dict:
@@ -142,7 +159,7 @@ def build_image_payload_candidates(
     quality_level: Optional[str] = None,
     detail_level: Optional[int] = None,
     seed: Optional[int] = None,
-    source_image_ids: Optional[list[str]] = None,
+    source_image_ids: Optional[list[Any]] = None,
     requested_size: Optional[dict] = None,
 ) -> list[dict]:
     normalized_ratio = str(aspect_ratio or "").strip().lower()
@@ -195,12 +212,12 @@ def build_image_payload_candidates(
             "submodule": "ff-image-generate",
         }
         general_reference["referenceBlobs"] = [
-            {"id": img_id, "usage": "general"} for img_id in source_image_ids
+            _reference_blob(image_ref, "general") for image_ref in source_image_ids
         ]
 
         subject_reference = dict(base_payload)
         subject_reference["referenceBlobs"] = [
-            {"id": img_id, "usage": "subject"} for img_id in source_image_ids
+            _reference_blob(image_ref, "subject") for image_ref in source_image_ids
         ]
         subject_reference["modelSpecificPayload"] = {}
         return [general_reference, subject_reference]
@@ -242,6 +259,6 @@ def build_image_payload_candidates(
         "submodule": "ff-image-generate",
     }
     edited["referenceBlobs"] = [
-        {"id": img_id, "usage": "general"} for img_id in source_image_ids
+        _reference_blob(image_ref, "general") for image_ref in source_image_ids
     ]
     return [edited]

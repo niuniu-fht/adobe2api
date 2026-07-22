@@ -68,6 +68,33 @@ def test_input_image_format_rejects_invalid_bytes():
         app._normalize_input_image(b"not an image", "image/jpeg")
 
 
+def test_upload_image_reference_preserves_blob_location(monkeypatch):
+    client = AdobeClient()
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"images":[{"id":"blob-1"}]}'
+
+        @staticmethod
+        def json():
+            return {
+                "images": [
+                    {
+                        "id": "blob-1",
+                        "presignedUrl": "https://storage.test/blob-1",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(client, "_post_bytes", lambda *args, **kwargs: FakeResponse())
+
+    assert client.upload_image_reference("TOKEN", b"image", "image/png") == {
+        "id": "blob-1",
+        "presignedUrl": "https://storage.test/blob-1",
+    }
+    assert client.upload_image("TOKEN", b"image", "image/png") == "blob-1"
+
+
 def test_native_gpt_image_2_request_converts_requested_size():
     options = build_native_gpt_image_options(
         {
@@ -368,18 +395,29 @@ def test_gpt_image_references_use_storage_blobs_only():
         output_resolution="1K",
         upstream_model_id="gpt-image",
         upstream_model_version="2",
-        source_image_ids=["blob-1", "blob-2"],
+        source_image_ids=[
+            {"id": "blob-1", "presignedUrl": "https://storage.test/blob-1"},
+            "blob-2",
+        ],
     )
 
     assert len(payloads) == 2
     assert payloads[0]["generationMetadata"]["module"] == "image2image"
     assert payloads[0]["referenceBlobs"] == [
-        {"id": "blob-1", "usage": "general"},
+        {
+            "id": "blob-1",
+            "usage": "general",
+            "presignedUrl": "https://storage.test/blob-1",
+        },
         {"id": "blob-2", "usage": "general"},
     ]
     assert payloads[1]["generationMetadata"]["module"] == "text2image"
     assert payloads[1]["referenceBlobs"] == [
-        {"id": "blob-1", "usage": "subject"},
+        {
+            "id": "blob-1",
+            "usage": "subject",
+            "presignedUrl": "https://storage.test/blob-1",
+        },
         {"id": "blob-2", "usage": "subject"},
     ]
     assert payloads[1]["modelSpecificPayload"] == {}
