@@ -190,13 +190,10 @@ def build_image_payload_candidates(
             return [base_payload]
 
         edited = dict(base_payload)
-        edited["generationMetadata"] = {
-            "module": "image2image",
-            "submodule": "ff-image-generate",
-        }
         edited["referenceBlobs"] = [
-            {"id": img_id, "usage": "general"} for img_id in source_image_ids
+            {"id": img_id, "usage": "subject"} for img_id in source_image_ids
         ]
+        edited["modelSpecificPayload"] = {}
         return [edited]
 
     normalized_output_resolution = str(output_resolution or "2K").strip().upper()
