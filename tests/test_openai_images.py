@@ -371,17 +371,17 @@ def test_gpt_image_references_use_storage_blobs_only():
     )
 
     assert len(payloads) == 2
-    assert payloads[0]["generationMetadata"]["module"] == "image2image"
+    assert payloads[0]["generationMetadata"]["module"] == "text2image"
     assert payloads[0]["referenceBlobs"] == [
-        {"id": "blob-1", "usage": "general"},
-        {"id": "blob-2", "usage": "general"},
-    ]
-    assert payloads[1]["generationMetadata"]["module"] == "image2image"
-    assert payloads[1]["referenceBlobs"] == [
         {"id": "blob-1", "usage": "subject"},
         {"id": "blob-2", "usage": "subject"},
     ]
-    assert payloads[1]["modelSpecificPayload"] == {}
+    assert payloads[0]["modelSpecificPayload"] == {}
+    assert payloads[1]["generationMetadata"]["module"] == "image2image"
+    assert payloads[1]["referenceBlobs"] == [
+        {"id": "blob-1", "usage": "general"},
+        {"id": "blob-2", "usage": "general"},
+    ]
     assert all("referenceImages" not in payload for payload in payloads)
     assert all("referenceVideos" not in payload for payload in payloads)
 

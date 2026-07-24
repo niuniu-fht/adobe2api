@@ -189,6 +189,12 @@ def build_image_payload_candidates(
         if not source_image_ids:
             return [base_payload]
 
+        subject_reference = dict(base_payload)
+        subject_reference["referenceBlobs"] = [
+            {"id": img_id, "usage": "subject"} for img_id in source_image_ids
+        ]
+        subject_reference["modelSpecificPayload"] = {}
+
         general_reference = dict(base_payload)
         general_reference["generationMetadata"] = {
             "module": "image2image",
@@ -197,17 +203,7 @@ def build_image_payload_candidates(
         general_reference["referenceBlobs"] = [
             {"id": img_id, "usage": "general"} for img_id in source_image_ids
         ]
-
-        subject_reference = dict(base_payload)
-        subject_reference["generationMetadata"] = {
-            "module": "image2image",
-            "submodule": "ff-image-generate",
-        }
-        subject_reference["referenceBlobs"] = [
-            {"id": img_id, "usage": "subject"} for img_id in source_image_ids
-        ]
-        subject_reference["modelSpecificPayload"] = {}
-        return [general_reference, subject_reference]
+        return [subject_reference, general_reference]
 
     normalized_output_resolution = str(output_resolution or "2K").strip().upper()
     base_payload = {
