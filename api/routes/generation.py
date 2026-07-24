@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import binascii
 import io
+import json
 import re
 import secrets
 import threading
@@ -9,7 +10,7 @@ import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -51,6 +52,11 @@ from core.models.image_limits import (
     add_input_image_bytes,
     validate_input_image_count,
 )
+from core.request_trace import (
+    binary_summary,
+    get_request_trace,
+    sanitize_trace_value,
+)
 
 
 def build_generation_router(
@@ -86,6 +92,109 @@ def build_generation_router(
     router = APIRouter()
     entity_ref_re = re.compile(r"@entity:([^\s@]+)")
     remote_image_error_message = "输入图片下载失败，请确认图片 URL 可公开访问"
+
+    def _start_image_operation(request: Request, name: str) -> Any:
+        trace = get_request_trace(request)
+        if trace is None:
+            return None
+        stage_id = trace.start_stage(
+            layer="service",
+            kind="operation",
+            name=name,
+            parent_id=getattr(request.state, "trace_request_stage_id", None),
+        )
+        request.state.trace_operation_stage_id = stage_id
+        return stage_id
+
+    def _trace_auth(request: Request) -> None:
+        trace = get_request_trace(request)
+        if trace is None:
+            require_service_api_key(request)
+            return
+        stage_id = trace.start_stage(
+            layer="service",
+            kind="authentication",
+            name="校验服务 API Key",
+            parent_id=getattr(request.state, "trace_operation_stage_id", None),
+        )
+        try:
+            require_service_api_key(request)
+        except Exception as exc:
+            request.state.trace_final_error = exc
+            trace.finish_stage(stage_id, status="failed", error=exc)
+            if isinstance(exc, HTTPException):
+                _remember_trace_response(
+                    request,
+                    int(exc.status_code or 500),
+                    {"detail": exc.detail},
+                    error=exc,
+                )
+            raise
+        trace.finish_stage(stage_id, status="succeeded")
+
+    def _remember_trace_response(
+        request: Request,
+        status_code: int,
+        content: Any,
+        *,
+        error: Any = None,
+    ) -> None:
+        payload = {
+            "status_code": int(status_code),
+            "headers": {"content-type": "application/json"},
+            "body": sanitize_trace_value(content),
+        }
+        request.state.trace_response_payload = payload
+        effective_error = error
+        if effective_error is None and isinstance(content, dict):
+            error_obj = content.get("error")
+            if isinstance(error_obj, dict):
+                effective_error = error_obj.get("message") or error_obj
+            elif error_obj:
+                effective_error = error_obj
+        if effective_error is not None:
+            request.state.trace_final_error = effective_error
+        trace = get_request_trace(request)
+        if trace is not None:
+            trace.finish_stage(
+                getattr(request.state, "trace_operation_stage_id", None),
+                status="failed" if int(status_code) >= 400 else "succeeded",
+                response=payload,
+                error=effective_error if int(status_code) >= 400 else None,
+            )
+
+    def _traced_json_response(
+        request: Request,
+        *,
+        status_code: int,
+        content: Any,
+        error: Any = None,
+    ) -> JSONResponse:
+        _remember_trace_response(
+            request,
+            status_code,
+            content,
+            error=error,
+        )
+        return JSONResponse(status_code=status_code, content=content)
+
+    def _remember_existing_response(
+        request: Request,
+        response: JSONResponse,
+        *,
+        error: Any = None,
+    ) -> JSONResponse:
+        try:
+            body = json.loads(response.body.decode("utf-8"))
+        except Exception:
+            body = response.body.decode("utf-8", errors="replace")
+        _remember_trace_response(
+            request,
+            int(response.status_code),
+            body,
+            error=error,
+        )
+        return response
 
     def _nanoid(size: int = 21) -> str:
         alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
@@ -604,14 +713,31 @@ def build_generation_router(
     async def _parse_openai_edit_request(
         request: Request,
     ) -> tuple[dict, list[tuple[bytes, str]]]:
+        trace = get_request_trace(request)
+        trace_request_stage_id = getattr(
+            request.state, "trace_request_stage_id", None
+        )
         _validate_openai_edit_content_length(request)
         content_type = str(request.headers.get("content-type") or "").lower()
         if "application/json" in content_type:
             try:
                 data = await request.json()
-            except Exception:
+            except Exception as exc:
+                if trace is not None:
+                    trace.finish_stage(
+                        trace_request_stage_id,
+                        status="failed",
+                        error=exc,
+                    )
                 raise HTTPException(status_code=400, detail="invalid JSON body")
             if not isinstance(data, dict):
+                if trace is not None:
+                    trace.finish_stage(
+                        trace_request_stage_id,
+                        status="failed",
+                        error="request body must be JSON",
+                        details={"body": sanitize_trace_value(data)},
+                    )
                 raise HTTPException(status_code=400, detail="request body must be JSON")
             raw_images = (
                 data.get("image")
@@ -645,9 +771,47 @@ def build_generation_router(
                 return loaded_images
 
             input_images = await run_in_threadpool(load_json_images)
+            if trace is not None:
+                trace.finish_stage(
+                    trace_request_stage_id,
+                    status="succeeded",
+                    details={
+                        "body": sanitize_trace_value(data),
+                        "input_images": [
+                            binary_summary(
+                                image_bytes,
+                                content_type=image_mime,
+                            )
+                            for image_bytes, image_mime in input_images
+                        ],
+                    },
+                )
             return data, input_images
 
         form = await request.form()
+        form_snapshot: list[dict[str, Any]] = []
+        for field_name, field_value in form.multi_items():
+            if hasattr(field_value, "read"):
+                form_snapshot.append(
+                    {
+                        "name": str(field_name),
+                        "file": {
+                            "filename": str(
+                                getattr(field_value, "filename", "") or ""
+                            ),
+                            "content_type": str(
+                                getattr(field_value, "content_type", "") or ""
+                            ),
+                        },
+                    }
+                )
+            else:
+                form_snapshot.append(
+                    {
+                        "name": str(field_name),
+                        "value": sanitize_trace_value(field_value, key=str(field_name)),
+                    }
+                )
         data = {
             "model": form.get("model") or "gpt-image-2",
             "prompt": form.get("prompt"),
@@ -694,6 +858,22 @@ def build_generation_router(
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             input_images.append(loaded_image)
 
+        if trace is not None:
+            trace.finish_stage(
+                trace_request_stage_id,
+                status="succeeded",
+                details={
+                    "multipart_fields": form_snapshot,
+                    "parsed_parameters": sanitize_trace_value(data),
+                    "input_images": [
+                        binary_summary(
+                            image_bytes,
+                            content_type=image_mime,
+                        )
+                        for image_bytes, image_mime in input_images
+                    ],
+                },
+            )
         return data, input_images
 
     def _generate_openai_image_items(
@@ -706,6 +886,21 @@ def build_generation_router(
         source_image_ids: list[str] | None = None,
     ) -> list[dict]:
         source_image_ids = source_image_ids or []
+        trace = get_request_trace(request)
+        trace_group_id = None
+        if trace is not None:
+            trace_group_id = trace.start_stage(
+                layer="service",
+                kind="generation_batch",
+                name="生成 OpenAI Images 响应项",
+                parent_id=getattr(
+                    request.state, "trace_token_attempt_id", None
+                ),
+                details={
+                    "image_count": image_options.n,
+                    "source_image_count": len(source_image_ids),
+                },
+            )
 
         def _image_progress_cb(update: dict):
             set_request_task_progress(
@@ -717,7 +912,10 @@ def build_generation_router(
                 error=update.get("error"),
             )
 
-        def _generate_response_item(response_index: int) -> tuple[int, dict]:
+        def _generate_response_item_impl(
+            response_index: int,
+            trace_output_id: Optional[str],
+        ) -> tuple[int, dict]:
             job_id = uuid.uuid4().hex
             out_path = generated_dir / f"{job_id}.png"
             old_size = 0
@@ -745,6 +943,8 @@ def build_generation_router(
                 timeout=client.generate_timeout,
                 out_path=out_path,
                 progress_cb=_image_progress_cb,
+                trace=trace,
+                trace_parent_id=trace_output_id or trace_group_id,
             )
             if image_bytes is not None:
                 out_path.write_bytes(image_bytes)
@@ -765,6 +965,45 @@ def build_generation_router(
                 output_compression=image_options.output_compression,
             )
             return response_index, item
+
+        def _generate_response_item(response_index: int) -> tuple[int, dict]:
+            trace_output_id = None
+            if trace is not None:
+                trace_output_id = trace.start_stage(
+                    layer="service",
+                    kind="output",
+                    name=f"生成第 {response_index + 1} 张图片",
+                    parent_id=trace_group_id,
+                    attempt={
+                        "output_index": response_index,
+                        "output_count": image_options.n,
+                    },
+                )
+            try:
+                result = _generate_response_item_impl(
+                    response_index,
+                    trace_output_id,
+                )
+            except Exception as exc:
+                if trace is not None:
+                    trace.finish_stage(
+                        trace_output_id,
+                        status="failed",
+                        error=exc,
+                    )
+                    trace.finish_stage(
+                        trace_group_id,
+                        status="failed",
+                        error=exc,
+                    )
+                raise
+            if trace is not None:
+                trace.finish_stage(
+                    trace_output_id,
+                    status="succeeded",
+                    response={"item": sanitize_trace_value(result[1])},
+                )
+            return result
 
         def _generate_response_batch(
             start_index: int, batch_size: int
@@ -796,45 +1035,112 @@ def build_generation_router(
                 for future in as_completed(futures):
                     response_pairs.extend(future.result())
 
-        return [
+        result_items = [
             item
             for _idx, item in sorted(response_pairs, key=lambda pair: pair[0])
         ]
+        if trace is not None:
+            trace.finish_stage(
+                trace_group_id,
+                status="succeeded",
+                details={"generated_count": len(result_items)},
+            )
+        return result_items
 
     def _upload_edit_source_images(
         token: str,
         input_images: list[tuple[bytes, str]],
+        request: Request,
     ) -> list[str]:
         if not input_images:
             return []
+        trace = get_request_trace(request)
+        trace_group_id = None
+        if trace is not None:
+            trace_group_id = trace.start_stage(
+                layer="service",
+                kind="upload_batch",
+                name="上传 edits 参考图",
+                parent_id=getattr(
+                    request.state, "trace_token_attempt_id", None
+                ),
+                details={"image_count": len(input_images)},
+            )
+
+        def upload_one(index: int, item: tuple[bytes, str]) -> tuple[int, str]:
+            trace_image_id = None
+            if trace is not None:
+                trace_image_id = trace.start_stage(
+                    layer="service",
+                    kind="upload_item",
+                    name=f"准备上传第 {index + 1} 张参考图",
+                    parent_id=trace_group_id,
+                    attempt={"image_index": index},
+                    request={
+                        "image": binary_summary(
+                            item[0],
+                            content_type=item[1] or "image/jpeg",
+                        )
+                    },
+                )
+            try:
+                image_id = client.upload_image(
+                    token,
+                    item[0],
+                    item[1] or "image/jpeg",
+                    trace=trace,
+                    trace_parent_id=trace_image_id or trace_group_id,
+                )
+            except Exception as exc:
+                if trace is not None:
+                    trace.finish_stage(trace_image_id, status="failed", error=exc)
+                    trace.finish_stage(trace_group_id, status="failed", error=exc)
+                raise
+            if trace is not None:
+                trace.finish_stage(
+                    trace_image_id,
+                    status="succeeded",
+                    response={"storage_image_id": image_id},
+                )
+            return index, image_id
+
         max_workers = min(3, len(input_images))
         if max_workers <= 1:
-            return [
-                client.upload_image(token, image_bytes, image_mime or "image/jpeg")
-                for image_bytes, image_mime in input_images
+            result = [
+                upload_one(index, item)[1]
+                for index, item in enumerate(input_images)
             ]
+            if trace is not None:
+                trace.finish_stage(
+                    trace_group_id,
+                    status="succeeded",
+                    details={"uploaded_count": len(result)},
+                )
+            return result
         indexed_images = list(enumerate(input_images))
         source_pairs: list[tuple[int, str]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
-                    lambda idx=idx, item=item: (
-                        idx,
-                        client.upload_image(
-                            token,
-                            item[0],
-                            item[1] or "image/jpeg",
-                        ),
-                    )
+                    upload_one,
+                    idx,
+                    item,
                 )
                 for idx, item in indexed_images
             ]
             for future in as_completed(futures):
                 source_pairs.append(future.result())
-        return [
+        result = [
             image_id
             for _idx, image_id in sorted(source_pairs, key=lambda pair: pair[0])
         ]
+        if trace is not None:
+            trace.finish_stage(
+                trace_group_id,
+                status="succeeded",
+                details={"uploaded_count": len(result)},
+            )
+        return result
 
     def _log_resolution_from_image_options(image_options: Any) -> str | None:
         requested_size = getattr(image_options, "requested_size", None)
@@ -995,7 +1301,7 @@ def build_generation_router(
 
             def _run_once(token: str):
                 source_image_ids = _upload_edit_source_images(
-                    token, gemini_options.input_images
+                    token, gemini_options.input_images, request
                 )
                 response_items = _generate_openai_image_items(
                     request=request,
@@ -1061,30 +1367,68 @@ def build_generation_router(
 
     @router.post("/v1/images/generations")
     def openai_generate(data: dict, request: Request):
-        require_service_api_key(request)
+        _start_image_operation(request, "处理 /v1/images/generations")
+        _trace_auth(request)
 
         prompt = str(data.get("prompt") or "").strip()
+        trace = get_request_trace(request)
+        validation_stage_id = None
+        if trace is not None:
+            validation_stage_id = trace.start_stage(
+                layer="service",
+                kind="validation",
+                name="校验 generation 请求参数",
+                parent_id=getattr(request.state, "trace_operation_stage_id", None),
+                details={"parameters": sanitize_trace_value(data)},
+            )
         if not prompt:
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": "prompt is required",
+                    "type": "invalid_request_error",
+                }
+            }
+            if trace is not None:
+                trace.finish_stage(
+                    validation_stage_id,
+                    status="failed",
+                    error="prompt is required",
+                )
+            return _traced_json_response(
+                request,
                 status_code=400,
-                content={
-                    "error": {
-                        "message": "prompt is required",
-                        "type": "invalid_request_error",
-                    }
-                },
+                content=content,
             )
 
         model_id = str(data.get("model") or "").strip()
         if model_id in video_model_catalog:
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": "Use /v1/chat/completions for video generation",
+                    "type": "invalid_request_error",
+                }
+            }
+            if trace is not None:
+                trace.finish_stage(
+                    validation_stage_id,
+                    status="failed",
+                    error="Use /v1/chat/completions for video generation",
+                )
+            return _traced_json_response(
+                request,
                 status_code=400,
-                content={
-                    "error": {
-                        "message": "Use /v1/chat/completions for video generation",
-                        "type": "invalid_request_error",
-                    }
-                },
+                content=content,
+            )
+        if trace is not None:
+            trace.finish_stage(validation_stage_id, status="succeeded")
+        model_stage_id = None
+        if trace is not None:
+            model_stage_id = trace.start_stage(
+                layer="service",
+                kind="model_resolution",
+                name="解析 GPT Image 模型与尺寸",
+                parent_id=getattr(request.state, "trace_operation_stage_id", None),
+                details={"requested_model": model_id or None},
             )
         try:
             if _is_gpt_image_model_or_alias(model_id):
@@ -1103,13 +1447,34 @@ def build_generation_router(
                     resolved_model_id=resolved_model_id,
                 )
         except OpenAIImageRequestError as exc:
+            if trace is not None:
+                trace.finish_stage(model_stage_id, status="failed", error=exc)
             error_payload = {
                 "message": str(exc),
                 "type": "invalid_request_error",
             }
             if exc.param:
                 error_payload["param"] = exc.param
-            return JSONResponse(status_code=400, content={"error": error_payload})
+            return _traced_json_response(
+                request,
+                status_code=400,
+                content={"error": error_payload},
+                error=exc,
+            )
+
+        if trace is not None:
+            trace.finish_stage(
+                model_stage_id,
+                status="succeeded",
+                response={
+                    "resolved_model_id": resolved_model_id,
+                    "image_options": asdict(image_options),
+                    "upstream": {
+                        "model_id": model_conf.get("upstream_model_id"),
+                        "model_version": model_conf.get("upstream_model_version"),
+                    },
+                },
+            )
 
         _set_image_log_context(
             request,
@@ -1141,11 +1506,18 @@ def build_generation_router(
                     response_payload["model"] = resolved_model_id
                 return response_payload
 
-            return run_with_token_retries(
+            result = run_with_token_retries(
                 request=request,
                 operation_name="images.generations",
                 run_once=_run_once,
             )
+            if trace is not None:
+                trace.finish_stage(
+                    getattr(request.state, "trace_operation_stage_id", None),
+                    status="succeeded",
+                    response={"result": sanitize_trace_value(result)},
+                )
+            return result
 
         except quota_error_cls:
             error_code = str(
@@ -1163,15 +1535,17 @@ def build_generation_router(
                 task_progress=0.0,
                 error="Token quota exhausted",
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": "Token quota exhausted",
+                    "type": "rate_limit_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=429,
-                content={
-                    "error": {
-                        "message": "Token quota exhausted",
-                        "type": "rate_limit_error",
-                        "code": error_code,
-                    }
-                },
+                content=content,
             )
         except auth_error_cls:
             error_code = str(
@@ -1189,15 +1563,17 @@ def build_generation_router(
                 task_progress=0.0,
                 error="Token invalid or expired",
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": "Token invalid or expired",
+                    "type": "invalid_request_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=401,
-                content={
-                    "error": {
-                        "message": "Token invalid or expired",
-                        "type": "invalid_request_error",
-                        "code": error_code,
-                    }
-                },
+                content=content,
             )
         except upstream_temp_error_cls as exc:
             error_code = str(
@@ -1215,20 +1591,24 @@ def build_generation_router(
                 task_progress=0.0,
                 error=str(exc),
             )
-            return JSONResponse(
-                status_code=getattr(exc, "status_code", 502) or 502,
-                content={
-                    "error": {
-                        "message": str(exc),
-                        "type": "server_error",
-                        "code": error_code,
-                    }
-                },
+            status_code = getattr(exc, "status_code", 502) or 502
+            content = {
+                "error": {
+                    "message": str(exc),
+                    "type": "server_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
+                status_code=status_code,
+                content=content,
+                error=exc,
             )
         except HTTPException as exc:
             passthrough = _openai_http_exception_response(exc)
             if passthrough is not None:
-                return passthrough
+                return _remember_existing_response(request, passthrough, error=exc)
             status_code = int(exc.status_code or 500)
             err_type = (
                 "invalid_request_error" if 400 <= status_code < 500 else "server_error"
@@ -1239,14 +1619,17 @@ def build_generation_router(
                 task_progress=0.0,
                 error=str(exc.detail),
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": str(exc.detail),
+                    "type": err_type,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=status_code,
-                content={
-                    "error": {
-                        "message": str(exc.detail),
-                        "type": err_type,
-                    }
-                },
+                content=content,
+                error=exc,
             )
         except Exception as exc:
             logger.exception("Unhandled error in /v1/images/generations")
@@ -1265,26 +1648,37 @@ def build_generation_router(
                 task_progress=0.0,
                 error=str(exc),
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": str(exc),
+                    "type": "server_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=500,
-                content={
-                    "error": {
-                        "message": str(exc),
-                        "type": "server_error",
-                        "code": error_code,
-                    }
-                },
+                content=content,
+                error=exc,
             )
 
     @router.post("/v1/images/edits")
     async def openai_edit(request: Request):
-        require_service_api_key(request)
+        _start_image_operation(request, "处理 /v1/images/edits")
+        _trace_auth(request)
+        trace = get_request_trace(request)
         try:
             data, input_images = await _parse_openai_edit_request(request)
         except HTTPException as exc:
+            if trace is not None:
+                trace.finish_stage(
+                    getattr(request.state, "trace_request_stage_id", None),
+                    status="failed",
+                    error=exc,
+                )
             passthrough = _openai_http_exception_response(exc)
             if passthrough is not None:
-                return passthrough
+                return _remember_existing_response(request, passthrough, error=exc)
             status_code = int(exc.status_code or 400)
             error_type = (
                 "invalid_request_error"
@@ -1304,38 +1698,69 @@ def build_generation_router(
                 task_progress=0.0,
                 error=str(exc.detail),
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": str(exc.detail),
+                    "type": error_type,
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=status_code,
-                content={
-                    "error": {
-                        "message": str(exc.detail),
-                        "type": error_type,
-                        "code": error_code,
-                    }
-                },
+                content=content,
+                error=exc,
             )
 
         prompt = str(data.get("prompt") or "").strip()
-        if not prompt:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "message": "prompt is required",
-                        "type": "invalid_request_error",
-                    }
+        validation_stage_id = None
+        if trace is not None:
+            validation_stage_id = trace.start_stage(
+                layer="service",
+                kind="validation",
+                name="校验 edits 请求参数",
+                parent_id=getattr(request.state, "trace_operation_stage_id", None),
+                details={
+                    "parameters": sanitize_trace_value(data),
+                    "input_image_count": len(input_images),
                 },
             )
-        if not input_images:
-            return JSONResponse(
+        if not prompt:
+            content = {
+                "error": {
+                    "message": "prompt is required",
+                    "type": "invalid_request_error",
+                }
+            }
+            if trace is not None:
+                trace.finish_stage(
+                    validation_stage_id,
+                    status="failed",
+                    error="prompt is required",
+                )
+            return _traced_json_response(
+                request,
                 status_code=400,
-                content={
-                    "error": {
-                        "message": "image is required",
-                        "type": "invalid_request_error",
-                        "param": "image",
-                    }
-                },
+                content=content,
+            )
+        if not input_images:
+            content = {
+                "error": {
+                    "message": "image is required",
+                    "type": "invalid_request_error",
+                    "param": "image",
+                }
+            }
+            if trace is not None:
+                trace.finish_stage(
+                    validation_stage_id,
+                    status="failed",
+                    error="image is required",
+                )
+            return _traced_json_response(
+                request,
+                status_code=400,
+                content=content,
             )
 
         model_id = str(data.get("model") or "gpt-image-2").strip()
@@ -1348,14 +1773,33 @@ def build_generation_router(
         except Exception:
             pass
         if model_id in video_model_catalog:
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": "Video models are not supported for image edits",
+                    "type": "invalid_request_error",
+                }
+            }
+            if trace is not None:
+                trace.finish_stage(
+                    validation_stage_id,
+                    status="failed",
+                    error="Video models are not supported for image edits",
+                )
+            return _traced_json_response(
+                request,
                 status_code=400,
-                content={
-                    "error": {
-                        "message": "Video models are not supported for image edits",
-                        "type": "invalid_request_error",
-                    }
-                },
+                content=content,
+            )
+        if trace is not None:
+            trace.finish_stage(validation_stage_id, status="succeeded")
+        model_stage_id = None
+        if trace is not None:
+            model_stage_id = trace.start_stage(
+                layer="service",
+                kind="model_resolution",
+                name="解析 edits 模型与尺寸",
+                parent_id=getattr(request.state, "trace_operation_stage_id", None),
+                details={"requested_model": model_id},
             )
 
         try:
@@ -1376,7 +1820,24 @@ def build_generation_router(
                     resolved_model_id=resolved_model_id,
                 )
         except OpenAIImageRequestError as exc:
-            return _openai_image_error_response(exc)
+            if trace is not None:
+                trace.finish_stage(model_stage_id, status="failed", error=exc)
+            response = _openai_image_error_response(exc)
+            return _remember_existing_response(request, response, error=exc)
+
+        if trace is not None:
+            trace.finish_stage(
+                model_stage_id,
+                status="succeeded",
+                response={
+                    "resolved_model_id": resolved_model_id,
+                    "image_options": asdict(image_options),
+                    "upstream": {
+                        "model_id": model_conf.get("upstream_model_id"),
+                        "model_version": model_conf.get("upstream_model_version"),
+                    },
+                },
+            )
 
         _set_image_log_context(
             request,
@@ -1393,7 +1854,11 @@ def build_generation_router(
             )
 
             def _run_once(token: str):
-                source_image_ids = _upload_edit_source_images(token, input_images)
+                source_image_ids = _upload_edit_source_images(
+                    token,
+                    input_images,
+                    request,
+                )
                 response_items = _generate_openai_image_items(
                     request=request,
                     token=token,
@@ -1410,13 +1875,20 @@ def build_generation_router(
                     response_payload["model"] = resolved_model_id
                 return response_payload
 
-            return await run_in_threadpool(
+            result = await run_in_threadpool(
                 lambda: run_with_token_retries(
                     request=request,
                     operation_name="images.edits",
                     run_once=_run_once,
                 )
             )
+            if trace is not None:
+                trace.finish_stage(
+                    getattr(request.state, "trace_operation_stage_id", None),
+                    status="succeeded",
+                    response={"result": sanitize_trace_value(result)},
+                )
+            return result
 
         except quota_error_cls:
             error_code = str(
@@ -1434,15 +1906,17 @@ def build_generation_router(
                 task_progress=0.0,
                 error="Token quota exhausted",
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": "Token quota exhausted",
+                    "type": "rate_limit_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=429,
-                content={
-                    "error": {
-                        "message": "Token quota exhausted",
-                        "type": "rate_limit_error",
-                        "code": error_code,
-                    }
-                },
+                content=content,
             )
         except auth_error_cls:
             error_code = str(
@@ -1460,15 +1934,17 @@ def build_generation_router(
                 task_progress=0.0,
                 error="Token invalid or expired",
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": "Token invalid or expired",
+                    "type": "invalid_request_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=401,
-                content={
-                    "error": {
-                        "message": "Token invalid or expired",
-                        "type": "invalid_request_error",
-                        "code": error_code,
-                    }
-                },
+                content=content,
             )
         except upstream_temp_error_cls as exc:
             error_code = str(
@@ -1486,20 +1962,24 @@ def build_generation_router(
                 task_progress=0.0,
                 error=str(exc),
             )
-            return JSONResponse(
-                status_code=getattr(exc, "status_code", 502) or 502,
-                content={
-                    "error": {
-                        "message": str(exc),
-                        "type": "server_error",
-                        "code": error_code,
-                    }
-                },
+            status_code = getattr(exc, "status_code", 502) or 502
+            content = {
+                "error": {
+                    "message": str(exc),
+                    "type": "server_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
+                status_code=status_code,
+                content=content,
+                error=exc,
             )
         except HTTPException as exc:
             passthrough = _openai_http_exception_response(exc)
             if passthrough is not None:
-                return passthrough
+                return _remember_existing_response(request, passthrough, error=exc)
             status_code = int(exc.status_code or 500)
             err_type = (
                 "invalid_request_error" if 400 <= status_code < 500 else "server_error"
@@ -1510,14 +1990,17 @@ def build_generation_router(
                 task_progress=0.0,
                 error=str(exc.detail),
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": str(exc.detail),
+                    "type": err_type,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=status_code,
-                content={
-                    "error": {
-                        "message": str(exc.detail),
-                        "type": err_type,
-                    }
-                },
+                content=content,
+                error=exc,
             )
         except Exception as exc:
             logger.exception("Unhandled error in /v1/images/edits")
@@ -1536,15 +2019,18 @@ def build_generation_router(
                 task_progress=0.0,
                 error=str(exc),
             )
-            return JSONResponse(
+            content = {
+                "error": {
+                    "message": str(exc),
+                    "type": "server_error",
+                    "code": error_code,
+                }
+            }
+            return _traced_json_response(
+                request,
                 status_code=500,
-                content={
-                    "error": {
-                        "message": str(exc),
-                        "type": "server_error",
-                        "code": error_code,
-                    }
-                },
+                content=content,
+                error=exc,
             )
 
     @router.post("/api/v1/generate")

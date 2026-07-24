@@ -13,6 +13,14 @@ import requests
 
 from core.config_mgr import config_manager
 from core.models import build_image_payload_candidates, random_image_seed
+from core.request_trace import (
+    RequestTrace,
+    binary_summary,
+    response_snapshot,
+    sanitize_headers,
+    sanitize_trace_value,
+    sanitize_url,
+)
 
 try:
     from curl_cffi.requests import Session as CurlSession
@@ -688,7 +696,13 @@ class AdobeClient:
         return total
 
     def upload_image(
-        self, token: str, image_bytes: bytes, mime_type: str = "image/jpeg"
+        self,
+        token: str,
+        image_bytes: bytes,
+        mime_type: str = "image/jpeg",
+        *,
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
     ) -> str:
         if not image_bytes:
             raise AdobeRequestError("image is empty")
@@ -699,7 +713,35 @@ class AdobeClient:
             "content-type": mime_type,
             "accept": "application/json",
         }
-        resp = self._post_bytes(self.upload_url, headers=headers, payload=image_bytes)
+        trace_stage_id = None
+        if trace is not None:
+            trace_stage_id = trace.start_stage(
+                layer="adobe",
+                kind="upload",
+                name="上传编辑参考图",
+                parent_id=trace_parent_id,
+                request={
+                    "method": "POST",
+                    "url": sanitize_url(self.upload_url),
+                    "headers": sanitize_headers(headers),
+                    "body": binary_summary(
+                        image_bytes,
+                        content_type=mime_type,
+                    ),
+                },
+            )
+        try:
+            resp = self._post_bytes(self.upload_url, headers=headers, payload=image_bytes)
+        except Exception as exc:
+            if trace is not None:
+                trace.finish_stage(trace_stage_id, status="failed", error=exc)
+            raise
+        if trace is not None:
+            trace.finish_stage(
+                trace_stage_id,
+                status="succeeded" if resp.status_code == 200 else "failed",
+                response=response_snapshot(resp),
+            )
 
         if resp.status_code in (401, 403):
             raise AuthError("Token invalid or expired")
@@ -1566,11 +1608,13 @@ class AdobeClient:
         timeout: int = 180,
         out_path: Optional[Path] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
     ) -> tuple[Optional[bytes], dict]:
         submit_resp = None
         first_error = ""
         first_error_status: Optional[int] = None
-        for payload in self._build_payload_candidates(
+        payload_candidates = self._build_payload_candidates(
             prompt=prompt,
             aspect_ratio=aspect_ratio,
             output_resolution=output_resolution,
@@ -1581,12 +1625,43 @@ class AdobeClient:
             seed=seed,
             source_image_ids=source_image_ids,
             requested_size=requested_size,
-        ):
-            submit_resp = self._post_json(
-                self.submit_url,
-                headers=self._submit_headers(token, prompt=prompt),
-                payload=payload,
-            )
+        )
+        for candidate_index, payload in enumerate(payload_candidates, start=1):
+            submit_headers = self._submit_headers(token, prompt=prompt)
+            submit_stage_id = None
+            if trace is not None:
+                submit_stage_id = trace.start_stage(
+                    layer="adobe",
+                    kind="submit",
+                    name="提交 Adobe GPT Image 任务",
+                    parent_id=trace_parent_id,
+                    attempt={
+                        "candidate": candidate_index,
+                        "candidate_count": len(payload_candidates),
+                    },
+                    request={
+                        "method": "POST",
+                        "url": sanitize_url(self.submit_url),
+                        "headers": sanitize_headers(submit_headers),
+                        "body": sanitize_trace_value(payload),
+                    },
+                )
+            try:
+                submit_resp = self._post_json(
+                    self.submit_url,
+                    headers=submit_headers,
+                    payload=payload,
+                )
+            except Exception as exc:
+                if trace is not None:
+                    trace.finish_stage(submit_stage_id, status="failed", error=exc)
+                raise
+            if trace is not None:
+                trace.finish_stage(
+                    submit_stage_id,
+                    status="succeeded" if submit_resp.status_code == 200 else "failed",
+                    response=response_snapshot(submit_resp),
+                )
             if submit_resp.status_code == 200:
                 break
 
@@ -1658,9 +1733,59 @@ class AdobeClient:
         latest = {}
         sleep_time = 3.0
         while True:
-            poll_resp = self._get(
-                poll_url, headers=self._poll_headers(token), timeout=60
+            poll_headers = self._poll_headers(token)
+            poll_started = time.perf_counter()
+            try:
+                poll_resp = self._get(
+                    poll_url, headers=poll_headers, timeout=60
+                )
+            except Exception as exc:
+                if trace is not None:
+                    trace.add_stage(
+                        layer="adobe",
+                        kind="poll",
+                        name="Adobe task poll",
+                        status="failed",
+                        parent_id=trace_parent_id,
+                        request={
+                            "method": "GET",
+                            "url": sanitize_url(poll_url),
+                            "headers": sanitize_headers(poll_headers),
+                        },
+                        error=exc,
+                    )
+                raise
+            poll_duration_ms = (time.perf_counter() - poll_started) * 1000.0
+            poll_snapshot = response_snapshot(poll_resp)
+            poll_body = poll_snapshot.get("body")
+            body_status = (
+                str(poll_body.get("status") or "")
+                if isinstance(poll_body, dict)
+                else ""
             )
+            poll_status_key = "|".join(
+                [
+                    str(poll_resp.status_code),
+                    str(poll_resp.headers.get("x-task-status") or "").upper(),
+                    body_status.upper(),
+                ]
+            )
+            if trace is not None:
+                trace.record_poll(
+                    parent_id=trace_parent_id,
+                    status_key=poll_status_key,
+                    request={
+                        "method": "GET",
+                        "url": sanitize_url(poll_url),
+                        "headers": sanitize_headers(poll_headers),
+                    },
+                    response=poll_snapshot,
+                    duration_ms=poll_duration_ms,
+                    failed=(
+                        poll_resp.status_code != 200
+                        or body_status.upper() in {"FAILED", "CANCELLED", "ERROR"}
+                    ),
+                )
             if poll_resp.status_code != 200:
                 logger.error(
                     "poll failed status=%s body=%s",
@@ -1708,17 +1833,97 @@ class AdobeClient:
                 if not image_url:
                     raise AdobeRequestError("job finished without image url")
                 if out_path is not None:
-                    self._download_to_file(
-                        image_url,
-                        headers={"accept": "*/*"},
-                        out_path=out_path,
-                        timeout=30,
-                    )
+                    download_headers = {"accept": "*/*"}
+                    download_stage_id = None
+                    if trace is not None:
+                        download_stage_id = trace.start_stage(
+                            layer="adobe",
+                            kind="download",
+                            name="下载生成结果",
+                            parent_id=trace_parent_id,
+                            request={
+                                "method": "GET",
+                                "url": sanitize_url(image_url),
+                                "headers": sanitize_headers(download_headers),
+                            },
+                        )
+                    try:
+                        downloaded_size = self._download_to_file(
+                            image_url,
+                            headers=download_headers,
+                            out_path=out_path,
+                            timeout=30,
+                        )
+                    except Exception as exc:
+                        if trace is not None:
+                            trace.finish_stage(
+                                download_stage_id,
+                                status="failed",
+                                error=exc,
+                            )
+                        raise
+                    if trace is not None:
+                        trace.finish_stage(
+                            download_stage_id,
+                            status="succeeded",
+                            response={
+                                "file": binary_summary(
+                                    out_path.read_bytes(),
+                                    filename=out_path.name,
+                                ),
+                                "size_bytes": downloaded_size,
+                            },
+                        )
                     image_bytes = None
                 else:
-                    img_resp = self._get(image_url, headers={"accept": "*/*"}, timeout=30)
-                    img_resp.raise_for_status()
-                    image_bytes = img_resp.content
+                    download_headers = {"accept": "*/*"}
+                    download_stage_id = None
+                    if trace is not None:
+                        download_stage_id = trace.start_stage(
+                            layer="adobe",
+                            kind="download",
+                            name="下载生成结果",
+                            parent_id=trace_parent_id,
+                            request={
+                                "method": "GET",
+                                "url": sanitize_url(image_url),
+                                "headers": sanitize_headers(download_headers),
+                            },
+                        )
+                    img_resp = None
+                    try:
+                        img_resp = self._get(
+                            image_url,
+                            headers=download_headers,
+                            timeout=30,
+                        )
+                        img_resp.raise_for_status()
+                        image_bytes = img_resp.content
+                    except Exception as exc:
+                        if trace is not None:
+                            trace.finish_stage(
+                                download_stage_id,
+                                status="failed",
+                                response=(
+                                    response_snapshot(img_resp)
+                                    if img_resp is not None
+                                    else None
+                                ),
+                                error=exc,
+                            )
+                        raise
+                    if trace is not None:
+                        trace.finish_stage(
+                            download_stage_id,
+                            status="succeeded",
+                            response={
+                                **response_snapshot(img_resp, include_body=False),
+                                "body": binary_summary(
+                                    image_bytes,
+                                    content_type=img_resp.headers.get("content-type"),
+                                ),
+                            },
+                        )
                 if progress_cb:
                     try:
                         progress_cb(
@@ -1785,6 +1990,8 @@ class AdobeClient:
         timeout: int = 180,
         out_path: Optional[Path] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
     ) -> tuple[Optional[bytes], dict]:
         is_gpt_image = str(upstream_model_id or "").strip().lower() == "gpt-image"
         if not is_gpt_image:
@@ -1802,6 +2009,8 @@ class AdobeClient:
                 timeout=timeout,
                 out_path=out_path,
                 progress_cb=progress_cb,
+                trace=trace,
+                trace_parent_id=trace_parent_id,
             )
         max_seed_attempts = 3 if is_gpt_image else 1
         attempted_seeds: set[int] = set()
@@ -1821,7 +2030,20 @@ class AdobeClient:
                 current_seed,
             )
             try:
-                return self._generate_once(
+                seed_stage_id = None
+                if trace is not None:
+                    seed_stage_id = trace.start_stage(
+                        layer="service",
+                        kind="seed_attempt",
+                        name="执行 GPT Image seed attempt",
+                        parent_id=trace_parent_id,
+                        attempt={
+                            "number": seed_attempt,
+                            "max_attempts": max_seed_attempts,
+                            "seed": current_seed,
+                        },
+                    )
+                result = self._generate_once(
                     token=token,
                     prompt=prompt,
                     aspect_ratio=aspect_ratio,
@@ -1836,8 +2058,20 @@ class AdobeClient:
                     timeout=timeout,
                     out_path=out_path,
                     progress_cb=progress_cb,
+                    trace=trace,
+                    trace_parent_id=seed_stage_id or trace_parent_id,
                 )
-            except ContentPolicyError:
+                if trace is not None:
+                    trace.finish_stage(seed_stage_id, status="succeeded")
+                return result
+            except ContentPolicyError as exc:
+                if trace is not None:
+                    trace.finish_stage(
+                        seed_stage_id,
+                        status="failed",
+                        error=exc,
+                        details={"will_retry": seed_attempt < max_seed_attempts},
+                    )
                 if seed_attempt >= max_seed_attempts:
                     raise
                 logger.warning(
@@ -1846,5 +2080,9 @@ class AdobeClient:
                     current_seed,
                 )
                 current_seed = None
+            except Exception as exc:
+                if trace is not None:
+                    trace.finish_stage(seed_stage_id, status="failed", error=exc)
+                raise
 
         raise AdobeRequestError("image generation failed")

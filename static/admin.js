@@ -732,6 +732,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const errorDetailCode = document.getElementById("errorDetailCode");
   const errorDetailContent = document.getElementById("errorDetailContent");
   const errorDetailCloseBtn = document.getElementById("errorDetailCloseBtn");
+  const errorTraceSummary = document.getElementById("errorTraceSummary");
+  const errorTraceCollapseBtn = document.getElementById("errorTraceCollapseBtn");
+  const errorTraceExpandBtn = document.getElementById("errorTraceExpandBtn");
+  const errorTraceZoomOutBtn = document.getElementById("errorTraceZoomOutBtn");
+  const errorTraceZoomInBtn = document.getElementById("errorTraceZoomInBtn");
+  const errorTraceCopyBtn = document.getElementById("errorTraceCopyBtn");
   const appToast = document.getElementById("appToast");
   const LOGS_PAGE_SIZE = 20;
   let logsCurrentPage = 1;
@@ -741,6 +747,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   let logsErrorsOnly = false;
   let logsLoadSequence = 0;
   let logsSearchTimer = null;
+  let currentErrorDetailData = null;
+  let errorTraceFontScale = 1;
 
   function switchConfigPane(targetId) {
     if (!targetId) return;
@@ -1560,6 +1568,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     errorDetailModal.setAttribute("aria-hidden", "true");
     errorDetailCode.textContent = "错误信息";
     errorDetailContent.innerHTML = "";
+    if (errorTraceSummary) errorTraceSummary.innerHTML = "";
+    currentErrorDetailData = null;
+    errorTraceFontScale = 1;
+    const dialog = errorDetailModal.querySelector(".error-trace-dialog");
+    if (dialog) dialog.style.setProperty("--trace-font-scale", "1");
   }
 
   function closePromptDetail() {
@@ -1577,11 +1590,339 @@ document.addEventListener("DOMContentLoaded", async () => {
     promptDetailModal.setAttribute("aria-hidden", "false");
   }
 
+  async function copyTraceText(value, successMessage = "已复制") {
+    const text = String(value ?? "");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    showToast(successMessage, false);
+  }
+
+  function createTraceCopyButton(value, label = "复制节点") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "trace-copy-node";
+    button.textContent = "⧉";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      copyTraceText(text, "节点内容已复制");
+    });
+    return button;
+  }
+
+  function traceJsonPrimitive(value) {
+    const span = document.createElement("span");
+    if (value === null || value === undefined) {
+      span.className = "trace-json-null";
+      span.textContent = value === null ? "null" : "undefined";
+    } else if (typeof value === "string") {
+      span.className = "trace-json-string";
+      span.textContent = JSON.stringify(value);
+    } else if (typeof value === "number") {
+      span.className = "trace-json-number";
+      span.textContent = String(value);
+    } else if (typeof value === "boolean") {
+      span.className = "trace-json-boolean";
+      span.textContent = String(value);
+    } else {
+      span.className = "trace-json-string";
+      span.textContent = String(value);
+    }
+    return span;
+  }
+
+  function createTraceJsonEntry(key, value, depth = 0) {
+    const isCollection = value && typeof value === "object";
+    if (!isCollection) {
+      const row = document.createElement("div");
+      row.className = "trace-json-row";
+      if (key !== null && key !== undefined) {
+        const keyEl = document.createElement("span");
+        keyEl.className = "trace-json-key";
+        keyEl.textContent = `${key}:`;
+        row.appendChild(keyEl);
+      }
+      row.appendChild(traceJsonPrimitive(value));
+      row.appendChild(createTraceCopyButton(value));
+      return row;
+    }
+
+    const details = document.createElement("details");
+    details.className = "trace-json-node";
+    details.open = depth < 1;
+    const summary = document.createElement("summary");
+    if (key !== null && key !== undefined) {
+      const keyEl = document.createElement("span");
+      keyEl.className = "trace-json-key";
+      keyEl.textContent = String(key);
+      summary.appendChild(keyEl);
+    }
+    const count = Array.isArray(value) ? value.length : Object.keys(value).length;
+    const countEl = document.createElement("span");
+    countEl.className = "trace-json-count";
+    countEl.textContent = Array.isArray(value) ? `[${count}]` : `{${count}}`;
+    summary.appendChild(countEl);
+    summary.appendChild(createTraceCopyButton(value));
+    details.appendChild(summary);
+
+    const children = document.createElement("div");
+    children.className = "trace-json-children";
+    const entries = Array.isArray(value)
+      ? value.map((item, index) => [index, item])
+      : Object.entries(value);
+    entries.forEach(([childKey, childValue]) => {
+      children.appendChild(createTraceJsonEntry(childKey, childValue, depth + 1));
+    });
+    details.appendChild(children);
+    return details;
+  }
+
+  function createTraceJsonRoot(value) {
+    const root = document.createElement("div");
+    root.className = "trace-json-root";
+    if (value && typeof value === "object") {
+      const entries = Array.isArray(value)
+        ? value.map((item, index) => [index, item])
+        : Object.entries(value);
+      entries.forEach(([key, childValue]) => {
+        root.appendChild(createTraceJsonEntry(key, childValue, 0));
+      });
+    } else {
+      root.appendChild(createTraceJsonEntry(null, value, 0));
+    }
+    return root;
+  }
+
+  function appendTracePayloadSection(container, label, value, open = false) {
+    if (value === undefined || value === null) return;
+    const section = document.createElement("details");
+    section.className = "trace-payload-section";
+    section.open = Boolean(open);
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    section.appendChild(summary);
+    section.appendChild(createTraceJsonRoot(value));
+    container.appendChild(section);
+  }
+
+  function formatTraceDuration(value) {
+    const milliseconds = Number(value);
+    if (!Number.isFinite(milliseconds)) return "-";
+    if (milliseconds < 1000) return `${milliseconds.toFixed(milliseconds < 10 ? 2 : 0)} ms`;
+    return `${(milliseconds / 1000).toFixed(2)} s`;
+  }
+
+  function traceLayerLabel(layer) {
+    return {
+      client: "兼容层",
+      service: "adobe2api",
+      adobe: "Adobe",
+    }[String(layer || "").toLowerCase()] || String(layer || "内部");
+  }
+
+  function traceStatusLabel(status) {
+    return {
+      succeeded: "成功",
+      failed: "失败",
+      interrupted: "中断",
+      running: "进行中",
+    }[String(status || "").toLowerCase()] || String(status || "-");
+  }
+
+  function traceAttemptText(attempt) {
+    if (!attempt || typeof attempt !== "object") return "";
+    return Object.entries(attempt)
+      .filter(([, value]) => value !== null && value !== undefined && value !== "")
+      .slice(0, 5)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" · ");
+  }
+
+  function traceOpenStageIds(stages) {
+    const byId = new Map(stages.map((stage) => [String(stage?.id || ""), stage]));
+    const openIds = new Set();
+    stages.forEach((stage) => {
+      const status = String(stage?.status || "").toLowerCase();
+      if (status !== "failed" && status !== "interrupted" && !stage?.error) return;
+      let current = stage;
+      let guard = 0;
+      while (current && guard < 20) {
+        const currentId = String(current?.id || "");
+        if (currentId) openIds.add(currentId);
+        current = byId.get(String(current?.parent_id || ""));
+        guard += 1;
+      }
+    });
+    return openIds;
+  }
+
+  function traceStageDepth(stage, byId) {
+    let depth = 0;
+    let parentId = String(stage?.parent_id || "");
+    const seen = new Set();
+    while (parentId && byId.has(parentId) && !seen.has(parentId) && depth < 6) {
+      seen.add(parentId);
+      depth += 1;
+      parentId = String(byId.get(parentId)?.parent_id || "");
+    }
+    return depth;
+  }
+
+  function renderTraceStage(stage, byId, openIds) {
+    const details = document.createElement("details");
+    const status = String(stage?.status || "").toLowerCase();
+    const layer = String(stage?.layer || "service").toLowerCase();
+    details.className = "trace-stage";
+    details.dataset.status = status;
+    details.dataset.layer = layer;
+    details.dataset.stageId = String(stage?.id || "");
+    details.open = openIds.has(String(stage?.id || ""));
+    const stageDepth = traceStageDepth(stage, byId);
+    details.style.setProperty("--trace-indent", `${stageDepth * 22}px`);
+    details.style.setProperty("--trace-mobile-indent", `${stageDepth * 10}px`);
+
+    const summary = document.createElement("summary");
+    const marker = document.createElement("span");
+    marker.className = "trace-stage-marker";
+    marker.setAttribute("aria-hidden", "true");
+    summary.appendChild(marker);
+
+    const title = document.createElement("div");
+    title.className = "trace-stage-title";
+    const name = document.createElement("span");
+    name.className = "trace-stage-name";
+    name.textContent = String(stage?.name || stage?.kind || "执行阶段");
+    title.appendChild(name);
+    const meta = document.createElement("span");
+    meta.className = "trace-stage-meta";
+    const metaParts = [
+      `#${String(stage?.seq ?? "-")}`,
+      String(stage?.kind || "stage"),
+      `+${formatTraceDuration(stage?.offset_ms)}`,
+      formatTraceDuration(stage?.duration_ms),
+      traceAttemptText(stage?.attempt),
+    ].filter(Boolean);
+    meta.textContent = metaParts.join(" · ");
+    title.appendChild(meta);
+    summary.appendChild(title);
+
+    const badges = document.createElement("div");
+    badges.className = "trace-stage-badges";
+    const layerBadge = document.createElement("span");
+    layerBadge.className = "trace-badge";
+    layerBadge.textContent = traceLayerLabel(layer);
+    badges.appendChild(layerBadge);
+    const statusBadge = document.createElement("span");
+    statusBadge.className = `trace-badge ${status === "failed" || status === "interrupted" ? "failed" : ""}`;
+    statusBadge.textContent = traceStatusLabel(status);
+    badges.appendChild(statusBadge);
+    summary.appendChild(badges);
+    details.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "trace-stage-body";
+    const isFailure = status === "failed" || status === "interrupted" || Boolean(stage?.error);
+    appendTracePayloadSection(body, "请求", stage?.request, false);
+    appendTracePayloadSection(body, "响应", stage?.response, isFailure);
+    appendTracePayloadSection(body, "异常链", stage?.error, isFailure);
+    appendTracePayloadSection(body, "阶段参数", stage?.details, false);
+    appendTracePayloadSection(body, "聚合信息", stage?.aggregate, false);
+    appendTracePayloadSection(body, "重试信息", stage?.attempt, false);
+    details.appendChild(body);
+    return details;
+  }
+
+  function renderLegacyErrorDetail(data, errCode) {
+    const message = String(data?.message || "").trim() || "暂无错误信息";
+    const inputImageUrls = Array.isArray(data?.input_image_urls)
+      ? data.input_image_urls.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const detailLines = [
+      `错误信息：${message}`,
+      `错误编号：${String(data?.code || errCode)}`,
+      `状态码：${String(data?.status_code || "-")}`,
+      `请求接口：${[data?.method, data?.path].filter(Boolean).join(" ") || "-"}`,
+      `模型：${String(data?.model || "-")}`,
+      `分辨率：${String(data?.resolution || "-")}`,
+      `类型：${String(data?.request_type || data?.operation || "-")}`,
+      `请求参数：${String(data?.request_params || "-")}`,
+      `提示词：${String(data?.prompt || data?.prompt_preview || "-")}`,
+      `输入图片 URL：${inputImageUrls.length ? inputImageUrls.join("\n") : "-"}`,
+      `异常类型：${String(data?.exception_class || "-")}`,
+    ];
+    if (data?.traceback) detailLines.push(`\n异常栈：\n${String(data.traceback)}`);
+    errorDetailContent.innerHTML = `<div class="trace-legacy"><pre>${escapeHtml(detailLines.join("\n"))}</pre></div>`;
+  }
+
+  function renderErrorTrace(data, errCode) {
+    currentErrorDetailData = data;
+    const trace = data?.trace;
+    const statusCode = Number(data?.status_code || 0);
+    errorDetailCode.textContent = String(data?.code || errCode || "错误执行链");
+    if (errorTraceSummary) {
+      const summaryItems = [
+        ["请求", [data?.method, data?.path].filter(Boolean).join(" ") || trace?.path || "-"],
+        ["模型", data?.model || "-"],
+        ["账号", data?.token_account_name || data?.token_account_email || "-"],
+        ["总耗时", trace ? formatTraceDuration(trace?.duration_ms) : "-"],
+        ["最终结果", statusCode ? `HTTP ${statusCode}` : "失败", "failed"],
+      ];
+      errorTraceSummary.innerHTML = summaryItems.map(([label, value, valueClass]) => `
+        <div class="trace-summary-item">
+          <span class="trace-summary-label">${escapeHtml(label)}</span>
+          <span class="trace-summary-value ${valueClass || ""}" title="${escapeHtml(value)}">${escapeHtml(value)}</span>
+        </div>
+      `).join("");
+    }
+
+    if (!trace || !Array.isArray(trace?.stages)) {
+      renderLegacyErrorDetail(data, errCode);
+      return;
+    }
+
+    errorDetailContent.innerHTML = "";
+    const timeline = document.createElement("div");
+    timeline.className = "trace-timeline";
+    if (trace?.truncated) {
+      const note = document.createElement("div");
+      note.className = "trace-legacy";
+      note.textContent = `执行链已按存储上限截断，省略阶段 ${Number(trace?.dropped_stages || 0)} 个。`;
+      timeline.appendChild(note);
+    }
+    const stages = trace.stages;
+    const byId = new Map(stages.map((stage) => [String(stage?.id || ""), stage]));
+    const openIds = traceOpenStageIds(stages);
+    stages.forEach((stage) => timeline.appendChild(renderTraceStage(stage, byId, openIds)));
+    if (!stages.length) {
+      const empty = document.createElement("div");
+      empty.className = "trace-empty";
+      empty.textContent = "该错误没有执行阶段数据";
+      timeline.appendChild(empty);
+    }
+    errorDetailContent.appendChild(timeline);
+  }
+
   async function openErrorDetailByCode(code) {
     const errCode = String(code || "").trim();
     if (!errCode || !errorDetailModal || !errorDetailCode || !errorDetailContent) return;
-    errorDetailCode.textContent = "错误信息";
-    errorDetailContent.innerHTML = `<pre>加载中...</pre>`;
+    errorDetailCode.textContent = errCode;
+    currentErrorDetailData = null;
+    if (errorTraceSummary) errorTraceSummary.innerHTML = "";
+    errorDetailContent.innerHTML = `<div class="trace-loading">加载执行链...</div>`;
     errorDetailModal.classList.add("open");
     errorDetailModal.setAttribute("aria-hidden", "false");
     try {
@@ -1591,25 +1932,26 @@ document.addEventListener("DOMContentLoaded", async () => {
         throw new Error(txt || `获取错误详情失败 (${res.status})`);
       }
       const data = await res.json();
-      const message = String(data?.message || "").trim() || "暂无错误信息";
-      const inputImageUrls = Array.isArray(data?.input_image_urls)
-        ? data.input_image_urls.map((value) => String(value || "").trim()).filter(Boolean)
-        : [];
-      const detailLines = [
-        `错误信息：${message}`,
-        `错误编号：${String(data?.code || errCode)}`,
-        `状态码：${String(data?.status_code || "-")}`,
-        `请求接口：${[data?.method, data?.path].filter(Boolean).join(" ") || "-"}`,
-        `模型：${String(data?.model || "-")}`,
-        `分辨率：${String(data?.resolution || "-")}`,
-        `类型：${String(data?.request_type || data?.operation || "-")}`,
-        `请求参数：${String(data?.request_params || "-")}`,
-        `提示词：${String(data?.prompt || data?.prompt_preview || "-")}`,
-        `输入图片 URL：${inputImageUrls.length ? inputImageUrls.join("\n") : "-"}`,
-      ];
-      errorDetailContent.innerHTML = `<pre>${escapeHtml(detailLines.join("\n"))}</pre>`;
+      renderErrorTrace(data, errCode);
     } catch (err) {
-      errorDetailContent.innerHTML = `<pre>${escapeHtml(err.message || "获取错误详情失败")}</pre>`;
+      errorDetailContent.innerHTML = `<div class="trace-legacy"><pre>${escapeHtml(err.message || "获取错误详情失败")}</pre></div>`;
+    }
+  }
+
+  function setErrorTraceExpanded(open) {
+    if (!errorDetailContent) return;
+    errorDetailContent
+      .querySelectorAll("details.trace-stage, details.trace-payload-section, details.trace-json-node")
+      .forEach((details) => {
+        details.open = Boolean(open);
+      });
+  }
+
+  function adjustErrorTraceFontScale(delta) {
+    errorTraceFontScale = Math.min(1.5, Math.max(0.8, errorTraceFontScale + delta));
+    const dialog = errorDetailModal?.querySelector(".error-trace-dialog");
+    if (dialog) {
+      dialog.style.setProperty("--trace-font-scale", errorTraceFontScale.toFixed(2));
     }
   }
 
@@ -1680,6 +2022,32 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (errorDetailCloseBtn) {
     errorDetailCloseBtn.addEventListener("click", closeErrorDetail);
+  }
+
+  if (errorTraceCollapseBtn) {
+    errorTraceCollapseBtn.addEventListener("click", () => setErrorTraceExpanded(false));
+  }
+
+  if (errorTraceExpandBtn) {
+    errorTraceExpandBtn.addEventListener("click", () => setErrorTraceExpanded(true));
+  }
+
+  if (errorTraceZoomOutBtn) {
+    errorTraceZoomOutBtn.addEventListener("click", () => adjustErrorTraceFontScale(-0.1));
+  }
+
+  if (errorTraceZoomInBtn) {
+    errorTraceZoomInBtn.addEventListener("click", () => adjustErrorTraceFontScale(0.1));
+  }
+
+  if (errorTraceCopyBtn) {
+    errorTraceCopyBtn.addEventListener("click", () => {
+      if (!currentErrorDetailData) return;
+      copyTraceText(
+        JSON.stringify(currentErrorDetailData.trace || currentErrorDetailData, null, 2),
+        "完整执行链已复制",
+      );
+    });
   }
 
   if (promptDetailCloseBtn) {

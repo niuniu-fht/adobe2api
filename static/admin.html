@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260718-2" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260724-2" />
 </head>
 <body>
   <div class="bg-orb bg-orb-a"></div>
@@ -427,17 +427,28 @@
   </div>
 
   <div id="errorDetailModal" class="preview-modal" aria-hidden="true">
-    <div class="preview-modal-dialog" role="dialog" aria-modal="true" aria-label="错误详情">
-      <button id="errorDetailCloseBtn" class="preview-close" type="button">关闭</button>
-      <div class="error-detail-head">
-        <h3 id="errorDetailCode">错误信息</h3>
+    <div class="preview-modal-dialog error-trace-dialog" role="dialog" aria-modal="true" aria-label="错误执行链">
+      <div class="error-trace-topbar">
+        <div class="error-detail-head">
+          <span class="error-trace-kicker">ERROR EXECUTION TRACE</span>
+          <h3 id="errorDetailCode">错误信息</h3>
+        </div>
+        <div class="error-trace-tools" aria-label="执行链查看工具">
+          <button id="errorTraceCollapseBtn" class="secondary trace-icon-btn" type="button" title="全部折叠" aria-label="全部折叠">−</button>
+          <button id="errorTraceExpandBtn" class="secondary trace-icon-btn" type="button" title="全部展开" aria-label="全部展开">+</button>
+          <button id="errorTraceZoomOutBtn" class="secondary trace-icon-btn trace-text-icon" type="button" title="缩小文字" aria-label="缩小文字">A−</button>
+          <button id="errorTraceZoomInBtn" class="secondary trace-icon-btn trace-text-icon" type="button" title="放大文字" aria-label="放大文字">A+</button>
+          <button id="errorTraceCopyBtn" class="secondary trace-icon-btn" type="button" title="复制完整执行链" aria-label="复制完整执行链">⧉</button>
+          <button id="errorDetailCloseBtn" class="secondary trace-icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
       </div>
+      <div id="errorTraceSummary" class="error-trace-summary" aria-live="polite"></div>
       <div id="errorDetailContent" class="error-detail-content"></div>
     </div>
   </div>
 
   <div id="appToast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="/static/admin.js?v=20260718-2"></script>
+  <script src="/static/admin.js?v=20260724-2"></script>
 </body>
 </html>

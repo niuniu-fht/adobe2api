@@ -31,6 +31,7 @@ def build_admin_router(
     refresh_manager,
     log_store,
     error_store,
+    trace_store,
     live_log_store,
     require_admin_auth: Callable[[Request], None],
     is_admin_authenticated: Callable[[Request], bool],
@@ -161,7 +162,13 @@ def build_admin_router(
         item = error_store.get(code)
         if not item:
             raise HTTPException(status_code=404, detail="error code not found")
-        return item
+        payload = dict(item)
+        log_id = str(payload.get("log_id") or "").strip()
+        if log_id:
+            trace = trace_store.get(log_id)
+            if trace is not None:
+                payload["trace"] = trace
+        return payload
 
     @router.get("/api/v1/logs/running")
     def list_running_logs(

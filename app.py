@@ -49,6 +49,13 @@ from core.stores import (
     RequestLogRecord,
     RequestLogStore,
 )
+from core.request_trace import (
+    RequestTrace,
+    RequestTraceStore,
+    get_request_trace,
+    sanitize_headers,
+    sanitize_trace_value,
+)
 from core.models import (
     MODEL_CATALOG,
     SUPPORTED_RATIOS,
@@ -128,6 +135,7 @@ def serve_generated_file(filename: str):
 store = JobStore()
 log_store = RequestLogStore(DATA_DIR / "request_logs.jsonl", max_items=5000)
 error_store = ErrorDetailStore(DATA_DIR / "request_errors.jsonl", max_items=5000)
+trace_store = RequestTraceStore(DATA_DIR / "request_traces", max_items=5000)
 live_log_store = LiveRequestStore(max_items=2000)
 client = AdobeClient()
 refresh_manager.start()
@@ -522,6 +530,23 @@ async def request_logger(request: Request, call_next):
 
     if method in {"POST", "PUT", "PATCH"} and should_log:
         request.state.log_id = uuid.uuid4().hex[:12]
+        if path in {"/v1/images/generations", "/v1/images/edits"}:
+            request_trace = RequestTrace(
+                log_id=request.state.log_id,
+                method=method,
+                path=path,
+            )
+            request.state.request_trace = request_trace
+            request.state.trace_request_stage_id = request_trace.start_stage(
+                layer="client",
+                kind="request",
+                name="接收 Images API 请求",
+                request={
+                    "method": method,
+                    "path": path,
+                    "headers": sanitize_headers(request.headers),
+                },
+            )
         try:
             # /v1/images/edits is often multipart and may contain large images.
             # Do not pre-read/cache its request body in middleware; let the route
@@ -542,6 +567,17 @@ async def request_logger(request: Request, call_next):
                     request.state.log_resolution = body_meta.get("resolution")
                     request.state.log_request_type = body_meta.get("request_type")
                     request.state.log_request_params = body_meta.get("request_params")
+                request_trace = get_request_trace(request)
+                if request_trace is not None:
+                    try:
+                        trace_body = json.loads(raw_body.decode("utf-8")) if raw_body else None
+                    except Exception:
+                        trace_body = raw_body.decode("utf-8", errors="replace")
+                    request_trace.finish_stage(
+                        getattr(request.state, "trace_request_stage_id", None),
+                        status="succeeded",
+                        details={"body": sanitize_trace_value(trace_body)},
+                    )
             request.state.log_request_type = getattr(
                 request.state, "log_request_type", None
             ) or (
@@ -721,6 +757,38 @@ async def request_logger(request: Request, call_next):
                         )
                     ),
                 )
+
+            request_trace = get_request_trace(request)
+            if request_trace is not None and int(status_code or 0) >= 400:
+                response_payload = getattr(
+                    request.state, "trace_response_payload", None
+                )
+                if response_payload is None:
+                    response_payload = {
+                        "status_code": int(status_code or 500),
+                        "error": getattr(request.state, "log_error", None)
+                        or error_text,
+                        "error_code": getattr(
+                            request.state, "log_error_code", None
+                        ),
+                    }
+                request_trace.add_stage(
+                    layer="client",
+                    kind="response",
+                    name="返回 OpenAI 兼容错误响应",
+                    status="failed",
+                    parent_id=getattr(
+                        request.state, "trace_operation_stage_id", None
+                    ),
+                    response=response_payload,
+                )
+                trace_payload = request_trace.finalize(
+                    outcome="failed",
+                    final_error=getattr(request.state, "trace_final_error", None)
+                    or getattr(request.state, "log_error", None)
+                    or error_text,
+                )
+                trace_store.save(log_id, trace_payload)
     return response
 
 
@@ -788,10 +856,35 @@ def _run_with_token_retries(
         retry_reason = ""
         delay = 0.0
         retry_error_text = ""
+        request_trace = get_request_trace(request)
+        trace_attempt_id = None
+        if request_trace is not None:
+            trace_attempt_id = request_trace.start_stage(
+                layer="service",
+                kind="token_attempt",
+                name="选择 Adobe 账号并执行请求",
+                parent_id=getattr(
+                    request.state, "trace_operation_stage_id", None
+                ),
+                attempt={
+                    "number": attempt,
+                    "token_id": token_meta.get("token_id"),
+                    "account_name": token_meta.get("token_account_name"),
+                    "account_email": token_meta.get("token_account_email"),
+                    "source": token_meta.get("token_source"),
+                },
+            )
+            request.state.trace_token_attempt_id = trace_attempt_id
 
         try:
             result = run_once(token)
             token_manager.report_success(token)
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="succeeded",
+                    details={"result_type": type(result).__name__},
+                )
             _append_attempt_log(
                 request=request,
                 operation=operation_name,
@@ -826,6 +919,17 @@ def _run_with_token_retries(
                 task_status_override="FAILED",
             )
             retry_error_text = str(exc)
+            request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={
+                        "retryable": retryable,
+                        "retry_reason": retry_reason,
+                    },
+                )
         except AuthError as exc:
             auth_result = token_manager.handle_auth_failure(token)
             auth_status = str(auth_result.get("status") or "invalid").strip().lower()
@@ -873,6 +977,17 @@ def _run_with_token_retries(
                 task_status_override="FAILED",
             )
             retry_error_text = str(err_value)
+            request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={
+                        "retryable": retryable,
+                        "retry_reason": retry_reason,
+                    },
+                )
         except UpstreamTemporaryError as exc:
             last_exc = exc
             limited_retry_attempts += 1
@@ -902,6 +1017,18 @@ def _run_with_token_retries(
                 task_status_override="FAILED",
             )
             retry_error_text = str(exc)
+            request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={
+                        "retryable": retryable,
+                        "retry_reason": retry_reason,
+                        "retry_delay_seconds": delay,
+                    },
+                )
         except AdobeRequestError as exc:
             status_code = int(getattr(exc, "status_code", None) or 500)
             detail = str(
@@ -930,6 +1057,14 @@ def _run_with_token_retries(
                 upstream_error_code=str(getattr(exc, "upstream_code", "") or ""),
                 task_status_override="FAILED",
             )
+            request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={"retryable": False},
+                )
             raise HTTPException(status_code=status_code, detail=detail)
         except HTTPException as exc:
             err_code = report_error(
@@ -954,6 +1089,14 @@ def _run_with_token_retries(
                 error_code=err_code,
                 task_status_override="FAILED",
             )
+            request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={"retryable": False},
+                )
             raise
         except Exception as exc:
             err_code = report_error(
@@ -974,6 +1117,14 @@ def _run_with_token_retries(
                 error_code=err_code,
                 task_status_override="FAILED",
             )
+            request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={"retryable": False},
+                )
             raise
 
         if retryable:
@@ -1011,6 +1162,18 @@ def _run_with_token_retries(
                 detail="Upstream is temporarily unavailable. Please retry later.",
             )
         raise last_exc
+    request_trace = get_request_trace(request)
+    if request_trace is not None:
+        no_token_error = "No active tokens available in the pool"
+        request.state.trace_final_error = no_token_error
+        request_trace.add_stage(
+            layer="service",
+            kind="token_attempt",
+            name="选择 Adobe 账号",
+            status="failed",
+            parent_id=getattr(request.state, "trace_operation_stage_id", None),
+            error=no_token_error,
+        )
     raise HTTPException(
         status_code=503, detail="No active tokens available in the pool"
     )
@@ -1520,6 +1683,7 @@ app.include_router(
         refresh_manager=refresh_manager,
         log_store=log_store,
         error_store=error_store,
+        trace_store=trace_store,
         live_log_store=live_log_store,
         require_admin_auth=_require_admin_auth,
         is_admin_authenticated=_is_admin_authenticated,
