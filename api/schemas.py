@@ -41,6 +41,11 @@ class ConfigUpdateRequest(BaseModel):
     retry_on_status_codes: Optional[List[int]] = None
     retry_on_error_types: Optional[List[str]] = None
     token_rotation_strategy: Optional[str] = None
+    image_per_token_concurrency: Optional[int] = None
+    image_per_request_concurrency: Optional[int] = None
+    image_rate_limit_wait_seconds: Optional[int] = None
+    image_network_retry_seconds: Optional[int] = None
+    image_download_attempts: Optional[int] = None
     batch_concurrency: Optional[int] = None
     generated_max_size_mb: Optional[int] = None
     generated_prune_size_mb: Optional[int] = None

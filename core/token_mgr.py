@@ -292,6 +292,28 @@ class TokenManager:
             self._rr_index = (self._rr_index + 1) % max(1, len(self.tokens))
             return active[idx]["value"]
 
+    def get_available_for_refresh_profile(
+        self, profile_id: str, strategy: str = "round_robin"
+    ) -> Optional[str]:
+        pid = str(profile_id or "").strip()
+        if not pid:
+            return None
+        with self._lock:
+            active = [
+                token
+                for token in self.tokens
+                if token.get("status") in {"active", "error"}
+                and str(token.get("refresh_profile_id") or "").strip() == pid
+            ]
+            if not active:
+                return None
+            mode = str(strategy or "round_robin").strip().lower()
+            if mode == "random":
+                return random.choice(active)["value"]
+            idx = self._rr_index % len(active)
+            self._rr_index = (self._rr_index + 1) % max(1, len(self.tokens))
+            return active[idx]["value"]
+
     def list_active_account_tokens(self) -> List[Dict]:
         with self._lock:
             items = []

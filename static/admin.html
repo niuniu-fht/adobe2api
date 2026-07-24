@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260724-2" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260724-3" />
 </head>
 <body>
   <div class="bg-orb bg-orb-a"></div>
@@ -22,6 +22,7 @@
     <div class="tabs">
       <button class="tab-btn active" data-target="tokens">Token 管理</button>
       <button class="tab-btn" data-target="config">系统配置</button>
+      <button class="tab-btn" data-target="imageQueue">图片队列 <span id="imageQueueBadge" class="queue-tab-badge">0</span></button>
       <button class="tab-btn" data-target="logs">请求日志</button>
     </div>
 
@@ -201,6 +202,34 @@
                 <option value="random">random（随机轮换）</option>
               </select>
             </div>
+
+            <div class="config-inline-row">
+              <div class="form-group inline-item">
+                <label for="confImagePerTokenConcurrency">每 Token 图片并发</label>
+                <input type="number" id="confImagePerTokenConcurrency" class="input-text" min="1" max="10" step="1" placeholder="默认 3" />
+              </div>
+              <div class="form-group inline-item">
+                <label for="confImagePerRequestConcurrency">每请求 output 并发</label>
+                <input type="number" id="confImagePerRequestConcurrency" class="input-text" min="1" max="10" step="1" placeholder="默认 4" />
+              </div>
+            </div>
+
+            <div class="config-inline-row">
+              <div class="form-group inline-item">
+                <label for="confImageRateLimitWaitSeconds">429 等待预算 (秒)</label>
+                <input type="number" id="confImageRateLimitWaitSeconds" class="input-text" min="30" max="1800" step="1" placeholder="默认 180" />
+              </div>
+              <div class="form-group inline-item">
+                <label for="confImageNetworkRetrySeconds">网络重试预算 (秒)</label>
+                <input type="number" id="confImageNetworkRetrySeconds" class="input-text" min="30" max="1800" step="1" placeholder="默认 180" />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="confImageDownloadAttempts">图片下载尝试次数</label>
+              <input type="number" id="confImageDownloadAttempts" class="input-text" min="1" max="10" step="1" placeholder="默认 5" />
+              <p class="help">仅重试下载阶段；下载 URL 失效时继续轮询原 Adobe job 获取新 URL。</p>
+            </div>
           </section>
 
           <section id="cfg-storage" class="config-cat-pane">
@@ -234,6 +263,30 @@
             <button id="saveConfigBtn">保存配置</button>
             <span id="configMsg" class="msg"></span>
           </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Image Queue Tab -->
+    <div id="imageQueue" class="tab-pane">
+      <section class="card image-queue-card">
+        <div class="list-head">
+          <div>
+            <h2>图片队列</h2>
+            <p id="imageQueueUpdatedAt" class="help">每 2 秒自动刷新</p>
+          </div>
+          <button id="refreshImageQueueBtn" class="secondary" type="button">刷新</button>
+        </div>
+        <div class="queue-summary-grid" aria-label="图片队列汇总">
+          <div class="queue-summary-item"><span>正在进行</span><strong id="queueInProgress">0</strong></div>
+          <div class="queue-summary-item"><span>排队</span><strong id="queueQueued">0</strong></div>
+          <div class="queue-summary-item"><span>等待 Poll</span><strong id="queueWaitingPoll">0</strong></div>
+          <div class="queue-summary-item"><span>429 等待</span><strong id="queueRateLimited">0</strong></div>
+          <div class="queue-summary-item"><span>下载重试</span><strong id="queueDownloadRetry">0</strong></div>
+          <div class="queue-summary-item"><span>全部 Output</span><strong id="queueOutputs">0</strong></div>
+        </div>
+        <div id="imageQueueList" class="image-queue-list" aria-live="polite">
+          <div class="empty-state">暂无图片任务</div>
         </div>
       </section>
     </div>
@@ -449,6 +502,6 @@
 
   <div id="appToast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="/static/admin.js?v=20260724-2"></script>
+  <script src="/static/admin.js?v=20260724-3"></script>
 </body>
 </html>

@@ -1,7 +1,6 @@
 import base64
 
 import pytest
-from fastapi import HTTPException
 
 from core.models.openai_images import (
     build_native_gpt_image_options,
@@ -377,7 +376,7 @@ def test_gpt_image_references_use_storage_blobs_only():
         {"id": "blob-1", "usage": "general"},
         {"id": "blob-2", "usage": "general"},
     ]
-    assert payloads[1]["generationMetadata"]["module"] == "text2image"
+    assert payloads[1]["generationMetadata"]["module"] == "image2image"
     assert payloads[1]["referenceBlobs"] == [
         {"id": "blob-1", "usage": "subject"},
         {"id": "blob-2", "usage": "subject"},
@@ -387,36 +386,32 @@ def test_gpt_image_references_use_storage_blobs_only():
     assert all("referenceVideos" not in payload for payload in payloads)
 
 
-def test_gpt_image_unsafe_retries_with_new_seeds(monkeypatch):
+def test_gpt_image_unsafe_stops_without_seed_retry(monkeypatch):
     client = AdobeClient()
     attempted_seeds = []
 
     def fake_generate_once(**kwargs):
         attempted_seeds.append(kwargs["seed"])
-        if len(attempted_seeds) < 3:
-            raise ContentPolicyError(
-                "unsafe",
-                upstream_code="image_unsafe",
-            )
-        return b"image", {"status": "succeeded"}
+        raise ContentPolicyError(
+            "unsafe",
+            upstream_code="image_unsafe",
+        )
 
-    seed_values = iter([101, 202, 303])
     monkeypatch.setattr(client, "_generate_once", fake_generate_once)
     monkeypatch.setattr(
         "core.adobe_client.random_image_seed",
-        lambda: next(seed_values),
+        lambda: 101,
     )
 
-    image_bytes, meta = client.generate(
-        token="TOKEN",
-        prompt="a blue crystal cube",
-        upstream_model_id="gpt-image",
-        upstream_model_version="2",
-    )
+    with pytest.raises(ContentPolicyError, match="图片不安全"):
+        client.generate(
+            token="TOKEN",
+            prompt="a blue crystal cube",
+            upstream_model_id="gpt-image",
+            upstream_model_version="2",
+        )
 
-    assert image_bytes == b"image"
-    assert meta["status"] == "succeeded"
-    assert attempted_seeds == [101, 202, 303]
+    assert attempted_seeds == [101]
 
 
 def test_gpt_image_candidate_fallback_preserves_primary_error(monkeypatch):
@@ -428,10 +423,19 @@ def test_gpt_image_candidate_fallback_preserves_primary_error(monkeypatch):
             self.text = message
             self.headers = {}
 
-    responses = iter(
+        def json(self):
+            return {"error_code": "bad_request", "message": self.text}
+
+    primary_responses = iter(
         [
             FakeResponse("primary general-reference failure"),
-            FakeResponse("fallback subject-reference failure"),
+            FakeResponse("primary subject-reference failure"),
+        ]
+    )
+    fallback_responses = iter(
+        [
+            FakeResponse("requests general-reference failure"),
+            FakeResponse("requests subject-reference failure"),
         ]
     )
     monkeypatch.setattr(
@@ -439,16 +443,23 @@ def test_gpt_image_candidate_fallback_preserves_primary_error(monkeypatch):
         "_build_payload_candidates",
         lambda **kwargs: [{"candidate": "general"}, {"candidate": "subject"}],
     )
-    monkeypatch.setattr(client, "_post_json", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(
+        client, "_post_json", lambda *args, **kwargs: next(primary_responses)
+    )
+    monkeypatch.setattr(
+        client,
+        "_post_json_requests_once",
+        lambda *args, **kwargs: next(fallback_responses),
+    )
 
     with pytest.raises(
         AdobeRequestError,
-        match="primary general-reference failure",
+        match="requests general-reference failure",
     ):
         client._generate_once(token="TOKEN", prompt="edit the image")
 
 
-def test_content_policy_error_keeps_plain_http_detail(monkeypatch):
+def test_content_policy_error_reaches_images_route_unchanged(monkeypatch):
     import app
 
     class TokenManagerStub:
@@ -481,7 +492,7 @@ def test_content_policy_error_keeps_plain_http_detail(monkeypatch):
             upstream_code="image_unsafe",
         )
 
-    with pytest.raises(HTTPException) as error_info:
+    with pytest.raises(ContentPolicyError) as error_info:
         app._run_with_token_retries(
             request=RequestStub(),
             operation_name="images.generations",
@@ -490,10 +501,7 @@ def test_content_policy_error_keeps_plain_http_detail(monkeypatch):
         )
 
     assert error_info.value.status_code == 400
-    assert error_info.value.detail == (
-        "生成的图片可能不安全，请修改提示词或更换随机种子后重试。"
-    )
-    assert isinstance(error_info.value.detail, str)
+    assert error_info.value.user_message == "图片不安全"
 
 
 def test_openai_prefixed_gemini_model_is_normalized():

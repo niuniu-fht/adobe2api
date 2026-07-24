@@ -33,6 +33,7 @@ def build_admin_router(
     error_store,
     trace_store,
     live_log_store,
+    image_task_coordinator,
     require_admin_auth: Callable[[Request], None],
     is_admin_authenticated: Callable[[Request], bool],
     is_ops_authenticated: Callable[[Request], bool],
@@ -192,6 +193,11 @@ def build_admin_router(
                 continue
             items.append(item)
         return {"items": items, "total": len(items)}
+
+    @router.get("/api/v1/image-queue")
+    def image_queue(request: Request, limit: int = 200):
+        require_admin_auth(request)
+        return image_task_coordinator.snapshot(limit=limit)
 
     def _resolve_logs_stats_range(range_key: str) -> tuple[str, float, float]:
         now_dt = datetime.now()
@@ -589,6 +595,29 @@ def build_admin_router(
                     detail="token_rotation_strategy must be one of: round_robin, random",
                 )
             update_data["token_rotation_strategy"] = strategy
+        image_integer_settings = {
+            "image_per_token_concurrency": (1, 10),
+            "image_per_request_concurrency": (1, 10),
+            "image_rate_limit_wait_seconds": (30, 1800),
+            "image_network_retry_seconds": (30, 1800),
+            "image_download_attempts": (1, 10),
+        }
+        for key, (minimum, maximum) in image_integer_settings.items():
+            if key not in incoming:
+                continue
+            try:
+                value = int(incoming[key])
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be an integer between {minimum} and {maximum}",
+                )
+            if value < minimum or value > maximum:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be between {minimum} and {maximum}",
+                )
+            update_data[key] = value
         if "batch_concurrency" in incoming:
             try:
                 batch_concurrency = int(incoming["batch_concurrency"])

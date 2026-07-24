@@ -30,10 +30,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   const tabBtns = document.querySelectorAll(".tab-btn");
   const tabPanes = document.querySelectorAll(".tab-pane");
   const LOGS_POLL_MS = 10000;
+  const IMAGE_QUEUE_POLL_MS = 2000;
 
   function isLogsTabActive() {
     const logsPane = document.getElementById("logs");
     return Boolean(logsPane && logsPane.classList.contains("active"));
+  }
+
+  function isImageQueueTabActive() {
+    const queuePane = document.getElementById("imageQueue");
+    return Boolean(queuePane && queuePane.classList.contains("active"));
   }
 
   tabBtns.forEach(btn => {
@@ -48,6 +54,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       } else if (logsAutoTimer) {
         clearTimeout(logsAutoTimer);
         logsAutoTimer = null;
+      }
+      if (btn.dataset.target === "imageQueue") {
+        loadImageQueue();
+      } else if (imageQueueTimer) {
+        clearTimeout(imageQueueTimer);
+        imageQueueTimer = null;
       }
     });
   });
@@ -79,6 +91,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const tokenPageInfo = document.getElementById("tokenPageInfo");
   const tokenSelectedIds = new Set();
   let logsAutoTimer = null;
+  let imageQueueTimer = null;
   let latestTokens = [];
   const TOKENS_PAGE_SIZE = 20;
   let tokenCurrentPage = 1;
@@ -688,6 +701,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const confRetryOnStatusCodes = document.getElementById("confRetryOnStatusCodes");
   const confRetryOnErrorTypes = document.getElementById("confRetryOnErrorTypes");
   const confTokenRotationStrategy = document.getElementById("confTokenRotationStrategy");
+  const confImagePerTokenConcurrency = document.getElementById("confImagePerTokenConcurrency");
+  const confImagePerRequestConcurrency = document.getElementById("confImagePerRequestConcurrency");
+  const confImageRateLimitWaitSeconds = document.getElementById("confImageRateLimitWaitSeconds");
+  const confImageNetworkRetrySeconds = document.getElementById("confImageNetworkRetrySeconds");
+  const confImageDownloadAttempts = document.getElementById("confImageDownloadAttempts");
   const confRefreshIntervalHours = document.getElementById("confRefreshIntervalHours");
   const confBatchConcurrency = document.getElementById("confBatchConcurrency");
   const confGeneratedMaxSizeMb = document.getElementById("confGeneratedMaxSizeMb");
@@ -739,6 +757,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   const errorTraceZoomInBtn = document.getElementById("errorTraceZoomInBtn");
   const errorTraceCopyBtn = document.getElementById("errorTraceCopyBtn");
   const appToast = document.getElementById("appToast");
+  const imageQueueBadge = document.getElementById("imageQueueBadge");
+  const imageQueueUpdatedAt = document.getElementById("imageQueueUpdatedAt");
+  const refreshImageQueueBtn = document.getElementById("refreshImageQueueBtn");
+  const imageQueueList = document.getElementById("imageQueueList");
+  const queueInProgress = document.getElementById("queueInProgress");
+  const queueQueued = document.getElementById("queueQueued");
+  const queueWaitingPoll = document.getElementById("queueWaitingPoll");
+  const queueRateLimited = document.getElementById("queueRateLimited");
+  const queueDownloadRetry = document.getElementById("queueDownloadRetry");
+  const queueOutputs = document.getElementById("queueOutputs");
   const LOGS_PAGE_SIZE = 20;
   let logsCurrentPage = 1;
   let logsTotalPages = 1;
@@ -802,6 +830,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           ? data.retry_on_error_types.join(",")
           : "timeout,connection,proxy";
         confTokenRotationStrategy.value = String(data.token_rotation_strategy || "round_robin");
+        confImagePerTokenConcurrency.value = Number(data.image_per_token_concurrency || 3);
+        confImagePerRequestConcurrency.value = Number(data.image_per_request_concurrency || 4);
+        confImageRateLimitWaitSeconds.value = Number(data.image_rate_limit_wait_seconds || 180);
+        confImageNetworkRetrySeconds.value = Number(data.image_network_retry_seconds || 180);
+        confImageDownloadAttempts.value = Number(data.image_download_attempts || 5);
         confRefreshIntervalHours.value = Number(data.refresh_interval_hours || 15);
         currentBatchConcurrency = Math.max(1, Math.min(100, Number(data.batch_concurrency || 5)));
         confBatchConcurrency.value = currentBatchConcurrency;
@@ -852,6 +885,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           .map(s => String(s).trim().toLowerCase())
           .filter(Boolean),
         token_rotation_strategy: String(confTokenRotationStrategy.value || "round_robin").trim() || "round_robin",
+        image_per_token_concurrency: Math.max(1, Math.min(10, Number(confImagePerTokenConcurrency.value || 3))),
+        image_per_request_concurrency: Math.max(1, Math.min(10, Number(confImagePerRequestConcurrency.value || 4))),
+        image_rate_limit_wait_seconds: Math.max(30, Math.min(1800, Number(confImageRateLimitWaitSeconds.value || 180))),
+        image_network_retry_seconds: Math.max(30, Math.min(1800, Number(confImageNetworkRetrySeconds.value || 180))),
+        image_download_attempts: Math.max(1, Math.min(10, Number(confImageDownloadAttempts.value || 5))),
         refresh_interval_hours: Number(confRefreshIntervalHours.value || 15),
         batch_concurrency: Math.max(1, Math.min(100, Number(confBatchConcurrency.value || 5))),
         generated_max_size_mb: Math.max(100, Math.min(102400, Number(confGeneratedMaxSizeMb.value || 1024))),
@@ -895,6 +933,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!["round_robin", "random"].includes(payload.token_rotation_strategy)) {
         throw new Error("Token 轮换策略无效");
       }
+      const integerImageSettings = [
+        ["image_per_token_concurrency", 1, 10, "每 Token 图片并发"],
+        ["image_per_request_concurrency", 1, 10, "每请求 output 并发"],
+        ["image_rate_limit_wait_seconds", 30, 1800, "429 等待预算"],
+        ["image_network_retry_seconds", 30, 1800, "网络重试预算"],
+        ["image_download_attempts", 1, 10, "图片下载尝试次数"],
+      ];
+      integerImageSettings.forEach(([key, minimum, maximum, label]) => {
+        if (!Number.isInteger(payload[key]) || payload[key] < minimum || payload[key] > maximum) {
+          throw new Error(`${label}必须是 ${minimum}-${maximum} 的整数`);
+        }
+      });
 
       const res = await fetch("/api/v1/config", {
         method: "PUT",
@@ -930,6 +980,136 @@ document.addEventListener("DOMContentLoaded", async () => {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  const IMAGE_QUEUE_STATE_LABELS = {
+    QUEUED: "排队",
+    UPLOADING: "上传中",
+    SUBMITTING: "提交中",
+    WAITING_POLL: "等待 Poll",
+    RATE_LIMITED: "429 等待",
+    DOWNLOADING: "下载中",
+    DOWNLOAD_RETRY: "下载重试",
+    COMPLETED: "已完成",
+    FAILED: "失败",
+  };
+
+  function imageQueueStateBadge(state) {
+    const normalized = String(state || "QUEUED").toUpperCase();
+    const label = IMAGE_QUEUE_STATE_LABELS[normalized] || normalized;
+    const cssState = normalized.toLowerCase().replace(/_/g, "-");
+    return `<span class="queue-state queue-state-${cssState}">${escapeHtml(label)}</span>`;
+  }
+
+  function formatQueueDelay(nextRunAt) {
+    const value = Number(nextRunAt || 0);
+    if (!Number.isFinite(value) || value <= 0) return "-";
+    const remaining = value - (Date.now() / 1000);
+    if (remaining <= 0) return "即将执行";
+    return `${remaining.toFixed(1)} 秒`;
+  }
+
+  function renderImageQueue(data) {
+    const summary = data?.summary || {};
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const metrics = [
+      [queueInProgress, summary.in_progress],
+      [queueQueued, summary.queued],
+      [queueWaitingPoll, summary.waiting_poll],
+      [queueRateLimited, summary.rate_limited],
+      [queueDownloadRetry, summary.download_retry],
+      [queueOutputs, summary.outputs],
+    ];
+    metrics.forEach(([element, value]) => {
+      if (element) element.textContent = String(Number(value || 0));
+    });
+    if (imageQueueBadge) {
+      const running = Number(summary.in_progress || 0);
+      imageQueueBadge.textContent = String(running);
+      imageQueueBadge.classList.toggle("active", running > 0);
+    }
+    if (!imageQueueList) return;
+    if (!items.length) {
+      imageQueueList.innerHTML = `<div class="empty-state">暂无图片任务</div>`;
+      return;
+    }
+
+    imageQueueList.innerHTML = items.map((item) => {
+      const outputs = Array.isArray(item.outputs) ? item.outputs : [];
+      const requestState = String(item.state || "QUEUED").toUpperCase();
+      const isRunning = !["COMPLETED", "FAILED"].includes(requestState);
+      const outputRows = outputs.map((output) => {
+        const account = String(output.account_name || output.token_id || "-");
+        const retryCount = Number(output.retry_count || 0);
+        const rateWait = Number(output.rate_limit_wait_seconds || 0);
+        const downloadAttempt = Number(output.download_attempt || 0);
+        return `
+          <tr>
+            <td class="queue-output-index">#${Number(output.index || 0) + 1}</td>
+            <td>${imageQueueStateBadge(output.state)}</td>
+            <td class="queue-mono" title="${escapeHtml(account)}">${escapeHtml(account)}</td>
+            <td class="queue-mono" title="${escapeHtml(output.upstream_job_id || "")}">${escapeHtml(output.upstream_job_id || "-")}</td>
+            <td>${retryCount}</td>
+            <td>${escapeHtml(formatQueueDelay(output.next_run_at))}</td>
+            <td>${rateWait.toFixed(1)} 秒</td>
+            <td>${downloadAttempt}</td>
+            <td class="queue-error" title="${escapeHtml(output.last_error || "")}">${escapeHtml(output.last_error || "-")}</td>
+          </tr>`;
+      }).join("");
+      return `
+        <details class="queue-request" ${isRunning ? "open" : ""}>
+          <summary>
+            <span class="queue-request-main">
+              ${imageQueueStateBadge(requestState)}
+              <strong>${escapeHtml(item.model || "-")}</strong>
+              <span>${escapeHtml(item.path || "-")}</span>
+            </span>
+            <span class="queue-request-progress">${Number(item.completed_count || 0)} / ${Number(item.requested_count || 0)} · ${Number(item.elapsed_seconds || 0).toFixed(1)} 秒</span>
+          </summary>
+          <div class="queue-request-meta">
+            <span>Log ID <code>${escapeHtml(item.log_id || item.id || "-")}</code></span>
+            <span>提示词 ${escapeHtml(item.prompt_preview || "-")}</span>
+            ${item.error ? `<span class="queue-request-error">${escapeHtml(item.error)}</span>` : ""}
+          </div>
+          <div class="table-wrapper queue-output-table-wrap">
+            <table class="queue-output-table">
+              <thead><tr><th>Output</th><th>状态</th><th>账号</th><th>Adobe Job</th><th>重试</th><th>下次执行</th><th>429 累计</th><th>下载次数</th><th>最近错误</th></tr></thead>
+              <tbody>${outputRows || `<tr><td colspan="9" class="empty-state">暂无 output</td></tr>`}</tbody>
+            </table>
+          </div>
+        </details>`;
+    }).join("");
+  }
+
+  async function loadImageQueue() {
+    if (imageQueueTimer) {
+      clearTimeout(imageQueueTimer);
+      imageQueueTimer = null;
+    }
+    if (refreshImageQueueBtn) refreshImageQueueBtn.disabled = true;
+    try {
+      const res = await fetch("/api/v1/image-queue?limit=200");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      renderImageQueue(data);
+      if (imageQueueUpdatedAt) {
+        imageQueueUpdatedAt.textContent = `更新于 ${new Date().toLocaleTimeString()} · 每 2 秒自动刷新`;
+      }
+    } catch (err) {
+      console.error("加载图片队列失败", err);
+      if (imageQueueList) {
+        imageQueueList.innerHTML = `<div class="empty-state queue-load-error">图片队列加载失败</div>`;
+      }
+    } finally {
+      if (refreshImageQueueBtn) refreshImageQueueBtn.disabled = false;
+      if (isImageQueueTabActive()) {
+        imageQueueTimer = setTimeout(loadImageQueue, IMAGE_QUEUE_POLL_MS);
+      }
+    }
+  }
+
+  if (refreshImageQueueBtn) {
+    refreshImageQueueBtn.addEventListener("click", loadImageQueue);
   }
 
   function truncateText(value, maxLen) {
@@ -2229,5 +2409,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Init
   loadTokens();
   loadConfig();
+  loadImageQueue();
   renderLogsPagination();
 });

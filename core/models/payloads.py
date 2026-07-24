@@ -199,6 +199,10 @@ def build_image_payload_candidates(
         ]
 
         subject_reference = dict(base_payload)
+        subject_reference["generationMetadata"] = {
+            "module": "image2image",
+            "submodule": "ff-image-generate",
+        }
         subject_reference["referenceBlobs"] = [
             {"id": img_id, "usage": "subject"} for img_id in source_image_ids
         ]

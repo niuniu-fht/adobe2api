@@ -469,6 +469,9 @@ class RequestTrace:
 
         payload["truncated"] = True
         payload["original_size_bytes"] = original_size
+        # Account for this field while shrinking so the final metadata cannot
+        # push an otherwise fitted trace back over the configured limit.
+        payload["stored_size_bytes"] = 0
         stages = payload.get("stages") if isinstance(payload.get("stages"), list) else []
         final_adobe_response_id = next(
             (
@@ -542,7 +545,8 @@ class RequestTrace:
                 preserved["data_omitted"] = True
                 stage.clear()
                 stage.update(preserved)
-        payload["stored_size_bytes"] = encoded_size()
+        for _ in range(3):
+            payload["stored_size_bytes"] = encoded_size()
         return payload
 
     def finalize(

@@ -35,11 +35,13 @@ from core.adobe_client import (
     AdobeRequestError,
     AdobeClient,
     AuthError,
+    ContentPolicyError,
     QuotaExhaustedError,
     UpstreamTemporaryError,
 )
 from core.token_mgr import token_manager
 from core.config_mgr import config_manager
+from core.image_queue import image_task_coordinator
 from core.refresh_mgr import refresh_manager
 from core.stores import (
     ErrorDetailRecord,
@@ -1065,6 +1067,8 @@ def _run_with_token_retries(
                     error=exc,
                     details={"retryable": False},
                 )
+            if isinstance(exc, ContentPolicyError):
+                raise
             raise HTTPException(status_code=status_code, detail=detail)
         except HTTPException as exc:
             err_code = report_error(
@@ -1530,6 +1534,8 @@ def _on_generated_file_written(file_path: Path, old_size: int, new_size: int) ->
         _generated_usage_bytes = max(0, int(_generated_usage_bytes + delta))
         if safe_old_size == 0 and safe_new_size > 0:
             _generated_file_count += 1
+        elif safe_old_size > 0 and safe_new_size == 0:
+            _generated_file_count = max(0, _generated_file_count - 1)
 
     _prune_generated_files_if_needed()
 
@@ -1685,6 +1691,7 @@ app.include_router(
         error_store=error_store,
         trace_store=trace_store,
         live_log_store=live_log_store,
+        image_task_coordinator=image_task_coordinator,
         require_admin_auth=_require_admin_auth,
         is_admin_authenticated=_is_admin_authenticated,
         is_ops_authenticated=_is_ops_authenticated,
@@ -1711,6 +1718,7 @@ app.include_router(
         store=store,
         token_manager=token_manager,
         client=client,
+        image_task_coordinator=image_task_coordinator,
         generated_dir=GENERATED_DIR,
         model_catalog=MODEL_CATALOG,
         video_model_catalog=VIDEO_MODEL_CATALOG,

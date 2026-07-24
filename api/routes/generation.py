@@ -1,10 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 import base64
 import binascii
 import io
 import json
 import re
 import secrets
+import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -24,12 +27,17 @@ except Exception:
 
 from api.schemas import GenerateRequest
 from core.entity_store import entity_store
+from core.adobe_client import (
+    AdobeRequestError,
+    ContentPolicyError,
+    ReferenceImageRequiredError,
+)
+from core.config_mgr import config_manager
 from core.models.openai_images import (
     OpenAIImageRequestError,
     build_legacy_image_options,
     build_native_gpt_image_options,
     encode_image_response_item,
-    image_generation_batch_sizes,
     is_native_gpt_image_model,
     normalize_openai_gemini_model_id,
 )
@@ -43,7 +51,11 @@ from core.models.gemini import (
     normalize_gemini_model_id,
     parse_gemini_generate_request,
 )
-from core.models.payloads import gpt_image_pixels_from_ratio, size_from_ratio
+from core.models.payloads import (
+    gpt_image_pixels_from_ratio,
+    random_image_seed,
+    size_from_ratio,
+)
 from core.models.image_limits import (
     MAX_INPUT_IMAGES,
     MAX_SINGLE_IMAGE_BYTES,
@@ -59,11 +71,42 @@ from core.request_trace import (
 )
 
 
+def generate_with_reference_recovery(
+    *,
+    source_image_ids: list[str],
+    expected_image_count: int,
+    generate_with_ids: Callable[[list[str]], list[dict]],
+    reupload_all: Callable[[], list[str]],
+    cancel_check: Callable[[], None],
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[list[dict], list[str]]:
+    try:
+        return generate_with_ids(source_image_ids), source_image_ids
+    except ReferenceImageRequiredError:
+        for delay in (0.5, 1.0, 2.0):
+            cancel_check()
+            sleep(delay)
+            try:
+                return generate_with_ids(source_image_ids), source_image_ids
+            except ReferenceImageRequiredError:
+                continue
+
+    replacement_ids = reupload_all()
+    if len(replacement_ids) != expected_image_count or any(
+        not str(image_id or "").strip() for image_id in replacement_ids
+    ):
+        raise AdobeRequestError(
+            "reference image re-upload incomplete; generation was not started"
+        )
+    return generate_with_ids(replacement_ids), replacement_ids
+
+
 def build_generation_router(
     *,
     store,
     token_manager,
     client,
+    image_task_coordinator,
     generated_dir: Path,
     model_catalog: dict,
     video_model_catalog: dict,
@@ -92,6 +135,118 @@ def build_generation_router(
     router = APIRouter()
     entity_ref_re = re.compile(r"@entity:([^\s@]+)")
     remote_image_error_message = "输入图片下载失败，请确认图片 URL 可公开访问"
+
+    def _image_config_int(key: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(config_manager.get(key, default) or default)
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def _register_image_queue(
+        request: Request,
+        *,
+        model: str,
+        prompt: str,
+        output_count: int,
+    ) -> str:
+        queue_id = image_task_coordinator.register_request(
+            log_id=str(getattr(request.state, "log_id", "") or ""),
+            path=str(request.url.path),
+            model=model,
+            prompt_preview=prompt.replace("\r", " ").replace("\n", " ")[:180],
+            output_count=output_count,
+        )
+        request.state.image_queue_id = queue_id
+        request.state.generated_output_paths = []
+        request.state.generated_output_paths_lock = threading.Lock()
+        request.state.image_temp_dirs = []
+        return queue_id
+
+    def _track_generated_path(request: Request, path: Path) -> None:
+        lock = getattr(request.state, "generated_output_paths_lock", None)
+        paths = getattr(request.state, "generated_output_paths", None)
+        if not isinstance(paths, list):
+            paths = []
+            request.state.generated_output_paths = paths
+        if lock is None:
+            paths.append(path)
+            return
+        with lock:
+            paths.append(path)
+
+    def _cleanup_generated_paths(request: Request) -> None:
+        paths = getattr(request.state, "generated_output_paths", None)
+        if not isinstance(paths, list):
+            return
+        for path in list(paths):
+            try:
+                old_size = int(Path(path).stat().st_size) if Path(path).exists() else 0
+                Path(path).unlink(missing_ok=True)
+                Path(f"{path}.part").unlink(missing_ok=True)
+                if old_size > 0:
+                    on_generated_file_written(Path(path), old_size, 0)
+            except Exception:
+                pass
+        paths.clear()
+
+    def _cleanup_image_temp_dirs(request: Request) -> None:
+        temp_dirs = getattr(request.state, "image_temp_dirs", None)
+        if not isinstance(temp_dirs, list):
+            return
+        for path in list(temp_dirs):
+            try:
+                shutil.rmtree(Path(path), ignore_errors=True)
+            except Exception:
+                pass
+        temp_dirs.clear()
+
+    def _spool_edit_source_images(
+        request: Request,
+        input_images: list[tuple[bytes, str]],
+    ) -> list[tuple[Path, str]]:
+        if not input_images:
+            return []
+        queue_id = str(getattr(request.state, "image_queue_id", "") or "image")
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"adobe2api-{queue_id[:16]}-"))
+        request.state.image_temp_dirs.append(temp_dir)
+        results: list[tuple[Path, str]] = []
+        suffixes = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }
+        for index, (image_bytes, mime_type) in enumerate(input_images):
+            normalized_mime = str(mime_type or "image/jpeg").lower()
+            final_path = temp_dir / f"reference-{index}{suffixes.get(normalized_mime, '.img')}"
+            part_path = final_path.with_name(f"{final_path.name}.part")
+            part_path.write_bytes(image_bytes)
+            part_path.replace(final_path)
+            results.append((final_path, normalized_mime))
+        return results
+
+    def _finish_image_queue(
+        request: Request, *, succeeded: bool, error: Any = None
+    ) -> None:
+        queue_id = str(getattr(request.state, "image_queue_id", "") or "")
+        if not queue_id:
+            return
+        if not succeeded:
+            image_task_coordinator.cancel_request(queue_id, error)
+            _cleanup_generated_paths(request)
+        _cleanup_image_temp_dirs(request)
+        image_task_coordinator.finish_request(
+            queue_id, succeeded=succeeded, error=error
+        )
+
+    async def _watch_image_disconnect(request: Request, queue_id: str) -> None:
+        while True:
+            if await request.is_disconnected():
+                image_task_coordinator.cancel_request(
+                    queue_id, "client disconnected"
+                )
+                return
+            await asyncio.sleep(0.5)
 
     def _start_image_operation(request: Request, name: str) -> Any:
         trace = get_request_trace(request)
@@ -154,6 +309,12 @@ def build_generation_router(
                 effective_error = error_obj
         if effective_error is not None:
             request.state.trace_final_error = effective_error
+        if int(status_code) >= 400:
+            _finish_image_queue(
+                request,
+                succeeded=False,
+                error=effective_error or f"HTTP {status_code}",
+            )
         trace = get_request_trace(request)
         if trace is not None:
             trace.finish_stage(
@@ -879,13 +1040,20 @@ def build_generation_router(
     def _generate_openai_image_items(
         *,
         request: Request,
-        token: str,
+        token: str | None,
         prompt: str,
         image_options,
         model_conf: dict,
         source_image_ids: list[str] | None = None,
+        distributed_tokens: bool = False,
+        result_cache: Optional[dict[int, dict]] = None,
+        seed_cache: Optional[dict[int, int]] = None,
     ) -> list[dict]:
         source_image_ids = source_image_ids or []
+        result_cache = result_cache if result_cache is not None else {}
+        seed_cache = seed_cache if seed_cache is not None else {}
+        cache_lock = threading.Lock()
+        queue_id = str(getattr(request.state, "image_queue_id", "") or "")
         trace = get_request_trace(request)
         trace_group_id = None
         if trace is not None:
@@ -893,29 +1061,101 @@ def build_generation_router(
                 layer="service",
                 kind="generation_batch",
                 name="生成 OpenAI Images 响应项",
-                parent_id=getattr(
-                    request.state, "trace_token_attempt_id", None
-                ),
+                parent_id=getattr(request.state, "trace_operation_stage_id", None),
                 details={
                     "image_count": image_options.n,
                     "source_image_count": len(source_image_ids),
                 },
             )
 
-        def _image_progress_cb(update: dict):
-            set_request_task_progress(
-                request,
-                task_status=str(update.get("task_status") or "IN_PROGRESS"),
-                task_progress=update.get("task_progress"),
+        def _image_progress_cb(output_index: int, selected_token: str, update: dict):
+            task_status = str(update.get("task_status") or "IN_PROGRESS").upper()
+            queue_state = {
+                "IN_PROGRESS": "WAITING_POLL",
+                "COMPLETED": "COMPLETED",
+                "FAILED": "FAILED",
+            }.get(task_status, task_status)
+            retry_after = update.get("retry_after")
+            if task_status == "RATE_LIMITED" and retry_after:
+                image_task_coordinator.note_token_cooldown(
+                    selected_token, float(retry_after)
+                )
+            image_task_coordinator.update_output(
+                queue_id,
+                output_index,
+                state=queue_state,
+                token=selected_token,
                 upstream_job_id=update.get("upstream_job_id"),
-                retry_after=update.get("retry_after"),
+                retry_count=update.get("retry_count"),
+                next_run_at=(
+                    time.time() + float(retry_after)
+                    if retry_after not in (None, "")
+                    else None
+                ),
+                rate_limit_wait_seconds=update.get("rate_limit_wait_seconds"),
+                download_attempt=update.get("download_attempt"),
                 error=update.get("error"),
             )
+            set_request_task_progress(
+                request,
+                task_status="IN_PROGRESS" if queue_state != "FAILED" else "FAILED",
+                task_progress=update.get("task_progress"),
+                upstream_job_id=update.get("upstream_job_id"),
+                retry_after=retry_after,
+                error=update.get("error"),
+            )
+
+        def _wait_for_token_cooldown(output_index: int, selected_token: str) -> None:
+            while True:
+                image_task_coordinator.raise_if_cancelled(queue_id)
+                remaining = image_task_coordinator.token_cooldown_remaining(
+                    selected_token
+                )
+                if remaining <= 0:
+                    return
+                image_task_coordinator.update_output(
+                    queue_id,
+                    output_index,
+                    state="RATE_LIMITED",
+                    token=selected_token,
+                    next_run_at=time.time() + remaining,
+                    rate_limit_wait_seconds=remaining,
+                )
+                image_task_coordinator.wait(queue_id, remaining)
+
+        def _generation_token_candidates() -> list[str]:
+            try:
+                candidates = [
+                    str(item.get("token") or "").strip()
+                    for item in token_manager.list_active_account_tokens()
+                    if isinstance(item, dict)
+                ]
+                candidates = [token for token in candidates if token]
+                if candidates:
+                    return candidates
+            except Exception:
+                pass
+            try:
+                candidate = str(
+                    token_manager.get_available(
+                        strategy=client.token_rotation_strategy
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                candidate = ""
+            return [candidate] if candidate else []
 
         def _generate_response_item_impl(
             response_index: int,
             trace_output_id: Optional[str],
+            selected_token: str,
         ) -> tuple[int, dict]:
+            with cache_lock:
+                cached = result_cache.get(response_index)
+            if cached is not None:
+                return response_index, cached
+
             job_id = uuid.uuid4().hex
             out_path = generated_dir / f"{job_id}.png"
             old_size = 0
@@ -925,31 +1165,71 @@ def build_generation_router(
             except Exception:
                 old_size = 0
 
-            image_bytes, _meta = client.generate(
-                token=token,
-                prompt=prompt,
-                aspect_ratio=image_options.aspect_ratio,
-                output_resolution=image_options.output_resolution,
-                upstream_model_id=str(
-                    model_conf.get("upstream_model_id") or "gemini-flash"
-                ),
-                upstream_model_version=str(
-                    model_conf.get("upstream_model_version") or "nano-banana-2"
-                ),
-                quality_level=_gpt_image_quality_for_model(model_conf, image_options.response_model),
-                detail_level=model_conf.get("detail_level"),
-                source_image_ids=source_image_ids,
-                requested_size=image_options.requested_size,
-                timeout=client.generate_timeout,
-                out_path=out_path,
-                progress_cb=_image_progress_cb,
-                trace=trace,
-                trace_parent_id=trace_output_id or trace_group_id,
+            with cache_lock:
+                fixed_seed = seed_cache.setdefault(
+                    response_index, random_image_seed()
+                )
+            _wait_for_token_cooldown(response_index, selected_token)
+            try:
+                token_meta = token_manager.get_meta_by_value(selected_token) or {}
+            except Exception:
+                token_meta = {}
+            token_limit = _image_config_int(
+                "image_per_token_concurrency", 3, 1, 10
             )
+            with image_task_coordinator.token_slot(
+                selected_token,
+                limit=token_limit,
+                request_id=queue_id,
+                output_index=response_index,
+            ):
+                image_task_coordinator.update_output(
+                    queue_id,
+                    response_index,
+                    state="SUBMITTING",
+                    token=selected_token,
+                    account_name=(
+                        token_meta.get("token_account_name")
+                        or token_meta.get("token_account_email")
+                    ),
+                )
+                image_bytes, _meta = client.generate(
+                    token=selected_token,
+                    prompt=prompt,
+                    aspect_ratio=image_options.aspect_ratio,
+                    output_resolution=image_options.output_resolution,
+                    upstream_model_id=str(
+                        model_conf.get("upstream_model_id") or "gemini-flash"
+                    ),
+                    upstream_model_version=str(
+                        model_conf.get("upstream_model_version") or "nano-banana-2"
+                    ),
+                    quality_level=_gpt_image_quality_for_model(
+                        model_conf, image_options.response_model
+                    ),
+                    detail_level=model_conf.get("detail_level"),
+                    seed=fixed_seed,
+                    source_image_ids=source_image_ids,
+                    requested_size=image_options.requested_size,
+                    timeout=client.generate_timeout,
+                    out_path=out_path,
+                    progress_cb=lambda update: _image_progress_cb(
+                        response_index, selected_token, update
+                    ),
+                    trace=trace,
+                    trace_parent_id=trace_output_id or trace_group_id,
+                    cancel_check=lambda: image_task_coordinator.raise_if_cancelled(
+                        queue_id
+                    ),
+                    io_call=image_task_coordinator.run_io,
+                    wait_cb=lambda delay: image_task_coordinator.wait(
+                        queue_id, delay
+                    ),
+                )
             if image_bytes is not None:
                 out_path.write_bytes(image_bytes)
             new_size = int(out_path.stat().st_size) if out_path.exists() else 0
-            on_generated_file_written(out_path, old_size, new_size)
+            _track_generated_path(request, out_path)
             image_url = public_image_url(request, job_id)
             set_request_preview(request, image_url, kind="image")
             image_file_bytes = (
@@ -963,6 +1243,18 @@ def build_generation_router(
                 response_format=image_options.response_format,
                 output_format=image_options.output_format,
                 output_compression=image_options.output_compression,
+            )
+            if image_options.response_format == "b64_json":
+                out_path.unlink(missing_ok=True)
+            else:
+                on_generated_file_written(out_path, old_size, new_size)
+            with cache_lock:
+                result_cache[response_index] = item
+            image_task_coordinator.update_output(
+                queue_id,
+                response_index,
+                state="COMPLETED",
+                token=selected_token,
             )
             return response_index, item
 
@@ -980,11 +1272,65 @@ def build_generation_router(
                     },
                 )
             try:
-                result = _generate_response_item_impl(
+                if distributed_tokens:
+                    assigned_token = ""
+                    attempted_tokens: set[str] = set()
+
+                    def select_output_token() -> Optional[str]:
+                        nonlocal assigned_token
+                        if assigned_token:
+                            image_task_coordinator.release_token_assignment(
+                                assigned_token
+                            )
+                            assigned_token = ""
+                        selected = image_task_coordinator.assign_token(
+                            _generation_token_candidates(),
+                            exclude=attempted_tokens,
+                        )
+                        if selected:
+                            assigned_token = selected
+                            attempted_tokens.add(selected)
+                        return selected
+
+                    try:
+                        result = run_with_token_retries(
+                            request=request,
+                            operation_name=f"images.output.{response_index}",
+                            run_once=lambda selected_token: _generate_response_item_impl(
+                                response_index, trace_output_id, selected_token
+                            ),
+                            token_selector=select_output_token,
+                        )
+                    finally:
+                        if assigned_token:
+                            image_task_coordinator.release_token_assignment(
+                                assigned_token
+                            )
+                else:
+                    if not token:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="No active tokens available in the pool",
+                        )
+                    result = _generate_response_item_impl(
+                        response_index, trace_output_id, token
+                    )
+            except ContentPolicyError:
+                image_task_coordinator.cancel_request(queue_id, "图片不安全")
+                image_task_coordinator.update_output(
+                    queue_id,
                     response_index,
-                    trace_output_id,
+                    state="FAILED",
+                    error="图片不安全",
                 )
+                raise
             except Exception as exc:
+                image_task_coordinator.update_output(
+                    queue_id,
+                    response_index,
+                    state="FAILED",
+                    error=exc,
+                )
                 if trace is not None:
                     trace.finish_stage(
                         trace_output_id,
@@ -1005,40 +1351,34 @@ def build_generation_router(
                 )
             return result
 
-        def _generate_response_batch(
-            start_index: int, batch_size: int
-        ) -> list[tuple[int, dict]]:
-            return [
-                _generate_response_item(start_index + offset)
-                for offset in range(batch_size)
-            ]
-
-        batch_sizes = image_generation_batch_sizes(image_options.n)
-        response_pairs: list[tuple[int, dict]] = []
-        if len(batch_sizes) <= 1:
-            response_pairs = _generate_response_batch(
-                0, batch_sizes[0] if batch_sizes else 0
-            )
-        else:
-            with ThreadPoolExecutor(max_workers=len(batch_sizes)) as executor:
-                futures = []
-                start_index = 0
-                for batch_size in batch_sizes:
-                    futures.append(
-                        executor.submit(
-                            _generate_response_batch,
-                            start_index,
-                            batch_size,
-                        )
-                    )
-                    start_index += batch_size
-                for future in as_completed(futures):
-                    response_pairs.extend(future.result())
-
-        result_items = [
-            item
-            for _idx, item in sorted(response_pairs, key=lambda pair: pair[0])
+        pending_indices = [
+            index for index in range(image_options.n) if index not in result_cache
         ]
+        request_limit = _image_config_int(
+            "image_per_request_concurrency", 4, 1, 10
+        )
+        try:
+            image_task_coordinator.run_indexed(
+                request_id=queue_id,
+                indices=pending_indices,
+                worker=lambda index: _generate_response_item(index)[1],
+                max_parallel=request_limit,
+            )
+        except Exception as exc:
+            if trace is not None:
+                trace.finish_stage(
+                    trace_group_id,
+                    status="failed",
+                    error=exc,
+                    details={"generated_count": len(result_cache)},
+                )
+            raise
+
+        if len(result_cache) != image_options.n:
+            raise AdobeRequestError(
+                f"image generation incomplete: expected {image_options.n}, got {len(result_cache)}"
+            )
+        result_items = [result_cache[index] for index in range(image_options.n)]
         if trace is not None:
             trace.finish_stage(
                 trace_group_id,
@@ -1049,12 +1389,15 @@ def build_generation_router(
 
     def _upload_edit_source_images(
         token: str,
-        input_images: list[tuple[bytes, str]],
+        input_images: list[tuple[Any, str]],
         request: Request,
     ) -> list[str]:
         if not input_images:
             return []
         trace = get_request_trace(request)
+        queue_id = str(getattr(request.state, "image_queue_id", "") or "")
+        image_task_coordinator.set_request_state(queue_id, "UPLOADING")
+        image_task_coordinator.set_all_output_state(queue_id, "UPLOADING")
         trace_group_id = None
         if trace is not None:
             trace_group_id = trace.start_stage(
@@ -1067,7 +1410,12 @@ def build_generation_router(
                 details={"image_count": len(input_images)},
             )
 
-        def upload_one(index: int, item: tuple[bytes, str]) -> tuple[int, str]:
+        def upload_one(index: int, item: tuple[Any, str]) -> tuple[int, str]:
+            image_bytes = (
+                item[0].read_bytes()
+                if isinstance(item[0], Path)
+                else bytes(item[0])
+            )
             trace_image_id = None
             if trace is not None:
                 trace_image_id = trace.start_stage(
@@ -1078,19 +1426,66 @@ def build_generation_router(
                     attempt={"image_index": index},
                     request={
                         "image": binary_summary(
-                            item[0],
+                            image_bytes,
+                            filename=(item[0].name if isinstance(item[0], Path) else None),
                             content_type=item[1] or "image/jpeg",
                         )
                     },
                 )
             try:
-                image_id = client.upload_image(
-                    token,
-                    item[0],
-                    item[1] or "image/jpeg",
-                    trace=trace,
-                    trace_parent_id=trace_image_id or trace_group_id,
+                def upload_progress(update: dict) -> None:
+                    state = str(update.get("task_status") or "UPLOADING")
+                    retry_after = update.get("retry_after")
+                    if state.upper() == "RATE_LIMITED" and retry_after:
+                        image_task_coordinator.note_token_cooldown(
+                            token, float(retry_after)
+                        )
+                    image_task_coordinator.set_request_state(
+                        queue_id, state, error=update.get("error")
+                    )
+                    image_task_coordinator.set_all_output_state(
+                        queue_id,
+                        state,
+                        error=update.get("error"),
+                        next_run_at=(
+                            time.time() + float(retry_after)
+                            if retry_after not in (None, "")
+                            else None
+                        ),
+                        rate_limit_wait_seconds=update.get(
+                            "rate_limit_wait_seconds"
+                        ),
+                        retry_count=update.get("retry_count"),
+                    )
+
+                token_limit = _image_config_int(
+                    "image_per_token_concurrency", 3, 1, 10
                 )
+                with image_task_coordinator.token_slot(
+                    token,
+                    limit=token_limit,
+                    request_id=queue_id,
+                    output_index=index,
+                ):
+                    image_id = client.upload_image(
+                        token,
+                        image_bytes,
+                        item[1] or "image/jpeg",
+                        trace=trace,
+                        trace_parent_id=trace_image_id or trace_group_id,
+                        progress_cb=upload_progress,
+                        cancel_check=lambda: image_task_coordinator.raise_if_cancelled(
+                            queue_id
+                        ),
+                        io_call=image_task_coordinator.run_io,
+                        wait_cb=lambda delay: image_task_coordinator.wait(
+                            queue_id, delay
+                        ),
+                    )
+                if not str(image_id or "").strip():
+                    raise AdobeRequestError(
+                        "upload image succeeded but no image id returned"
+                    )
             except Exception as exc:
                 if trace is not None:
                     trace.finish_stage(trace_image_id, status="failed", error=exc)
@@ -1110,12 +1505,19 @@ def build_generation_router(
                 upload_one(index, item)[1]
                 for index, item in enumerate(input_images)
             ]
+            if len(result) != len(input_images) or any(
+                not str(image_id or "").strip() for image_id in result
+            ):
+                raise AdobeRequestError(
+                    "reference image upload incomplete; generation was not started"
+                )
             if trace is not None:
                 trace.finish_stage(
                     trace_group_id,
                     status="succeeded",
                     details={"uploaded_count": len(result)},
                 )
+            image_task_coordinator.set_all_output_state(queue_id, "QUEUED")
             return result
         indexed_images = list(enumerate(input_images))
         source_pairs: list[tuple[int, str]] = []
@@ -1134,12 +1536,19 @@ def build_generation_router(
             image_id
             for _idx, image_id in sorted(source_pairs, key=lambda pair: pair[0])
         ]
+        if len(result) != len(input_images) or any(
+            not str(image_id or "").strip() for image_id in result
+        ):
+            raise AdobeRequestError(
+                "reference image upload incomplete; generation was not started"
+            )
         if trace is not None:
             trace.finish_stage(
                 trace_group_id,
                 status="succeeded",
                 details={"uploaded_count": len(result)},
             )
+        image_task_coordinator.set_all_output_state(queue_id, "QUEUED")
         return result
 
     def _log_resolution_from_image_options(image_options: Any) -> str | None:
@@ -1366,7 +1775,7 @@ def build_generation_router(
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
     @router.post("/v1/images/generations")
-    def openai_generate(data: dict, request: Request):
+    async def openai_generate(data: dict, request: Request):
         _start_image_operation(request, "处理 /v1/images/generations")
         _trace_auth(request)
 
@@ -1484,41 +1893,64 @@ def build_generation_router(
             request_type="generation",
         )
 
+        queue_id = _register_image_queue(
+            request,
+            model=str(image_options.response_model or resolved_model_id),
+            prompt=prompt,
+            output_count=image_options.n,
+        )
+        disconnect_task = asyncio.create_task(
+            _watch_image_disconnect(request, queue_id)
+        )
+
         try:
             set_request_task_progress(
                 request, task_status="IN_PROGRESS", task_progress=0.0
             )
 
-            def _run_once(token: str):
-                response_items = _generate_openai_image_items(
+            response_items = await run_in_threadpool(
+                lambda: _generate_openai_image_items(
                     request=request,
-                    token=token,
+                    token=None,
                     prompt=prompt,
                     image_options=image_options,
                     model_conf=model_conf,
+                    distributed_tokens=True,
                 )
-
-                response_payload = {
-                    "created": int(time.time()),
-                    "data": response_items,
-                }
-                if not image_options.is_native_gpt_image:
-                    response_payload["model"] = resolved_model_id
-                return response_payload
-
-            result = run_with_token_retries(
-                request=request,
-                operation_name="images.generations",
-                run_once=_run_once,
             )
+            result = {
+                "created": int(time.time()),
+                "data": response_items,
+            }
+            if not image_options.is_native_gpt_image:
+                result["model"] = resolved_model_id
             if trace is not None:
                 trace.finish_stage(
                     getattr(request.state, "trace_operation_stage_id", None),
                     status="succeeded",
                     response={"result": sanitize_trace_value(result)},
                 )
+            _finish_image_queue(request, succeeded=True)
             return result
 
+        except ContentPolicyError as exc:
+            set_request_task_progress(
+                request,
+                task_status="FAILED",
+                task_progress=0.0,
+                error="图片不安全",
+            )
+            return _traced_json_response(
+                request,
+                status_code=400,
+                content={
+                    "error": {
+                        "message": "图片不安全",
+                        "type": "invalid_request_error",
+                    }
+                },
+                error=exc,
+            )
         except quota_error_cls:
             error_code = str(
                 getattr(request.state, "log_error_code", "") or ""
@@ -1661,6 +2093,8 @@ def build_generation_router(
                 content=content,
                 error=exc,
             )
+        finally:
+            disconnect_task.cancel()
 
     @router.post("/v1/images/edits")
     async def openai_edit(request: Request):
@@ -1848,25 +2282,123 @@ def build_generation_router(
             input_image_count=len(input_images),
         )
 
+        queue_id = _register_image_queue(
+            request,
+            model=str(image_options.response_model or resolved_model_id),
+            prompt=prompt,
+            output_count=image_options.n,
+        )
+        result_cache: dict[int, dict] = {}
+        seed_cache: dict[int, int] = {}
+        source_image_ids_cache: list[str] = []
+        bound_edit_account: dict[str, str] = {}
+        disconnect_task = asyncio.create_task(
+            _watch_image_disconnect(request, queue_id)
+        )
+
         try:
             set_request_task_progress(
                 request, task_status="IN_PROGRESS", task_progress=0.0
             )
+            spooled_input_images = _spool_edit_source_images(
+                request, input_images
+            )
+
+            def _select_edit_token() -> Optional[str]:
+                if not bound_edit_account:
+                    selected = str(
+                        token_manager.get_available(
+                            strategy=client.token_rotation_strategy
+                        )
+                        or ""
+                    ).strip()
+                    if not selected:
+                        return None
+                    try:
+                        meta = token_manager.get_meta_by_value(selected) or {}
+                    except Exception:
+                        meta = {}
+                    bound_edit_account.update(
+                        {
+                            "account_id": str(meta.get("token_account_id") or ""),
+                            "refresh_profile_id": str(meta.get("refresh_profile_id") or ""),
+                            "initial_token": selected,
+                        }
+                    )
+                    return selected
+
+                account_id = bound_edit_account.get("account_id") or ""
+                if account_id:
+                    selected = token_manager.get_available_for_account(
+                        account_id,
+                        strategy=client.token_rotation_strategy,
+                    )
+                    return str(selected or "").strip() or None
+                profile_id = bound_edit_account.get("refresh_profile_id") or ""
+                if profile_id and hasattr(
+                    token_manager, "get_available_for_refresh_profile"
+                ):
+                    selected = token_manager.get_available_for_refresh_profile(
+                        profile_id,
+                        strategy=client.token_rotation_strategy,
+                    )
+                    return str(selected or "").strip() or None
+                return bound_edit_account.get("initial_token") or None
 
             def _run_once(token: str):
-                source_image_ids = _upload_edit_source_images(
-                    token,
-                    input_images,
-                    request,
-                )
-                response_items = _generate_openai_image_items(
-                    request=request,
-                    token=token,
-                    prompt=prompt,
-                    image_options=image_options,
-                    model_conf=model_conf,
+                nonlocal source_image_ids_cache
+                if len(result_cache) == image_options.n:
+                    response_items = [
+                        result_cache[index] for index in range(image_options.n)
+                    ]
+                    return {
+                        "created": int(time.time()),
+                        "data": response_items,
+                    }
+                if not source_image_ids_cache:
+                    source_image_ids_cache = _upload_edit_source_images(
+                        token,
+                        spooled_input_images,
+                        request,
+                    )
+                source_image_ids = list(source_image_ids_cache)
+                if len(source_image_ids) != len(input_images) or any(
+                    not str(image_id or "").strip()
+                    for image_id in source_image_ids
+                ):
+                    raise AdobeRequestError(
+                        "reference image upload incomplete; generation was not started"
+                    )
+
+                def generate_with_ids(ids: list[str]) -> list[dict]:
+                    return _generate_openai_image_items(
+                        request=request,
+                        token=token,
+                        prompt=prompt,
+                        image_options=image_options,
+                        model_conf=model_conf,
+                        source_image_ids=ids,
+                        result_cache=result_cache,
+                        seed_cache=seed_cache,
+                    )
+
+                response_items, source_image_ids = generate_with_reference_recovery(
                     source_image_ids=source_image_ids,
+                    expected_image_count=len(spooled_input_images),
+                    generate_with_ids=generate_with_ids,
+                    reupload_all=lambda: _upload_edit_source_images(
+                            token,
+                            spooled_input_images,
+                            request,
+                    ),
+                    cancel_check=lambda: image_task_coordinator.raise_if_cancelled(
+                        queue_id
+                    ),
+                    sleep=lambda delay: image_task_coordinator.wait(
+                        queue_id, delay
+                    ),
                 )
+                source_image_ids_cache = list(source_image_ids)
                 response_payload = {
                     "created": int(time.time()),
                     "data": response_items,
@@ -1880,6 +2412,7 @@ def build_generation_router(
                     request=request,
                     operation_name="images.edits",
                     run_once=_run_once,
+                    token_selector=_select_edit_token,
                 )
             )
             if trace is not None:
@@ -1888,8 +2421,27 @@ def build_generation_router(
                     status="succeeded",
                     response={"result": sanitize_trace_value(result)},
                 )
+            _finish_image_queue(request, succeeded=True)
             return result
 
+        except ContentPolicyError as exc:
+            set_request_task_progress(
+                request,
+                task_status="FAILED",
+                task_progress=0.0,
+                error="图片不安全",
+            )
+            return _traced_json_response(
+                request,
+                status_code=400,
+                content={
+                    "error": {
+                        "message": "图片不安全",
+                        "type": "invalid_request_error",
+                    }
+                },
+                error=exc,
+            )
         except quota_error_cls:
             error_code = str(
                 getattr(request.state, "log_error_code", "") or ""
@@ -2032,6 +2584,8 @@ def build_generation_router(
                 content=content,
                 error=exc,
             )
+        finally:
+            disconnect_task.cancel()
 
     @router.post("/api/v1/generate")
     def create_job(data: GenerateRequest, request: Request):

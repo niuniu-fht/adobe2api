@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +27,11 @@ try:
     from curl_cffi.requests import Session as CurlSession
 except Exception:
     CurlSession = None
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 
 logger = logging.getLogger("adobe2api")
@@ -133,10 +139,10 @@ class ContentPolicyError(AdobeRequestError):
         param: str = "prompt",
     ):
         super().__init__(
-            message,
+            "图片不安全",
             status_code=400,
             error_type="content_policy_violation",
-            user_message=message,
+            user_message="图片不安全",
         )
         self.error_code = "content_policy_violation"
         self.upstream_code = str(upstream_code or "").strip()
@@ -153,6 +159,42 @@ class UpstreamTemporaryError(AdobeRequestError):
         super().__init__(message)
         self.status_code = status_code
         self.error_type = str(error_type or "").strip().lower()
+
+
+class ReferenceImageRequiredError(AdobeRequestError):
+    def __init__(self, message: str = "Image edit use case requires a reference image"):
+        super().__init__(
+            message,
+            status_code=400,
+            error_type="invalid_request_error",
+            user_message=message,
+        )
+
+
+class RateLimitWaitExceededError(AdobeRequestError):
+    def __init__(self):
+        super().__init__(
+            "Too many requests. Please try again later.",
+            status_code=400,
+            error_type="invalid_request_error",
+            user_message="Too many requests. Please try again later.",
+        )
+
+
+class ImageStageTerminalError(AdobeRequestError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 502,
+        error_type: str = "server_error",
+    ):
+        super().__init__(
+            message,
+            status_code=status_code,
+            error_type=error_type,
+            user_message=message,
+        )
 
 
 class AdobeClient:
@@ -330,6 +372,94 @@ class AdobeClient:
         return False
 
     @staticmethod
+    def _config_int(key: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(config_manager.get(key, default) or default)
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def _image_network_retry_seconds(self) -> int:
+        return self._config_int("image_network_retry_seconds", 180, 30, 1800)
+
+    def _image_rate_limit_wait_seconds(self) -> int:
+        return self._config_int("image_rate_limit_wait_seconds", 180, 30, 1800)
+
+    def _image_download_attempts(self) -> int:
+        return self._config_int("image_download_attempts", 5, 1, 10)
+
+    @staticmethod
+    def _response_retry_after(response: Any) -> float:
+        try:
+            headers = getattr(response, "headers", {}) or {}
+            return max(
+                0.0,
+                float(
+                    headers.get("retry-after")
+                    or headers.get("Retry-After")
+                    or 0.0
+                ),
+            )
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _retry_delay(attempt: int, *, rate_limited: bool, retry_after: float = 0.0) -> float:
+        schedule = (2.0, 4.0, 8.0, 15.0, 30.0) if rate_limited else (
+            1.0,
+            2.0,
+            4.0,
+            8.0,
+            15.0,
+        )
+        base = schedule[min(max(1, int(attempt)) - 1, len(schedule) - 1)]
+        delay = max(base, float(retry_after or 0.0))
+        return max(0.05, delay * random.uniform(0.8, 1.2))
+
+    @staticmethod
+    def _is_retryable_image_status(status_code: int) -> bool:
+        normalized = int(status_code or 0)
+        return normalized in {408, 425, 451} or 500 <= normalized <= 599
+
+    @staticmethod
+    def _wait_with_cancel(
+        delay: float,
+        *,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> None:
+        deadline = time.time() + max(0.0, float(delay))
+        while True:
+            if cancel_check is not None:
+                cancel_check()
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.25, remaining))
+
+    @staticmethod
+    def _run_image_io(
+        io_call: Optional[Callable[[Callable[[], Any]], Any]],
+        operation: Callable[[], Any],
+    ) -> Any:
+        return io_call(operation) if io_call is not None else operation()
+
+    def _wait_for_image_retry(
+        self,
+        delay: float,
+        *,
+        cancel_check: Optional[Callable[[], None]],
+        wait_cb: Optional[Callable[[float], None]],
+    ) -> None:
+        if cancel_check is not None:
+            cancel_check()
+        if wait_cb is not None:
+            wait_cb(max(0.0, float(delay)))
+            if cancel_check is not None:
+                cancel_check()
+            return
+        self._wait_with_cancel(delay, cancel_check=cancel_check)
+
+    @staticmethod
     def _classify_network_error_type(exc: Exception) -> str:
         text = str(exc or "").strip().lower()
         if "timed out" in text or "timeout" in text:
@@ -425,7 +555,14 @@ class AdobeClient:
             "accept": "application/json",
         }
 
-    def _post_json(self, url: str, headers: dict, payload: dict):
+    def _post_json(
+        self,
+        url: str,
+        headers: dict,
+        payload: dict,
+        *,
+        legacy_451_fallback: bool = True,
+    ):
         session = self._session()
         if session is None:
             try:
@@ -460,7 +597,7 @@ class AdobeClient:
                 f"upstream session error: {exc}",
                 error_type=self._classify_network_error_type(exc),
             )
-        if resp.status_code == 451:
+        if resp.status_code == 451 and legacy_451_fallback:
             try:
                 return requests.post(
                     url,
@@ -490,6 +627,68 @@ class AdobeClient:
                     error_type="network",
                 )
         return resp
+
+    def _post_json_requests_once(self, url: str, headers: dict, payload: dict):
+        try:
+            return requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=60,
+                proxies=self._requests_proxies(),
+            )
+        except requests.Timeout as exc:
+            raise UpstreamTemporaryError(
+                f"upstream timeout: {exc}", error_type="timeout"
+            ) from exc
+        except requests.exceptions.ProxyError as exc:
+            raise UpstreamTemporaryError(
+                f"upstream proxy error: {exc}", error_type="proxy"
+            ) from exc
+        except requests.ConnectionError as exc:
+            raise UpstreamTemporaryError(
+                f"upstream connection error: {exc}", error_type="connection"
+            ) from exc
+        except requests.RequestException as exc:
+            raise UpstreamTemporaryError(
+                f"upstream request error: {exc}", error_type="network"
+            ) from exc
+
+    def _post_image_json(self, url: str, headers: dict, payload: dict):
+        primary_response = None
+        primary_error: Optional[Exception] = None
+        try:
+            primary_response = self._post_json(
+                url,
+                headers,
+                payload,
+                legacy_451_fallback=False,
+            )
+        except ContentPolicyError:
+            raise
+        except Exception as exc:
+            primary_error = exc
+
+        if primary_response is not None:
+            self._raise_if_image_unsafe(primary_response, param="prompt")
+            if primary_response.status_code == 200:
+                try:
+                    primary_data = primary_response.json()
+                except Exception:
+                    primary_data = None
+                if primary_data is not None and self._extract_result_link(
+                    primary_response, primary_data
+                ):
+                    return primary_response
+
+        logger.warning(
+            "image submit primary transport failed; retrying with requests status=%s error=%s",
+            getattr(primary_response, "status_code", None),
+            str(primary_error or ""),
+        )
+        fallback_response = self._post_json_requests_once(url, headers, payload)
+        self._raise_if_image_unsafe(fallback_response, param="prompt")
+        return fallback_response
 
     def _post_bytes(self, url: str, headers: dict, payload: bytes):
         session = self._session()
@@ -691,9 +890,236 @@ class AdobeClient:
             raise UpstreamTemporaryError(
                 f"upstream connection error: {exc}", error_type="connection"
             )
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            body = str(getattr(response, "text", "") or "")[:300]
+            raise UpstreamTemporaryError(
+                f"upstream download failed: {status_code or '?'} {body}",
+                status_code=status_code or None,
+                error_type="download_http",
+            ) from exc
         except requests.RequestException as exc:
             raise UpstreamTemporaryError(f"upstream request error: {exc}", error_type="network")
         return total
+
+    @staticmethod
+    def _validate_downloaded_image(
+        *, image_bytes: Optional[bytes] = None, image_path: Optional[Path] = None
+    ) -> None:
+        if image_path is not None:
+            if not image_path.exists() or image_path.stat().st_size <= 0:
+                raise AdobeRequestError("downloaded image is empty")
+            if Image is None:
+                return
+            try:
+                with Image.open(image_path) as image:
+                    image.verify()
+            except Exception as exc:
+                raise AdobeRequestError(f"downloaded file is not a valid image: {exc}") from exc
+            return
+        if not image_bytes:
+            raise AdobeRequestError("downloaded image is empty")
+        if Image is None:
+            return
+        try:
+            import io
+
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                image.verify()
+        except Exception as exc:
+            raise AdobeRequestError(f"downloaded body is not a valid image: {exc}") from exc
+
+    def _refresh_image_result_url(
+        self,
+        poll_url: str,
+        token: str,
+        *,
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+    ) -> str:
+        resp = self._run_image_io(
+            io_call,
+            lambda: self._get(
+                poll_url, headers=self._poll_headers(token), timeout=60
+            ),
+        )
+        self._raise_if_image_unsafe(resp, param="prompt")
+        if resp.status_code != 200:
+            raise UpstreamTemporaryError(
+                f"refresh result url failed: {resp.status_code} {resp.text[:300]}",
+                status_code=resp.status_code,
+                error_type="status",
+            )
+        data = resp.json()
+        self._raise_if_image_unsafe_data(data, param="prompt")
+        outputs = data.get("outputs") or []
+        return str((((outputs[0] or {}).get("image") or {}).get("presignedUrl")) or "")
+
+    def _download_image_result(
+        self,
+        *,
+        image_url: str,
+        poll_url: str,
+        token: str,
+        out_path: Optional[Path],
+        progress_cb: Optional[Callable[[dict], None]],
+        trace: Optional[RequestTrace],
+        trace_parent_id: Optional[str],
+        upstream_job_id: str,
+        cancel_check: Optional[Callable[[], None]],
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+        wait_cb: Optional[Callable[[float], None]] = None,
+    ) -> Optional[bytes]:
+        attempts = self._image_download_attempts()
+        delays = (1.0, 2.0, 4.0, 8.0)
+        current_url = str(image_url or "")
+        last_error: Optional[Exception] = None
+        part_path = out_path.with_name(f"{out_path.name}.part") if out_path else None
+
+        for attempt in range(1, attempts + 1):
+            if cancel_check is not None:
+                cancel_check()
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "task_status": "DOWNLOADING" if attempt == 1 else "DOWNLOAD_RETRY",
+                        "upstream_job_id": upstream_job_id,
+                        "download_attempt": attempt,
+                        "retry_after": None,
+                    }
+                )
+            download_headers = {"accept": "*/*"}
+            download_stage_id = None
+            if trace is not None:
+                download_stage_id = trace.start_stage(
+                    layer="adobe",
+                    kind="download",
+                    name="下载生成结果",
+                    parent_id=trace_parent_id,
+                    attempt={"number": attempt, "max_attempts": attempts},
+                    request={
+                        "method": "GET",
+                        "url": sanitize_url(current_url),
+                        "headers": sanitize_headers(download_headers),
+                    },
+                )
+            response = None
+            try:
+                if part_path is not None:
+                    part_path.unlink(missing_ok=True)
+                    downloaded_size = self._run_image_io(
+                        io_call,
+                        lambda: self._download_to_file(
+                            current_url,
+                            headers=download_headers,
+                            out_path=part_path,
+                            timeout=30,
+                        ),
+                    )
+                    self._validate_downloaded_image(image_path=part_path)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(part_path, out_path)
+                    if trace is not None:
+                        trace.finish_stage(
+                            download_stage_id,
+                            status="succeeded",
+                            response={
+                                "file": binary_summary(
+                                    out_path.read_bytes(), filename=out_path.name
+                                ),
+                                "size_bytes": downloaded_size,
+                            },
+                        )
+                    return None
+
+                response = self._run_image_io(
+                    io_call,
+                    lambda: self._get(
+                        current_url, headers=download_headers, timeout=30
+                    ),
+                )
+                response.raise_for_status()
+                image_bytes = response.content
+                self._validate_downloaded_image(image_bytes=image_bytes)
+                if trace is not None:
+                    trace.finish_stage(
+                        download_stage_id,
+                        status="succeeded",
+                        response={
+                            **response_snapshot(response, include_body=False),
+                            "body": binary_summary(
+                                image_bytes,
+                                content_type=response.headers.get("content-type"),
+                            ),
+                        },
+                    )
+                return image_bytes
+            except ContentPolicyError:
+                if trace is not None:
+                    trace.finish_stage(
+                        download_stage_id, status="failed", error="图片不安全"
+                    )
+                raise
+            except Exception as exc:
+                last_error = exc
+                if part_path is not None:
+                    part_path.unlink(missing_ok=True)
+                if trace is not None:
+                    trace.finish_stage(
+                        download_stage_id,
+                        status="failed",
+                        response=(
+                            response_snapshot(response) if response is not None else None
+                        ),
+                        error=exc,
+                    )
+                if attempt >= attempts:
+                    break
+                delay = delays[min(attempt - 1, len(delays) - 1)]
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "task_status": "DOWNLOAD_RETRY",
+                            "upstream_job_id": upstream_job_id,
+                            "download_attempt": attempt,
+                            "retry_after": int(delay),
+                            "error": str(exc),
+                        }
+                    )
+                self._wait_for_image_retry(
+                    delay,
+                    cancel_check=cancel_check,
+                    wait_cb=wait_cb,
+                )
+                status_code = int(getattr(exc, "status_code", 0) or 0)
+                error_text = str(exc or "").lower()
+                should_refresh_url = status_code in {401, 403, 404} or any(
+                    marker in error_text
+                    for marker in ("expired", "signature", "presigned")
+                )
+                if should_refresh_url:
+                    try:
+                        refreshed_url = self._refresh_image_result_url(
+                            poll_url, token, io_call=io_call
+                        )
+                        if refreshed_url:
+                            current_url = refreshed_url
+                    except ContentPolicyError:
+                        raise
+                    except Exception as refresh_exc:
+                        logger.warning(
+                            "failed to refresh generated image url attempt=%s error=%s",
+                            attempt,
+                            refresh_exc,
+                        )
+
+        if part_path is not None:
+            part_path.unlink(missing_ok=True)
+        raise ImageStageTerminalError(
+            f"download failed after {attempts} attempts: {last_error}",
+            status_code=502,
+            error_type="download",
+        )
 
     def upload_image(
         self,
@@ -703,6 +1129,10 @@ class AdobeClient:
         *,
         trace: Optional[RequestTrace] = None,
         trace_parent_id: Optional[str] = None,
+        progress_cb: Optional[Callable[[dict], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+        wait_cb: Optional[Callable[[float], None]] = None,
     ) -> str:
         if not image_bytes:
             raise AdobeRequestError("image is empty")
@@ -730,12 +1160,117 @@ class AdobeClient:
                     ),
                 },
             )
-        try:
-            resp = self._post_bytes(self.upload_url, headers=headers, payload=image_bytes)
-        except Exception as exc:
-            if trace is not None:
-                trace.finish_stage(trace_stage_id, status="failed", error=exc)
-            raise
+        network_started: Optional[float] = None
+        rate_limit_started: Optional[float] = None
+        retry_count = 0
+        while True:
+            if cancel_check is not None:
+                cancel_check()
+            try:
+                resp = self._run_image_io(
+                    io_call,
+                    lambda: self._post_bytes(
+                        self.upload_url, headers=headers, payload=image_bytes
+                    ),
+                )
+            except UpstreamTemporaryError as exc:
+                now = time.time()
+                network_started = network_started or now
+                if now - network_started >= self._image_network_retry_seconds():
+                    if trace is not None:
+                        trace.finish_stage(trace_stage_id, status="failed", error=exc)
+                    raise ImageStageTerminalError(
+                        str(exc), status_code=502, error_type="network"
+                    ) from exc
+                retry_count += 1
+                delay = self._retry_delay(retry_count, rate_limited=False)
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "task_status": "UPLOADING",
+                            "retry_after": int(round(delay)),
+                            "retry_count": retry_count,
+                            "error": str(exc),
+                        }
+                    )
+                self._wait_for_image_retry(
+                    delay, cancel_check=cancel_check, wait_cb=wait_cb
+                )
+                continue
+            try:
+                self._raise_if_image_unsafe(resp, param="image")
+            except ContentPolicyError as exc:
+                if trace is not None:
+                    trace.finish_stage(
+                        trace_stage_id,
+                        status="failed",
+                        response=response_snapshot(resp),
+                        error=exc,
+                    )
+                raise
+            is_rate_limited = (
+                resp.status_code == 429 or self._is_rate_limited_response(resp)
+            )
+            if is_rate_limited:
+                now = time.time()
+                rate_limit_started = rate_limit_started or now
+                elapsed = now - rate_limit_started
+                if elapsed >= self._image_rate_limit_wait_seconds():
+                    if trace is not None:
+                        trace.finish_stage(
+                            trace_stage_id,
+                            status="failed",
+                            response=response_snapshot(resp),
+                            error="rate limit wait exceeded",
+                        )
+                    raise RateLimitWaitExceededError()
+                retry_count += 1
+                delay = self._retry_delay(
+                    retry_count,
+                    rate_limited=True,
+                    retry_after=self._response_retry_after(resp),
+                )
+                delay = min(
+                    delay,
+                    max(0.05, self._image_rate_limit_wait_seconds() - elapsed),
+                )
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "task_status": "RATE_LIMITED",
+                            "retry_after": int(round(delay)),
+                            "retry_count": retry_count,
+                            "rate_limit_wait_seconds": min(
+                                self._image_rate_limit_wait_seconds(), elapsed + delay
+                            ),
+                            "error": resp.text[:300],
+                        }
+                    )
+                self._wait_for_image_retry(
+                    delay, cancel_check=cancel_check, wait_cb=wait_cb
+                )
+                continue
+            if self._is_retryable_image_status(resp.status_code):
+                now = time.time()
+                network_started = network_started or now
+                if now - network_started >= self._image_network_retry_seconds():
+                    break
+                retry_count += 1
+                delay = self._retry_delay(retry_count, rate_limited=False)
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "task_status": "UPLOADING",
+                            "retry_after": int(round(delay)),
+                            "retry_count": retry_count,
+                            "error": resp.text[:300],
+                        }
+                    )
+                self._wait_for_image_retry(
+                    delay, cancel_check=cancel_check, wait_cb=wait_cb
+                )
+                continue
+            break
         if trace is not None:
             trace.finish_stage(
                 trace_stage_id,
@@ -747,7 +1282,7 @@ class AdobeClient:
             raise AuthError("Token invalid or expired")
         if resp.status_code != 200:
             if resp.status_code in (429, 451) or resp.status_code >= 500:
-                raise UpstreamTemporaryError(
+                raise ImageStageTerminalError(
                     f"upload image failed: {resp.status_code} {resp.text[:300]}",
                     status_code=resp.status_code,
                     error_type="status",
@@ -783,16 +1318,13 @@ class AdobeClient:
             return
         if not isinstance(data, dict):
             return
-        upstream_code = str(data.get("error_code") or data.get("code") or "").strip()
+        upstream_code = (
+            str(data.get("error_code") or data.get("code") or "").strip().lower()
+        )
         if upstream_code == "image_unsafe":
-            message = str(data.get("message") or "").strip()
-            if (
-                not message
-                or message
-                == "The generated images appear to be unsafe. Try modifying the prompts or the seeds."
-            ):
-                message = "生成的图片可能不安全，请修改提示词或更换随机种子后重试。"
-            raise ContentPolicyError(message, upstream_code=upstream_code, param=param)
+            raise ContentPolicyError(
+                "图片不安全", upstream_code=upstream_code, param=param
+            )
         for value in data.values():
             if isinstance(value, (dict, list)):
                 AdobeClient._raise_if_image_unsafe_data(value, param=param)
@@ -804,6 +1336,50 @@ class AdobeClient:
         except Exception:
             data = {}
         AdobeClient._raise_if_image_unsafe_data(data, param=param)
+
+    @staticmethod
+    def _is_rate_limited_data(data: Any) -> bool:
+        if isinstance(data, list):
+            return any(AdobeClient._is_rate_limited_data(item) for item in data)
+        if not isinstance(data, dict):
+            return False
+        code = str(data.get("error_code") or data.get("code") or "").strip().lower()
+        if code == "rate_limited":
+            return True
+        return any(
+            AdobeClient._is_rate_limited_data(value)
+            for value in data.values()
+            if isinstance(value, (dict, list))
+        )
+
+    @staticmethod
+    def _is_rate_limited_response(resp: Any) -> bool:
+        return AdobeClient._is_rate_limited_data(AdobeClient._json_or_empty(resp))
+
+    @staticmethod
+    def _is_reference_image_required_data(data: Any) -> bool:
+        if isinstance(data, list):
+            return any(AdobeClient._is_reference_image_required_data(item) for item in data)
+        if not isinstance(data, dict):
+            return False
+        code = str(data.get("error_code") or data.get("code") or "").strip().lower()
+        message = str(data.get("message") or "").strip().lower()
+        if code == "bad_request" and "requires a reference image" in message:
+            return True
+        return any(
+            AdobeClient._is_reference_image_required_data(value)
+            for value in data.values()
+            if isinstance(value, (dict, list))
+        )
+
+    @staticmethod
+    def _raise_if_reference_image_required(resp) -> None:
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        if AdobeClient._is_reference_image_required_data(data):
+            raise ReferenceImageRequiredError()
 
     @staticmethod
     def _entity_urn_from_data(data: Any) -> str:
@@ -1610,6 +2186,9 @@ class AdobeClient:
         progress_cb: Optional[Callable[[dict], None]] = None,
         trace: Optional[RequestTrace] = None,
         trace_parent_id: Optional[str] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+        wait_cb: Optional[Callable[[float], None]] = None,
     ) -> tuple[Optional[bytes], dict]:
         submit_resp = None
         first_error = ""
@@ -1646,16 +2225,141 @@ class AdobeClient:
                         "body": sanitize_trace_value(payload),
                     },
                 )
-            try:
-                submit_resp = self._post_json(
-                    self.submit_url,
-                    headers=submit_headers,
-                    payload=payload,
+            network_started: Optional[float] = None
+            rate_limit_started: Optional[float] = None
+            submit_retry_count = 0
+            while True:
+                if cancel_check is not None:
+                    cancel_check()
+                if progress_cb is not None:
+                    progress_cb({"task_status": "SUBMITTING"})
+                try:
+                    submit_resp = self._run_image_io(
+                        io_call,
+                        lambda: self._post_image_json(
+                            self.submit_url,
+                            headers=submit_headers,
+                            payload=payload,
+                        ),
+                    )
+                except ContentPolicyError:
+                    if trace is not None:
+                        trace.finish_stage(
+                            submit_stage_id,
+                            status="failed",
+                            error="图片不安全",
+                        )
+                    raise
+                except UpstreamTemporaryError as exc:
+                    now = time.time()
+                    network_started = network_started or now
+                    if now - network_started >= self._image_network_retry_seconds():
+                        if trace is not None:
+                            trace.finish_stage(
+                                submit_stage_id, status="failed", error=exc
+                            )
+                        raise ImageStageTerminalError(
+                            str(exc), status_code=502, error_type="network"
+                        ) from exc
+                    submit_retry_count += 1
+                    delay = self._retry_delay(
+                        submit_retry_count, rate_limited=False
+                    )
+                    if progress_cb is not None:
+                        progress_cb(
+                            {
+                                "task_status": "SUBMITTING",
+                                "retry_after": int(round(delay)),
+                                "retry_count": submit_retry_count,
+                                "error": str(exc),
+                            }
+                        )
+                    self._wait_for_image_retry(
+                        delay, cancel_check=cancel_check, wait_cb=wait_cb
+                    )
+                    continue
+
+                try:
+                    self._raise_if_image_unsafe(submit_resp, param="prompt")
+                    self._raise_if_reference_image_required(submit_resp)
+                except (ContentPolicyError, ReferenceImageRequiredError) as exc:
+                    if trace is not None:
+                        trace.finish_stage(
+                            submit_stage_id,
+                            status="failed",
+                            response=response_snapshot(submit_resp),
+                            error=exc,
+                        )
+                    raise
+                is_rate_limited = (
+                    submit_resp.status_code == 429
+                    or self._is_rate_limited_response(submit_resp)
                 )
-            except Exception as exc:
-                if trace is not None:
-                    trace.finish_stage(submit_stage_id, status="failed", error=exc)
-                raise
+                if is_rate_limited:
+                    now = time.time()
+                    rate_limit_started = rate_limit_started or now
+                    elapsed = now - rate_limit_started
+                    if elapsed >= self._image_rate_limit_wait_seconds():
+                        if trace is not None:
+                            trace.finish_stage(
+                                submit_stage_id,
+                                status="failed",
+                                response=response_snapshot(submit_resp),
+                                error="rate limit wait exceeded",
+                            )
+                        raise RateLimitWaitExceededError()
+                    submit_retry_count += 1
+                    delay = self._retry_delay(
+                        submit_retry_count,
+                        rate_limited=True,
+                        retry_after=self._response_retry_after(submit_resp),
+                    )
+                    delay = min(
+                        delay,
+                        max(
+                            0.05,
+                            self._image_rate_limit_wait_seconds() - elapsed,
+                        ),
+                    )
+                    if progress_cb is not None:
+                        progress_cb(
+                            {
+                                "task_status": "RATE_LIMITED",
+                                "retry_after": int(round(delay)),
+                                "retry_count": submit_retry_count,
+                                "rate_limit_wait_seconds": min(
+                                    self._image_rate_limit_wait_seconds(), elapsed + delay
+                                ),
+                                "error": submit_resp.text[:300],
+                            }
+                        )
+                    self._wait_for_image_retry(
+                        delay, cancel_check=cancel_check, wait_cb=wait_cb
+                    )
+                    continue
+                if self._is_retryable_image_status(submit_resp.status_code):
+                    now = time.time()
+                    network_started = network_started or now
+                    if now - network_started >= self._image_network_retry_seconds():
+                        break
+                    submit_retry_count += 1
+                    delay = self._retry_delay(
+                        submit_retry_count, rate_limited=False
+                    )
+                    if progress_cb is not None:
+                        progress_cb(
+                            {
+                                "task_status": "SUBMITTING",
+                                "retry_after": int(round(delay)),
+                                "retry_count": submit_retry_count,
+                                "error": submit_resp.text[:300],
+                            }
+                        )
+                    self._wait_for_image_retry(
+                        delay, cancel_check=cancel_check, wait_cb=wait_cb
+                    )
+                    continue
+                break
             if trace is not None:
                 trace.finish_stage(
                     submit_stage_id,
@@ -1696,7 +2400,7 @@ class AdobeClient:
             )
             self._raise_if_image_unsafe(submit_resp, param="prompt")
             if submit_resp.status_code in (429, 451) or submit_resp.status_code >= 500:
-                raise UpstreamTemporaryError(
+                raise ImageStageTerminalError(
                     f"submit failed: {submit_resp.status_code} {submit_resp.text[:300]}",
                     status_code=submit_resp.status_code,
                     error_type="status",
@@ -1732,14 +2436,22 @@ class AdobeClient:
         start = time.time()
         latest = {}
         sleep_time = 3.0
+        poll_network_started: Optional[float] = None
+        poll_rate_limit_started: Optional[float] = None
+        poll_retry_count = 0
         while True:
+            if cancel_check is not None:
+                cancel_check()
             poll_headers = self._poll_headers(token)
             poll_started = time.perf_counter()
             try:
-                poll_resp = self._get(
-                    poll_url, headers=poll_headers, timeout=60
+                poll_resp = self._run_image_io(
+                    io_call,
+                    lambda: self._get(
+                        poll_url, headers=poll_headers, timeout=60
+                    ),
                 )
-            except Exception as exc:
+            except UpstreamTemporaryError as exc:
                 if trace is not None:
                     trace.add_stage(
                         layer="adobe",
@@ -1754,7 +2466,28 @@ class AdobeClient:
                         },
                         error=exc,
                     )
-                raise
+                now = time.time()
+                poll_network_started = poll_network_started or now
+                if now - poll_network_started >= self._image_network_retry_seconds():
+                    raise ImageStageTerminalError(
+                        str(exc), status_code=502, error_type="network"
+                    ) from exc
+                poll_retry_count += 1
+                delay = self._retry_delay(poll_retry_count, rate_limited=False)
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "task_status": "WAITING_POLL",
+                            "upstream_job_id": upstream_job_id,
+                            "retry_after": int(round(delay)),
+                            "retry_count": poll_retry_count,
+                            "error": str(exc),
+                        }
+                    )
+                self._wait_for_image_retry(
+                    delay, cancel_check=cancel_check, wait_cb=wait_cb
+                )
+                continue
             poll_duration_ms = (time.perf_counter() - poll_started) * 1000.0
             poll_snapshot = response_snapshot(poll_resp)
             poll_body = poll_snapshot.get("body")
@@ -1786,15 +2519,75 @@ class AdobeClient:
                         or body_status.upper() in {"FAILED", "CANCELLED", "ERROR"}
                     ),
                 )
+            self._raise_if_image_unsafe(poll_resp, param="prompt")
+            is_rate_limited = (
+                poll_resp.status_code == 429
+                or self._is_rate_limited_response(poll_resp)
+            )
+            if is_rate_limited:
+                now = time.time()
+                poll_rate_limit_started = poll_rate_limit_started or now
+                elapsed = now - poll_rate_limit_started
+                if elapsed >= self._image_rate_limit_wait_seconds():
+                    raise RateLimitWaitExceededError()
+                poll_retry_count += 1
+                delay = self._retry_delay(
+                    poll_retry_count,
+                    rate_limited=True,
+                    retry_after=self._response_retry_after(poll_resp),
+                )
+                delay = min(
+                    delay,
+                    max(0.05, self._image_rate_limit_wait_seconds() - elapsed),
+                )
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "task_status": "RATE_LIMITED",
+                            "upstream_job_id": upstream_job_id,
+                            "retry_after": int(round(delay)),
+                            "retry_count": poll_retry_count,
+                            "rate_limit_wait_seconds": min(
+                                self._image_rate_limit_wait_seconds(), elapsed + delay
+                            ),
+                            "error": poll_resp.text[:300],
+                        }
+                    )
+                self._wait_for_image_retry(
+                    delay, cancel_check=cancel_check, wait_cb=wait_cb
+                )
+                continue
             if poll_resp.status_code != 200:
                 logger.error(
                     "poll failed status=%s body=%s",
                     poll_resp.status_code,
                     poll_resp.text[:500],
                 )
-                self._raise_if_image_unsafe(poll_resp, param="prompt")
-                if poll_resp.status_code in (429, 451) or poll_resp.status_code >= 500:
-                    raise UpstreamTemporaryError(
+                if self._is_retryable_image_status(poll_resp.status_code):
+                    now = time.time()
+                    poll_network_started = poll_network_started or now
+                    if now - poll_network_started < self._image_network_retry_seconds():
+                        poll_retry_count += 1
+                        delay = self._retry_delay(
+                            poll_retry_count, rate_limited=False
+                        )
+                        if progress_cb is not None:
+                            progress_cb(
+                                {
+                                    "task_status": "WAITING_POLL",
+                                    "upstream_job_id": upstream_job_id,
+                                    "retry_after": int(round(delay)),
+                                    "retry_count": poll_retry_count,
+                                    "error": poll_resp.text[:300],
+                                }
+                            )
+                        self._wait_for_image_retry(
+                            delay,
+                            cancel_check=cancel_check,
+                            wait_cb=wait_cb,
+                        )
+                        continue
+                    raise ImageStageTerminalError(
                         f"poll failed: {poll_resp.status_code} {poll_resp.text[:300]}",
                         status_code=poll_resp.status_code,
                         error_type="status",
@@ -1832,98 +2625,19 @@ class AdobeClient:
                 image_url = ((outputs[0] or {}).get("image") or {}).get("presignedUrl")
                 if not image_url:
                     raise AdobeRequestError("job finished without image url")
-                if out_path is not None:
-                    download_headers = {"accept": "*/*"}
-                    download_stage_id = None
-                    if trace is not None:
-                        download_stage_id = trace.start_stage(
-                            layer="adobe",
-                            kind="download",
-                            name="下载生成结果",
-                            parent_id=trace_parent_id,
-                            request={
-                                "method": "GET",
-                                "url": sanitize_url(image_url),
-                                "headers": sanitize_headers(download_headers),
-                            },
-                        )
-                    try:
-                        downloaded_size = self._download_to_file(
-                            image_url,
-                            headers=download_headers,
-                            out_path=out_path,
-                            timeout=30,
-                        )
-                    except Exception as exc:
-                        if trace is not None:
-                            trace.finish_stage(
-                                download_stage_id,
-                                status="failed",
-                                error=exc,
-                            )
-                        raise
-                    if trace is not None:
-                        trace.finish_stage(
-                            download_stage_id,
-                            status="succeeded",
-                            response={
-                                "file": binary_summary(
-                                    out_path.read_bytes(),
-                                    filename=out_path.name,
-                                ),
-                                "size_bytes": downloaded_size,
-                            },
-                        )
-                    image_bytes = None
-                else:
-                    download_headers = {"accept": "*/*"}
-                    download_stage_id = None
-                    if trace is not None:
-                        download_stage_id = trace.start_stage(
-                            layer="adobe",
-                            kind="download",
-                            name="下载生成结果",
-                            parent_id=trace_parent_id,
-                            request={
-                                "method": "GET",
-                                "url": sanitize_url(image_url),
-                                "headers": sanitize_headers(download_headers),
-                            },
-                        )
-                    img_resp = None
-                    try:
-                        img_resp = self._get(
-                            image_url,
-                            headers=download_headers,
-                            timeout=30,
-                        )
-                        img_resp.raise_for_status()
-                        image_bytes = img_resp.content
-                    except Exception as exc:
-                        if trace is not None:
-                            trace.finish_stage(
-                                download_stage_id,
-                                status="failed",
-                                response=(
-                                    response_snapshot(img_resp)
-                                    if img_resp is not None
-                                    else None
-                                ),
-                                error=exc,
-                            )
-                        raise
-                    if trace is not None:
-                        trace.finish_stage(
-                            download_stage_id,
-                            status="succeeded",
-                            response={
-                                **response_snapshot(img_resp, include_body=False),
-                                "body": binary_summary(
-                                    image_bytes,
-                                    content_type=img_resp.headers.get("content-type"),
-                                ),
-                            },
-                        )
+                image_bytes = self._download_image_result(
+                    image_url=image_url,
+                    poll_url=poll_url,
+                    token=token,
+                    out_path=out_path,
+                    progress_cb=progress_cb,
+                    trace=trace,
+                    trace_parent_id=trace_parent_id,
+                    upstream_job_id=upstream_job_id,
+                    cancel_check=cancel_check,
+                    io_call=io_call,
+                    wait_cb=wait_cb,
+                )
                 if progress_cb:
                     try:
                         progress_cb(
@@ -1973,7 +2687,26 @@ class AdobeClient:
                     except Exception:
                         pass
                 raise AdobeRequestError("generation timed out")
-            time.sleep(sleep_time)
+            if progress_cb is not None:
+                try:
+                    progress_cb(
+                        {
+                            "task_status": "WAITING_POLL",
+                            "task_progress": progress_val
+                            if progress_val is not None
+                            else 0.0,
+                            "upstream_job_id": upstream_job_id,
+                            "retry_after": int(
+                                poll_resp.headers.get("retry-after") or sleep_time
+                            ),
+                        }
+                    )
+                except Exception:
+                    pass
+            poll_delay = self._response_retry_after(poll_resp) or sleep_time
+            self._wait_for_image_retry(
+                poll_delay, cancel_check=cancel_check, wait_cb=wait_cb
+            )
 
     def generate(
         self,
@@ -1985,6 +2718,7 @@ class AdobeClient:
         upstream_model_version: str = "nano-banana-2",
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
+        seed: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
         requested_size: Optional[dict] = None,
         timeout: int = 180,
@@ -1992,97 +2726,34 @@ class AdobeClient:
         progress_cb: Optional[Callable[[dict], None]] = None,
         trace: Optional[RequestTrace] = None,
         trace_parent_id: Optional[str] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+        wait_cb: Optional[Callable[[float], None]] = None,
     ) -> tuple[Optional[bytes], dict]:
         is_gpt_image = str(upstream_model_id or "").strip().lower() == "gpt-image"
-        if not is_gpt_image:
-            return self._generate_once(
-                token=token,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-                output_resolution=output_resolution,
-                upstream_model_id=upstream_model_id,
-                upstream_model_version=upstream_model_version,
-                quality_level=quality_level,
-                detail_level=detail_level,
-                source_image_ids=source_image_ids,
-                requested_size=requested_size,
-                timeout=timeout,
-                out_path=out_path,
-                progress_cb=progress_cb,
-                trace=trace,
-                trace_parent_id=trace_parent_id,
-            )
-        max_seed_attempts = 3 if is_gpt_image else 1
-        attempted_seeds: set[int] = set()
-        current_seed = None
-
-        for seed_attempt in range(1, max_seed_attempts + 1):
-            if current_seed is None or current_seed in attempted_seeds:
-                current_seed = random_image_seed()
-                while current_seed in attempted_seeds:
-                    current_seed = random_image_seed()
-            attempted_seeds.add(current_seed)
-            logger.info(
-                "image generation seed attempt=%s/%s model=%s seed=%s",
-                seed_attempt,
-                max_seed_attempts,
-                upstream_model_id,
-                current_seed,
-            )
-            try:
-                seed_stage_id = None
-                if trace is not None:
-                    seed_stage_id = trace.start_stage(
-                        layer="service",
-                        kind="seed_attempt",
-                        name="执行 GPT Image seed attempt",
-                        parent_id=trace_parent_id,
-                        attempt={
-                            "number": seed_attempt,
-                            "max_attempts": max_seed_attempts,
-                            "seed": current_seed,
-                        },
-                    )
-                result = self._generate_once(
-                    token=token,
-                    prompt=prompt,
-                    aspect_ratio=aspect_ratio,
-                    output_resolution=output_resolution,
-                    upstream_model_id=upstream_model_id,
-                    upstream_model_version=upstream_model_version,
-                    quality_level=quality_level,
-                    detail_level=detail_level,
-                    seed=current_seed,
-                    source_image_ids=source_image_ids,
-                    requested_size=requested_size,
-                    timeout=timeout,
-                    out_path=out_path,
-                    progress_cb=progress_cb,
-                    trace=trace,
-                    trace_parent_id=seed_stage_id or trace_parent_id,
-                )
-                if trace is not None:
-                    trace.finish_stage(seed_stage_id, status="succeeded")
-                return result
-            except ContentPolicyError as exc:
-                if trace is not None:
-                    trace.finish_stage(
-                        seed_stage_id,
-                        status="failed",
-                        error=exc,
-                        details={"will_retry": seed_attempt < max_seed_attempts},
-                    )
-                if seed_attempt >= max_seed_attempts:
-                    raise
-                logger.warning(
-                    "Adobe returned image_unsafe; retrying with a new seed model=%s seed=%s",
-                    upstream_model_id,
-                    current_seed,
-                )
-                current_seed = None
-            except Exception as exc:
-                if trace is not None:
-                    trace.finish_stage(seed_stage_id, status="failed", error=exc)
-                raise
-
-        raise AdobeRequestError("image generation failed")
+        fixed_seed = (
+            int(seed)
+            if is_gpt_image and seed is not None
+            else (random_image_seed() if is_gpt_image else None)
+        )
+        return self._generate_once(
+            token=token,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            output_resolution=output_resolution,
+            upstream_model_id=upstream_model_id,
+            upstream_model_version=upstream_model_version,
+            quality_level=quality_level,
+            detail_level=detail_level,
+            seed=fixed_seed,
+            source_image_ids=source_image_ids,
+            requested_size=requested_size,
+            timeout=timeout,
+            out_path=out_path,
+            progress_cb=progress_cb,
+            trace=trace,
+            trace_parent_id=trace_parent_id,
+            cancel_check=cancel_check,
+            io_call=io_call,
+            wait_cb=wait_cb,
+        )
