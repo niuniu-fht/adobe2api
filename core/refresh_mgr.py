@@ -234,8 +234,10 @@ class RefreshManager:
         items.sort(key=lambda x: int(x.get("imported_at") or 0), reverse=True)
         return items
 
-    @staticmethod
-    def _cookie_string_from_input(cookie_input) -> str:
+    @classmethod
+    def _cookie_string_from_input(cls, cookie_input, _depth: int = 0) -> str:
+        if _depth > 3:
+            return ""
         if isinstance(cookie_input, str):
             text = cookie_input.strip()
             if text.lower().startswith("cookie:"):
@@ -249,6 +251,7 @@ class RefreshManager:
                 cookie_input = cookie_input.get("cookie")
             else:
                 return ""
+            return cls._cookie_string_from_input(cookie_input, _depth + 1)
 
         if isinstance(cookie_input, list):
             pairs: List[str] = []
