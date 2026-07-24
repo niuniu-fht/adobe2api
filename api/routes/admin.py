@@ -727,16 +727,26 @@ def build_admin_router(
     @router.post("/api/v1/refresh-profiles/export-cookies")
     def refresh_profiles_export_cookies(req: ExportSelectionRequest, request: Request):
         require_admin_auth(request)
-        token_ids = req.ids if isinstance(req.ids, list) else None
+        requested_ids = req.ids if isinstance(req.ids, list) else None
         profile_ids = None
-        if token_ids:
+        if requested_ids:
             profile_ids = []
             seen = set()
-            for tid in token_ids:
-                token_info = token_manager.get_by_id(str(tid or "").strip())
-                if not token_info:
-                    continue
-                profile_id = str(token_info.get("refresh_profile_id") or "").strip()
+            known_profile_ids = {
+                str(item.get("id") or "").strip()
+                for item in refresh_manager.list_profiles()
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+            for raw_id in requested_ids:
+                item_id = str(raw_id or "").strip()
+                token_info = token_manager.get_by_id(item_id)
+                profile_id = (
+                    str(token_info.get("refresh_profile_id") or "").strip()
+                    if token_info
+                    else ""
+                )
+                if not profile_id and item_id in known_profile_ids:
+                    profile_id = item_id
                 if not profile_id or profile_id in seen:
                     continue
                 seen.add(profile_id)
@@ -745,7 +755,7 @@ def build_admin_router(
         return {
             "status": "ok",
             "total": len(exported),
-            "selected": bool(token_ids),
+            "selected": bool(requested_ids),
             "items": exported,
         }
 

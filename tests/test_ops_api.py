@@ -181,3 +181,40 @@ def test_refresh_profile_batch_management_accepts_ops_key(monkeypatch):
     assert removed.status_code == 200
     assert removed.json()["status"] == "partial"
     assert deleted == ["profile-a"]
+
+
+def test_refresh_profile_cookie_export_accepts_profile_and_token_ids(monkeypatch):
+    monkeypatch.setenv("ADOBE2API_OPS_KEY", "OPS_TEST_KEY")
+    selected = []
+
+    monkeypatch.setattr(
+        app_module.refresh_manager,
+        "list_profiles",
+        lambda: [{"id": "profile-a"}, {"id": "profile-b"}],
+    )
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "get_by_id",
+        lambda token_id: (
+            {"refresh_profile_id": "profile-b"} if token_id == "token-b" else None
+        ),
+    )
+
+    def fake_export(profile_ids):
+        selected.extend(profile_ids)
+        return [
+            {"id": profile_id, "name": profile_id, "cookie": "SECRET"}
+            for profile_id in profile_ids
+        ]
+
+    monkeypatch.setattr(app_module.refresh_manager, "export_cookies", fake_export)
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/api/v1/refresh-profiles/export-cookies",
+        headers={"X-Adobe2API-Ops-Key": "OPS_TEST_KEY"},
+        json={"ids": ["profile-a", "token-b", "missing"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
+    assert selected == ["profile-a", "profile-b"]
