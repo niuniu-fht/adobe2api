@@ -45,6 +45,8 @@ class ConfigUpdateRequest(BaseModel):
     image_per_request_concurrency: Optional[int] = None
     image_rate_limit_wait_seconds: Optional[int] = None
     image_network_retry_seconds: Optional[int] = None
+    image_submit_rate_limit_wait_seconds: Optional[int] = None
+    image_submit_network_retry_seconds: Optional[int] = None
     image_download_attempts: Optional[int] = None
     batch_concurrency: Optional[int] = None
     generated_max_size_mb: Optional[int] = None

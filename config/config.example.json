@@ -13,6 +13,11 @@
   "retry_on_status_codes": [429, 451, 500, 502, 503, 504],
   "retry_on_error_types": ["timeout", "connection", "proxy"],
   "token_rotation_strategy": "round_robin",
+  "image_rate_limit_wait_seconds": 180,
+  "image_network_retry_seconds": 180,
+  "image_submit_rate_limit_wait_seconds": 60,
+  "image_submit_network_retry_seconds": 60,
+  "image_download_attempts": 5,
   "gpt_image_quality": "low",
   "gpt_image_model_qualities": {
     "gpt-image-2-high": "medium"

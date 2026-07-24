@@ -34,6 +34,8 @@ class ConfigManager:
             "image_per_request_concurrency": 4,
             "image_rate_limit_wait_seconds": 180,
             "image_network_retry_seconds": 180,
+            "image_submit_rate_limit_wait_seconds": 60,
+            "image_submit_network_retry_seconds": 60,
             "image_download_attempts": 5,
             "batch_concurrency": 5,
             "generated_max_size_mb": 1024,

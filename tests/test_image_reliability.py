@@ -248,7 +248,7 @@ def test_rate_limited_json_reuses_frozen_submit_payload(monkeypatch):
     )
     monkeypatch.setattr(client, "_post_image_json", submit)
     monkeypatch.setattr(client, "_wait_with_cancel", lambda *args, **kwargs: None)
-    monkeypatch.setattr(client, "_retry_delay", lambda *args, **kwargs: 2.0)
+    monkeypatch.setattr(client, "_submit_retry_delay", lambda *args, **kwargs: 2.0)
     monkeypatch.setattr(
         client,
         "_get",
@@ -280,8 +280,8 @@ def test_rate_limit_budget_returns_fixed_terminal_error(monkeypatch):
         client, "_build_payload_candidates", lambda **kwargs: [{"seed": 99}]
     )
     monkeypatch.setattr(client, "_post_image_json", submit)
-    monkeypatch.setattr(client, "_image_rate_limit_wait_seconds", lambda: 180)
-    monkeypatch.setattr(client, "_retry_delay", lambda *args, **kwargs: 30.0)
+    monkeypatch.setattr(client, "_image_submit_rate_limit_wait_seconds", lambda: 180)
+    monkeypatch.setattr(client, "_submit_retry_delay", lambda *args, **kwargs: 30.0)
     monkeypatch.setattr(client, "_wait_with_cancel", wait)
     monkeypatch.setattr("core.adobe_client.time.time", lambda: clock[0])
 
@@ -294,6 +294,31 @@ def test_rate_limit_budget_returns_fixed_terminal_error(monkeypatch):
     assert clock[0] == 1180.0
     assert len(payload_ids) == 7
     assert len(set(payload_ids)) == 1
+
+
+def test_image_submit_retry_delay_uses_capped_schedule(monkeypatch):
+    client = AdobeClient()
+    monkeypatch.setattr("core.adobe_client.random.uniform", lambda _low, _high: 1.0)
+
+    expected = [2.0, 4.0, 4.0, 4.0, 4.0, 4.0]
+    assert [
+        client._submit_retry_delay(attempt, rate_limited=False)
+        for attempt in range(1, 7)
+    ] == expected
+    assert [
+        client._submit_retry_delay(attempt, rate_limited=True)
+        for attempt in range(1, 7)
+    ] == expected
+    assert client._submit_retry_delay(1, rate_limited=True, retry_after=9.0) == 9.0
+
+
+def test_image_submit_retry_budgets_default_to_60_seconds():
+    client = AdobeClient()
+
+    assert client._image_submit_network_retry_seconds() == 60
+    assert client._image_submit_rate_limit_wait_seconds() == 60
+    assert client._image_network_retry_seconds() == 180
+    assert client._image_rate_limit_wait_seconds() == 180
 
 
 def _png_bytes():

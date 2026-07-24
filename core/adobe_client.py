@@ -385,6 +385,12 @@ class AdobeClient:
     def _image_rate_limit_wait_seconds(self) -> int:
         return self._config_int("image_rate_limit_wait_seconds", 180, 30, 1800)
 
+    def _image_submit_network_retry_seconds(self) -> int:
+        return self._config_int("image_submit_network_retry_seconds", 60, 30, 1800)
+
+    def _image_submit_rate_limit_wait_seconds(self) -> int:
+        return self._config_int("image_submit_rate_limit_wait_seconds", 60, 30, 1800)
+
     def _image_download_attempts(self) -> int:
         return self._config_int("image_download_attempts", 5, 1, 10)
 
@@ -415,6 +421,16 @@ class AdobeClient:
         base = schedule[min(max(1, int(attempt)) - 1, len(schedule) - 1)]
         delay = max(base, float(retry_after or 0.0))
         return max(0.05, delay * random.uniform(0.8, 1.2))
+
+    @staticmethod
+    def _submit_retry_delay(
+        attempt: int, *, rate_limited: bool, retry_after: float = 0.0
+    ) -> float:
+        if rate_limited and float(retry_after or 0.0) > 0:
+            return max(0.05, float(retry_after))
+        schedule = (2.0, 4.0, 4.0, 4.0, 4.0)
+        base = schedule[min(max(1, int(attempt)) - 1, len(schedule) - 1)]
+        return max(0.05, base * random.uniform(0.8, 1.2))
 
     @staticmethod
     def _is_retryable_image_status(status_code: int) -> bool:
@@ -2253,7 +2269,7 @@ class AdobeClient:
                 except UpstreamTemporaryError as exc:
                     now = time.time()
                     network_started = network_started or now
-                    if now - network_started >= self._image_network_retry_seconds():
+                    if now - network_started >= self._image_submit_network_retry_seconds():
                         if trace is not None:
                             trace.finish_stage(
                                 submit_stage_id, status="failed", error=exc
@@ -2262,7 +2278,7 @@ class AdobeClient:
                             str(exc), status_code=502, error_type="network"
                         ) from exc
                     submit_retry_count += 1
-                    delay = self._retry_delay(
+                    delay = self._submit_retry_delay(
                         submit_retry_count, rate_limited=False
                     )
                     if progress_cb is not None:
@@ -2299,7 +2315,7 @@ class AdobeClient:
                     now = time.time()
                     rate_limit_started = rate_limit_started or now
                     elapsed = now - rate_limit_started
-                    if elapsed >= self._image_rate_limit_wait_seconds():
+                    if elapsed >= self._image_submit_rate_limit_wait_seconds():
                         if trace is not None:
                             trace.finish_stage(
                                 submit_stage_id,
@@ -2309,7 +2325,7 @@ class AdobeClient:
                             )
                         raise RateLimitWaitExceededError()
                     submit_retry_count += 1
-                    delay = self._retry_delay(
+                    delay = self._submit_retry_delay(
                         submit_retry_count,
                         rate_limited=True,
                         retry_after=self._response_retry_after(submit_resp),
@@ -2318,7 +2334,7 @@ class AdobeClient:
                         delay,
                         max(
                             0.05,
-                            self._image_rate_limit_wait_seconds() - elapsed,
+                            self._image_submit_rate_limit_wait_seconds() - elapsed,
                         ),
                     )
                     if progress_cb is not None:
@@ -2328,7 +2344,8 @@ class AdobeClient:
                                 "retry_after": int(round(delay)),
                                 "retry_count": submit_retry_count,
                                 "rate_limit_wait_seconds": min(
-                                    self._image_rate_limit_wait_seconds(), elapsed + delay
+                                    self._image_submit_rate_limit_wait_seconds(),
+                                    elapsed + delay,
                                 ),
                                 "error": submit_resp.text[:300],
                             }
@@ -2340,10 +2357,10 @@ class AdobeClient:
                 if self._is_retryable_image_status(submit_resp.status_code):
                     now = time.time()
                     network_started = network_started or now
-                    if now - network_started >= self._image_network_retry_seconds():
+                    if now - network_started >= self._image_submit_network_retry_seconds():
                         break
                     submit_retry_count += 1
-                    delay = self._retry_delay(
+                    delay = self._submit_retry_delay(
                         submit_retry_count, rate_limited=False
                     )
                     if progress_cb is not None:

@@ -600,6 +600,8 @@ def build_admin_router(
             "image_per_request_concurrency": (1, 10),
             "image_rate_limit_wait_seconds": (30, 1800),
             "image_network_retry_seconds": (30, 1800),
+            "image_submit_rate_limit_wait_seconds": (30, 1800),
+            "image_submit_network_retry_seconds": (30, 1800),
             "image_download_attempts": (1, 10),
         }
         for key, (minimum, maximum) in image_integer_settings.items():
