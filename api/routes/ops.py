@@ -16,6 +16,7 @@ OPS_CAPABILITIES = [
     "refresh_profiles",
     "config",
     "generated_media",
+    "image_queue",
 ]
 
 

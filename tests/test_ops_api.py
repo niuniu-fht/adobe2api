@@ -30,6 +30,7 @@ def test_ops_snapshot_and_admin_config_are_redacted(monkeypatch):
     payload = snapshot.json()
     assert payload["ops_api_version"] == 1
     assert "cursor_logs" in payload["capabilities"]
+    assert "image_queue" in payload["capabilities"]
     assert "requests" in payload
     assert "successful" in payload["requests"]
     assert "today" in payload["requests"]
