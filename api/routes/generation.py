@@ -1123,17 +1123,12 @@ def build_generation_router(
                 )
                 image_task_coordinator.wait(queue_id, remaining)
 
-        def _generation_token_candidates(
-            excluded_account_ids: Optional[set[str]] = None,
-        ) -> list[str]:
-            excluded_accounts = excluded_account_ids or set()
+        def _generation_token_candidates() -> list[str]:
             try:
                 candidates = [
                     str(item.get("token") or "").strip()
                     for item in token_manager.list_active_account_tokens()
                     if isinstance(item, dict)
-                    and str(item.get("account_id") or "").strip()
-                    not in excluded_accounts
                 ]
                 candidates = [token for token in candidates if token]
                 if candidates:
@@ -1149,16 +1144,6 @@ def build_generation_router(
                 ).strip()
             except Exception:
                 candidate = ""
-            if candidate and excluded_accounts:
-                try:
-                    candidate_meta = token_manager.get_meta_by_value(candidate) or {}
-                except Exception:
-                    candidate_meta = {}
-                candidate_account_id = str(
-                    candidate_meta.get("token_account_id") or ""
-                ).strip()
-                if candidate_account_id in excluded_accounts:
-                    candidate = ""
             return [candidate] if candidate else []
 
         def _generate_response_item_impl(
@@ -1288,23 +1273,29 @@ def build_generation_router(
                 )
             try:
                 if distributed_tokens:
-                    assigned_token = ""
                     attempted_tokens: set[str] = set()
                     attempted_account_ids: set[str] = set()
 
                     def select_output_token() -> Optional[str]:
-                        nonlocal assigned_token
-                        if assigned_token:
-                            image_task_coordinator.release_token_assignment(
-                                assigned_token
-                            )
-                            assigned_token = ""
+                        candidates = _generation_token_candidates()
+                        excluded_tokens = set(attempted_tokens)
+                        for candidate in candidates:
+                            try:
+                                candidate_meta = (
+                                    token_manager.get_meta_by_value(candidate) or {}
+                                )
+                            except Exception:
+                                candidate_meta = {}
+                            candidate_account_id = str(
+                                candidate_meta.get("token_account_id") or ""
+                            ).strip()
+                            if candidate_account_id in attempted_account_ids:
+                                excluded_tokens.add(candidate)
                         selected = image_task_coordinator.assign_token(
-                            _generation_token_candidates(attempted_account_ids),
-                            exclude=attempted_tokens,
+                            candidates,
+                            exclude=excluded_tokens,
                         )
                         if selected:
-                            assigned_token = selected
                             attempted_tokens.add(selected)
                             try:
                                 selected_meta = (
@@ -1319,20 +1310,14 @@ def build_generation_router(
                                 attempted_account_ids.add(selected_account_id)
                         return selected
 
-                    try:
-                        result = run_with_token_retries(
-                            request=request,
-                            operation_name=f"images.output.{response_index}",
-                            run_once=lambda selected_token: _generate_response_item_impl(
-                                response_index, trace_output_id, selected_token
-                            ),
-                            token_selector=select_output_token,
-                        )
-                    finally:
-                        if assigned_token:
-                            image_task_coordinator.release_token_assignment(
-                                assigned_token
-                            )
+                    result = run_with_token_retries(
+                        request=request,
+                        operation_name=f"images.output.{response_index}",
+                        run_once=lambda selected_token: _generate_response_item_impl(
+                            response_index, trace_output_id, selected_token
+                        ),
+                        token_selector=select_output_token,
+                    )
                 else:
                     if not token:
                         raise HTTPException(
@@ -2373,38 +2358,52 @@ def build_generation_router(
                     source_image_ids_cache = []
 
                 try:
-                    preferred = str(
-                        token_manager.get_available(
-                            strategy=client.token_rotation_strategy
-                        )
-                        or ""
-                    ).strip()
-                except Exception:
-                    preferred = ""
-                try:
                     account_tokens = token_manager.list_active_account_tokens()
                 except Exception:
                     account_tokens = []
-                ordered_tokens = [preferred] + [
+                ordered_tokens = [
                     str(item.get("token") or "").strip()
                     for item in account_tokens
                     if isinstance(item, dict)
                 ]
-                for selected in dict.fromkeys(
-                    value for value in ordered_tokens if value
-                ):
+                if not any(ordered_tokens):
                     try:
-                        meta = token_manager.get_meta_by_value(selected) or {}
+                        fallback = str(
+                            token_manager.get_available(
+                                strategy=client.token_rotation_strategy
+                            )
+                            or ""
+                        ).strip()
+                    except Exception:
+                        fallback = ""
+                    ordered_tokens = [fallback] if fallback else []
+
+                candidates = list(
+                    dict.fromkeys(value for value in ordered_tokens if value)
+                )
+                round_robin_excluded = set(excluded_edit_tokens)
+                candidate_meta: dict[str, dict] = {}
+                for candidate in candidates:
+                    try:
+                        meta = token_manager.get_meta_by_value(candidate) or {}
                     except Exception:
                         meta = {}
+                    candidate_meta[candidate] = meta
                     account_id = str(meta.get("token_account_id") or "").strip()
                     profile_id = str(meta.get("refresh_profile_id") or "").strip()
-                    if (
-                        selected in excluded_edit_tokens
-                        or (account_id and account_id in excluded_edit_account_ids)
-                        or (profile_id and profile_id in excluded_edit_profile_ids)
+                    if (account_id and account_id in excluded_edit_account_ids) or (
+                        profile_id and profile_id in excluded_edit_profile_ids
                     ):
-                        continue
+                        round_robin_excluded.add(candidate)
+
+                selected = image_task_coordinator.assign_token(
+                    candidates,
+                    exclude=round_robin_excluded,
+                )
+                if selected:
+                    meta = candidate_meta.get(selected) or {}
+                    account_id = str(meta.get("token_account_id") or "").strip()
+                    profile_id = str(meta.get("refresh_profile_id") or "").strip()
                     bound_edit_account.update(
                         {
                             "account_id": account_id,

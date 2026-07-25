@@ -288,6 +288,7 @@ def test_images_endpoint_auth_switches_to_a_different_account(monkeypatch):
         lambda token: active.discard(token),
     )
     monkeypatch.setattr(app_module.token_manager, "report_success", lambda _token: None)
+
     monkeypatch.setattr(
         app_module.image_task_coordinator,
         "assign_token",
@@ -338,6 +339,7 @@ def test_images_edits_switch_reuploads_reference_with_next_account(
     active = {item["token"] for item in records}
     upload_attempts = []
     generation_attempts = []
+    selection_attempts = []
 
     monkeypatch.setattr(
         app_module.token_manager,
@@ -373,6 +375,20 @@ def test_images_edits_switch_reuploads_reference_with_next_account(
     )
     monkeypatch.setattr(app_module.token_manager, "report_success", lambda _token: None)
 
+    def assign_edit_token(candidates, exclude=None):
+        selected = next(
+            (token for token in candidates if token not in (exclude or set())),
+            None,
+        )
+        selection_attempts.append(selected)
+        return selected
+
+    monkeypatch.setattr(
+        app_module.image_task_coordinator,
+        "assign_token",
+        assign_edit_token,
+    )
+
     def upload_image(token, *_args, **_kwargs):
         upload_attempts.append(token)
         if token == "TOKEN-A1" and failure_kind == "upload_auth":
@@ -403,6 +419,7 @@ def test_images_edits_switch_reuploads_reference_with_next_account(
     )
 
     assert response.status_code == 200
+    assert selection_attempts == ["TOKEN-A1", "TOKEN-B"]
     assert upload_attempts == ["TOKEN-A1", "TOKEN-B"]
     if failure_kind == "upload_auth":
         assert generation_attempts == [("TOKEN-B", ["reference-b"])]
@@ -771,13 +788,53 @@ def test_coordinator_timed_queue_wakes_by_deadline():
     assert wake_order == ["fast", "slow"]
 
 
-def test_coordinator_uses_least_assigned_tokens_and_prioritizes_unsafe():
+def test_coordinator_uses_one_round_robin_for_new_requests_and_429_retries():
     coordinator = ImageTaskCoordinator(io_workers=4)
-    first = coordinator.assign_token(["A", "B"])
-    second = coordinator.assign_token(["A", "B"])
-    assert {first, second} == {"A", "B"}
-    coordinator.release_token_assignment(first or "")
-    coordinator.release_token_assignment(second or "")
+    candidates = ["A", "B", "C"]
+
+    first_request = coordinator.assign_token(candidates)
+    submit_429_retry = coordinator.assign_token(candidates, exclude={"A"})
+    next_request = coordinator.assign_token(candidates)
+    following_request = coordinator.assign_token(candidates)
+
+    assert [first_request, submit_429_retry, next_request, following_request] == [
+        "A",
+        "B",
+        "C",
+        "A",
+    ]
+
+
+def test_coordinator_round_robin_is_even_across_concurrent_requests():
+    coordinator = ImageTaskCoordinator(io_workers=4)
+    candidates = ["A", "B", "C", "D"]
+    barrier = threading.Barrier(12)
+    selected = []
+    selected_lock = threading.Lock()
+
+    def choose_token():
+        barrier.wait()
+        token = coordinator.assign_token(candidates)
+        with selected_lock:
+            selected.append(token)
+
+    threads = [threading.Thread(target=choose_token) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert len(selected) == 12
+    assert {token: selected.count(token) for token in candidates} == {
+        "A": 3,
+        "B": 3,
+        "C": 3,
+        "D": 3,
+    }
+
+
+def test_coordinator_prioritizes_unsafe():
+    coordinator = ImageTaskCoordinator(io_workers=4)
 
     request_id = coordinator.register_request(
         log_id="log-unsafe",

@@ -28,7 +28,6 @@ class ImageTaskCoordinator:
         self._token_semaphores: dict[str, tuple[int, threading.BoundedSemaphore]] = {}
         self._token_cooldowns: dict[str, float] = {}
         self._token_active: dict[str, int] = {}
-        self._token_assigned: dict[str, int] = {}
         self._assignment_cursor = 0
         self._retention_seconds = max(10, int(retention_seconds))
         self._schedule_condition = threading.Condition()
@@ -310,45 +309,35 @@ class ImageTaskCoordinator:
         exclude: Optional[set[str]] = None,
     ) -> Optional[str]:
         excluded = exclude or set()
-        values = [
-            str(token or "").strip()
-            for token in candidates
-            if str(token or "").strip() and str(token or "").strip() not in excluded
-        ]
+        values = list(
+            dict.fromkeys(
+                str(token or "").strip()
+                for token in candidates
+                if str(token or "").strip()
+            )
+        )
         if not values:
             return None
         with self._lock:
+            selectable = [token for token in values if token not in excluded]
+            if not selectable:
+                return None
             available = [
                 token
-                for token in values
+                for token in selectable
                 if float(self._token_cooldowns.get(self.token_id(token)) or 0.0)
                 <= time.time()
             ]
-            pool = available or values
-            start = self._assignment_cursor % len(pool)
-            ordered = pool[start:] + pool[:start]
-            selected = min(
-                ordered,
-                key=lambda token: (
-                    int(self._token_assigned.get(self.token_id(token)) or 0),
-                    int(self._token_active.get(self.token_id(token)) or 0),
-                ),
+            pool = set(available or selectable)
+            start = self._assignment_cursor % len(values)
+            selected = next(
+                values[(start + offset) % len(values)]
+                for offset in range(len(values))
+                if values[(start + offset) % len(values)] in pool
             )
-            key = self.token_id(selected)
-            self._token_assigned[key] = int(self._token_assigned.get(key) or 0) + 1
-            self._assignment_cursor = (start + 1) % max(1, len(pool))
+            selected_index = values.index(selected)
+            self._assignment_cursor = (selected_index + 1) % len(values)
             return selected
-
-    def release_token_assignment(self, token: str) -> None:
-        key = self.token_id(token)
-        if not key:
-            return
-        with self._lock:
-            remaining = int(self._token_assigned.get(key) or 0) - 1
-            if remaining > 0:
-                self._token_assigned[key] = remaining
-            else:
-                self._token_assigned.pop(key, None)
 
     @contextmanager
     def token_slot(
