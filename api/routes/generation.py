@@ -1123,12 +1123,17 @@ def build_generation_router(
                 )
                 image_task_coordinator.wait(queue_id, remaining)
 
-        def _generation_token_candidates() -> list[str]:
+        def _generation_token_candidates(
+            excluded_account_ids: Optional[set[str]] = None,
+        ) -> list[str]:
+            excluded_accounts = excluded_account_ids or set()
             try:
                 candidates = [
                     str(item.get("token") or "").strip()
                     for item in token_manager.list_active_account_tokens()
                     if isinstance(item, dict)
+                    and str(item.get("account_id") or "").strip()
+                    not in excluded_accounts
                 ]
                 candidates = [token for token in candidates if token]
                 if candidates:
@@ -1144,6 +1149,16 @@ def build_generation_router(
                 ).strip()
             except Exception:
                 candidate = ""
+            if candidate and excluded_accounts:
+                try:
+                    candidate_meta = token_manager.get_meta_by_value(candidate) or {}
+                except Exception:
+                    candidate_meta = {}
+                candidate_account_id = str(
+                    candidate_meta.get("token_account_id") or ""
+                ).strip()
+                if candidate_account_id in excluded_accounts:
+                    candidate = ""
             return [candidate] if candidate else []
 
         def _generate_response_item_impl(
@@ -1275,6 +1290,7 @@ def build_generation_router(
                 if distributed_tokens:
                     assigned_token = ""
                     attempted_tokens: set[str] = set()
+                    attempted_account_ids: set[str] = set()
 
                     def select_output_token() -> Optional[str]:
                         nonlocal assigned_token
@@ -1284,12 +1300,23 @@ def build_generation_router(
                             )
                             assigned_token = ""
                         selected = image_task_coordinator.assign_token(
-                            _generation_token_candidates(),
+                            _generation_token_candidates(attempted_account_ids),
                             exclude=attempted_tokens,
                         )
                         if selected:
                             assigned_token = selected
                             attempted_tokens.add(selected)
+                            try:
+                                selected_meta = (
+                                    token_manager.get_meta_by_value(selected) or {}
+                                )
+                            except Exception:
+                                selected_meta = {}
+                            selected_account_id = str(
+                                selected_meta.get("token_account_id") or ""
+                            ).strip()
+                            if selected_account_id:
+                                attempted_account_ids.add(selected_account_id)
                         return selected
 
                     try:
@@ -2292,6 +2319,9 @@ def build_generation_router(
         seed_cache: dict[int, int] = {}
         source_image_ids_cache: list[str] = []
         bound_edit_account: dict[str, str] = {}
+        excluded_edit_account_ids: set[str] = set()
+        excluded_edit_profile_ids: set[str] = set()
+        excluded_edit_tokens: set[str] = set()
         disconnect_task = asyncio.create_task(
             _watch_image_disconnect(request, queue_id)
         )
@@ -2305,45 +2335,109 @@ def build_generation_router(
             )
 
             def _select_edit_token() -> Optional[str]:
-                if not bound_edit_account:
-                    selected = str(
+                nonlocal source_image_ids_cache
+
+                if bound_edit_account:
+                    account_id = bound_edit_account.get("account_id") or ""
+                    profile_id = bound_edit_account.get("refresh_profile_id") or ""
+                    selected = ""
+                    if account_id:
+                        selected = str(
+                            token_manager.get_available_for_account(
+                                account_id,
+                                strategy=client.token_rotation_strategy,
+                            )
+                            or ""
+                        ).strip()
+                    elif profile_id and hasattr(
+                        token_manager, "get_available_for_refresh_profile"
+                    ):
+                        selected = str(
+                            token_manager.get_available_for_refresh_profile(
+                                profile_id,
+                                strategy=client.token_rotation_strategy,
+                            )
+                            or ""
+                        ).strip()
+                    else:
+                        selected = str(
+                            bound_edit_account.get("initial_token") or ""
+                        ).strip()
+                    if selected and selected not in excluded_edit_tokens:
+                        return selected
+                    if account_id:
+                        excluded_edit_account_ids.add(account_id)
+                    if profile_id:
+                        excluded_edit_profile_ids.add(profile_id)
+                    bound_edit_account.clear()
+                    source_image_ids_cache = []
+
+                try:
+                    preferred = str(
                         token_manager.get_available(
                             strategy=client.token_rotation_strategy
                         )
                         or ""
                     ).strip()
-                    if not selected:
-                        return None
+                except Exception:
+                    preferred = ""
+                try:
+                    account_tokens = token_manager.list_active_account_tokens()
+                except Exception:
+                    account_tokens = []
+                ordered_tokens = [preferred] + [
+                    str(item.get("token") or "").strip()
+                    for item in account_tokens
+                    if isinstance(item, dict)
+                ]
+                for selected in dict.fromkeys(
+                    value for value in ordered_tokens if value
+                ):
                     try:
                         meta = token_manager.get_meta_by_value(selected) or {}
                     except Exception:
                         meta = {}
+                    account_id = str(meta.get("token_account_id") or "").strip()
+                    profile_id = str(meta.get("refresh_profile_id") or "").strip()
+                    if (
+                        selected in excluded_edit_tokens
+                        or (account_id and account_id in excluded_edit_account_ids)
+                        or (profile_id and profile_id in excluded_edit_profile_ids)
+                    ):
+                        continue
                     bound_edit_account.update(
                         {
-                            "account_id": str(meta.get("token_account_id") or ""),
-                            "refresh_profile_id": str(meta.get("refresh_profile_id") or ""),
+                            "account_id": account_id,
+                            "refresh_profile_id": profile_id,
                             "initial_token": selected,
                         }
                     )
                     return selected
+                return None
 
-                account_id = bound_edit_account.get("account_id") or ""
+            def _exclude_invalid_edit_account(invalid_token: str) -> None:
+                nonlocal source_image_ids_cache
+                try:
+                    meta = token_manager.get_meta_by_value(invalid_token) or {}
+                except Exception:
+                    meta = {}
+                account_id = str(
+                    meta.get("token_account_id")
+                    or bound_edit_account.get("account_id")
+                    or ""
+                ).strip()
+                profile_id = str(
+                    meta.get("refresh_profile_id")
+                    or bound_edit_account.get("refresh_profile_id")
+                    or ""
+                ).strip()
+                excluded_edit_tokens.add(str(invalid_token or "").strip())
                 if account_id:
-                    selected = token_manager.get_available_for_account(
-                        account_id,
-                        strategy=client.token_rotation_strategy,
-                    )
-                    return str(selected or "").strip() or None
-                profile_id = bound_edit_account.get("refresh_profile_id") or ""
-                if profile_id and hasattr(
-                    token_manager, "get_available_for_refresh_profile"
-                ):
-                    selected = token_manager.get_available_for_refresh_profile(
-                        profile_id,
-                        strategy=client.token_rotation_strategy,
-                    )
-                    return str(selected or "").strip() or None
-                return bound_edit_account.get("initial_token") or None
+                    excluded_edit_account_ids.add(account_id)
+                if profile_id:
+                    excluded_edit_profile_ids.add(profile_id)
+                bound_edit_account.clear()
+                source_image_ids_cache = []
 
             def _run_once(token: str):
                 nonlocal source_image_ids_cache
@@ -2413,6 +2507,7 @@ def build_generation_router(
                     operation_name="images.edits",
                     run_once=_run_once,
                     token_selector=_select_edit_token,
+                    on_token_invalid=_exclude_invalid_edit_account,
                 )
             )
             if trace is not None:

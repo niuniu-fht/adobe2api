@@ -11,6 +11,7 @@ from api.routes.generation import generate_with_reference_recovery
 from core.adobe_client import (
     AdobeClient,
     AdobeRequestError,
+    AuthError,
     ContentPolicyError,
     ImageStageTerminalError,
     RateLimitWaitExceededError,
@@ -99,6 +100,32 @@ def test_poll_unsafe_stops_before_download(monkeypatch):
     assert download_calls == []
 
 
+def test_submit_auth_error_skips_candidate_and_transport_retries(monkeypatch):
+    client = AdobeClient()
+    submissions = []
+    monkeypatch.setattr(
+        client,
+        "_build_payload_candidates",
+        lambda **kwargs: [{"candidate": "first"}, {"candidate": "second"}],
+    )
+
+    def submit(*args, **kwargs):
+        submissions.append(kwargs["payload"])
+        return FakeResponse(401, {"message": "expired"})
+
+    monkeypatch.setattr(client, "_post_image_json", submit)
+    monkeypatch.setattr(
+        client,
+        "_wait_with_cancel",
+        lambda *args, **kwargs: pytest.fail("auth error must not wait"),
+    )
+
+    with pytest.raises(AuthError, match="Token invalid or expired"):
+        client._generate_once(token="TOKEN-A", prompt="draw", seed=42)
+
+    assert submissions == [{"candidate": "first"}]
+
+
 def test_candidate_unsafe_stops_before_later_candidates(monkeypatch):
     client = AdobeClient()
     submitted = []
@@ -176,6 +203,162 @@ def test_images_endpoint_returns_exact_unsafe_contract(monkeypatch):
             "type": "invalid_request_error",
         }
     }
+
+
+def test_images_endpoint_auth_switches_to_a_different_account(monkeypatch):
+    import app as app_module
+
+    records = [
+        {"token": "TOKEN-A1", "account_id": "account-a"},
+        {"token": "TOKEN-A2", "account_id": "account-a"},
+        {"token": "TOKEN-B", "account_id": "account-b"},
+    ]
+    active = {item["token"] for item in records}
+    attempts = []
+
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "list_active_account_tokens",
+        lambda: [item for item in records if item["token"] in active],
+    )
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "get_available",
+        lambda strategy=None: next(
+            (item["token"] for item in records if item["token"] in active),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "get_meta_by_value",
+        lambda token: {
+            "token_id": token.lower(),
+            "token_account_id": next(
+                item["account_id"] for item in records if item["token"] == token
+            ),
+            "token_account_name": token,
+        },
+    )
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "report_invalid",
+        lambda token: active.discard(token),
+    )
+    monkeypatch.setattr(app_module.token_manager, "report_success", lambda _token: None)
+    monkeypatch.setattr(
+        app_module.image_task_coordinator,
+        "assign_token",
+        lambda candidates, exclude=None: next(
+            (token for token in candidates if token not in (exclude or set())),
+            None,
+        ),
+    )
+
+    def generate(**kwargs):
+        token = kwargs["token"]
+        attempts.append(token)
+        if token == "TOKEN-A1":
+            raise AuthError("Token invalid or expired")
+        if token == "TOKEN-A2":
+            pytest.fail("must switch accounts instead of using another token")
+        return _png_bytes(), {}
+
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+    response = TestClient(app_module.app).post(
+        "/v1/images/generations",
+        headers=headers,
+        json={
+            "model": "gpt-image-2",
+            "prompt": "draw",
+            "response_format": "b64_json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert attempts == ["TOKEN-A1", "TOKEN-B"]
+    assert response.json()["data"][0]["b64_json"]
+
+
+def test_images_edits_auth_switch_reuploads_reference_with_next_account(monkeypatch):
+    import app as app_module
+
+    records = [
+        {"token": "TOKEN-A1", "account_id": "account-a", "profile_id": "profile-a"},
+        {"token": "TOKEN-A2", "account_id": "account-a", "profile_id": "profile-a"},
+        {"token": "TOKEN-B", "account_id": "account-b", "profile_id": "profile-b"},
+    ]
+    active = {item["token"] for item in records}
+    upload_attempts = []
+    generation_attempts = []
+
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "list_active_account_tokens",
+        lambda: [item for item in records if item["token"] in active],
+    )
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "get_available",
+        lambda strategy=None: next(
+            (item["token"] for item in records if item["token"] in active),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "get_meta_by_value",
+        lambda token: {
+            "token_id": token.lower(),
+            "token_account_id": next(
+                item["account_id"] for item in records if item["token"] == token
+            ),
+            "refresh_profile_id": next(
+                item["profile_id"] for item in records if item["token"] == token
+            ),
+            "token_account_name": token,
+        },
+    )
+    monkeypatch.setattr(
+        app_module.token_manager,
+        "report_invalid",
+        lambda token: active.discard(token),
+    )
+    monkeypatch.setattr(app_module.token_manager, "report_success", lambda _token: None)
+
+    def upload_image(token, *_args, **_kwargs):
+        upload_attempts.append(token)
+        if token == "TOKEN-A1":
+            raise AuthError("Token invalid or expired")
+        if token == "TOKEN-A2":
+            pytest.fail("must re-upload with a different account")
+        return "reference-b"
+
+    def generate(**kwargs):
+        generation_attempts.append((kwargs["token"], kwargs["source_image_ids"]))
+        return _png_bytes(), {}
+
+    monkeypatch.setattr(app_module.client, "upload_image", upload_image)
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+    response = TestClient(app_module.app).post(
+        "/v1/images/edits",
+        headers=headers,
+        data={
+            "model": "gpt-image-2",
+            "prompt": "edit",
+            "response_format": "b64_json",
+        },
+        files={"image": ("reference.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert upload_attempts == ["TOKEN-A1", "TOKEN-B"]
+    assert generation_attempts == [("TOKEN-B", ["reference-b"])]
+    assert response.json()["data"][0]["b64_json"]
 
 
 def test_images_endpoint_returns_fixed_rate_limit_contract(monkeypatch):

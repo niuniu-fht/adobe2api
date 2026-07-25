@@ -499,6 +499,125 @@ def test_content_policy_error_reaches_images_route_unchanged(monkeypatch):
     assert error_info.value.user_message == "图片不安全"
 
 
+@pytest.mark.parametrize("error_kind", ["auth_error", "pool_http_401"])
+def test_invalid_token_immediately_switches_to_next_account(monkeypatch, error_kind):
+    import app
+
+    class TokenManagerStub:
+        def __init__(self):
+            self.active = ["TOKEN-A", "TOKEN-B"]
+            self.invalid = []
+            self.success = []
+
+        def get_available(self, strategy=None):
+            return self.active[0] if self.active else None
+
+        def get_meta_by_value(self, token):
+            suffix = token.rsplit("-", 1)[-1]
+            return {
+                "token_id": f"token-{suffix.lower()}",
+                "token_account_id": f"account-{suffix.lower()}",
+                "token_account_name": f"Account {suffix}",
+            }
+
+        def report_invalid(self, token):
+            self.invalid.append(token)
+            self.active = [value for value in self.active if value != token]
+
+        def report_success(self, token):
+            self.success.append(token)
+
+        def handle_auth_failure(self, _token):
+            raise AssertionError("invalid token must not retry the current account")
+
+    class ClientStub:
+        retry_enabled = False
+        retry_max_attempts = 1
+        token_rotation_strategy = "round_robin"
+
+    class RequestState:
+        log_id = "LOG_ID"
+
+    class RequestStub:
+        method = "POST"
+        url = type("Url", (), {"path": "/v1/images/generations"})()
+        state = RequestState()
+
+    token_manager = TokenManagerStub()
+    attempts = []
+    invalid_callbacks = []
+    monkeypatch.setattr(app, "token_manager", token_manager)
+    monkeypatch.setattr(app, "client", ClientStub())
+    monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
+    monkeypatch.setattr(app.time, "sleep", lambda _delay: pytest.fail("must not wait"))
+
+    def run_once(token):
+        attempts.append(token)
+        if token == "TOKEN-A":
+            if error_kind == "auth_error":
+                raise app.AuthError("Token invalid or expired")
+            raise app.HTTPException(
+                status_code=401,
+                detail="All available tokens are invalid or expired",
+            )
+        return "ok"
+
+    result = app._run_with_token_retries(
+        request=RequestStub(),
+        operation_name="images.generations",
+        run_once=run_once,
+        set_request_error_detail=lambda *args, **kwargs: "ERR-CODE",
+        on_token_invalid=invalid_callbacks.append,
+    )
+
+    assert result == "ok"
+    assert attempts == ["TOKEN-A", "TOKEN-B"]
+    assert token_manager.invalid == ["TOKEN-A"]
+    assert token_manager.success == ["TOKEN-B"]
+    assert invalid_callbacks == ["TOKEN-A"]
+
+
+def test_unrelated_http_401_remains_terminal(monkeypatch):
+    import app
+
+    class TokenManagerStub:
+        def get_available(self, strategy=None):
+            return "TOKEN-A"
+
+        def get_meta_by_value(self, token):
+            return {"token_id": "token-a"}
+
+        def report_invalid(self, _token):
+            pytest.fail("unrelated 401 must not invalidate an Adobe token")
+
+    class ClientStub:
+        retry_enabled = True
+        retry_max_attempts = 3
+        token_rotation_strategy = "round_robin"
+
+    class RequestState:
+        log_id = "LOG_ID"
+
+    class RequestStub:
+        method = "POST"
+        url = type("Url", (), {"path": "/v1/images/generations"})()
+        state = RequestState()
+
+    monkeypatch.setattr(app, "token_manager", TokenManagerStub())
+    monkeypatch.setattr(app, "client", ClientStub())
+    monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
+
+    with pytest.raises(app.HTTPException, match="Invalid API key"):
+        app._run_with_token_retries(
+            request=RequestStub(),
+            operation_name="images.generations",
+            run_once=lambda _token: (_ for _ in ()).throw(
+                app.HTTPException(status_code=401, detail="Invalid API key")
+            ),
+            set_request_error_detail=lambda *args, **kwargs: "ERR-CODE",
+        )
+
+
 def test_openai_prefixed_gemini_model_is_normalized():
     assert normalize_openai_gemini_model_id(
         "gpt-image-gemini-3.1-flash-image"

@@ -821,6 +821,7 @@ def _run_with_token_retries(
     run_once: Callable[[str], Any],
     set_request_error_detail: Optional[Callable[..., str]] = None,
     token_selector: Optional[Callable[[], Optional[str]]] = None,
+    on_token_invalid: Optional[Callable[[str], None]] = None,
 ) -> Any:
     max_attempts = client.retry_max_attempts if client.retry_enabled else 1
     max_attempts = max(1, int(max_attempts))
@@ -829,6 +830,26 @@ def _run_with_token_retries(
     attempt = 0
     limited_retry_attempts = 0
     tried_tokens: set[str] = set()
+
+    def invalidate_and_advance(token_value: str) -> None:
+        try:
+            token_manager.report_invalid(token_value)
+        except Exception as persist_error:
+            logger.warning(
+                "failed to persist invalid token operation=%s error=%s",
+                operation_name,
+                persist_error,
+            )
+        if on_token_invalid is None:
+            return
+        try:
+            on_token_invalid(token_value)
+        except Exception as callback_error:
+            logger.warning(
+                "token invalid callback failed operation=%s error=%s",
+                operation_name,
+                callback_error,
+            )
 
     while True:
         attempt += 1
@@ -933,32 +954,12 @@ def _run_with_token_retries(
                     },
                 )
         except AuthError as exc:
-            auth_result = token_manager.handle_auth_failure(token)
-            auth_status = str(auth_result.get("status") or "invalid").strip().lower()
-            if auth_status == "invalid":
-                last_exc = exc
-                retry_reason = "auth_invalid"
-                err_status_code = 401
-                err_type = "authentication_error"
-                err_value = exc
-            else:
-                refresh_message = str(
-                    auth_result.get("message")
-                    or "token auth failed, cookie refresh recovery triggered"
-                ).strip()
-                last_exc = UpstreamTemporaryError(
-                    refresh_message,
-                    status_code=503,
-                    error_type="upstream_unavailable",
-                )
-                retry_reason = (
-                    "auth_refresh_success"
-                    if auth_status == "refreshed"
-                    else "auth_refresh_retry"
-                )
-                err_status_code = 503
-                err_type = "server_error"
-                err_value = refresh_message
+            invalidate_and_advance(token)
+            last_exc = exc
+            retry_reason = "auth_invalid_switch_account"
+            err_status_code = 401
+            err_type = "authentication_error"
+            err_value = exc
             retryable = True
             err_code = report_error(
                 request,
@@ -988,6 +989,7 @@ def _run_with_token_retries(
                     details={
                         "retryable": retryable,
                         "retry_reason": retry_reason,
+                        "next_action": "switch_account",
                     },
                 )
         except UpstreamTemporaryError as exc:
@@ -1071,6 +1073,48 @@ def _run_with_token_retries(
                 raise
             raise HTTPException(status_code=status_code, detail=detail)
         except HTTPException as exc:
+            is_pool_auth_error = (
+                int(exc.status_code or 0) == 401
+                and str(exc.detail or "").strip().lower()
+                == "all available tokens are invalid or expired"
+            )
+            if is_pool_auth_error:
+                invalidate_and_advance(token)
+                last_exc = exc
+                retryable = True
+                retry_reason = "auth_pool_invalid_switch_account"
+                retry_error_text = str(exc.detail)
+                err_code = report_error(
+                    request,
+                    error=str(exc.detail),
+                    status_code=401,
+                    error_type="authentication_error",
+                    include_traceback=False,
+                )
+                _append_attempt_log(
+                    request=request,
+                    operation=operation_name,
+                    token_meta=token_meta,
+                    attempt=attempt,
+                    attempt_started=attempt_started,
+                    status_code=401,
+                    error=str(exc.detail),
+                    error_code=err_code,
+                    task_status_override="FAILED",
+                )
+                request.state.trace_final_error = exc
+                if request_trace is not None:
+                    request_trace.finish_stage(
+                        trace_attempt_id,
+                        status="failed",
+                        error=exc,
+                        details={
+                            "retryable": True,
+                            "retry_reason": retry_reason,
+                            "next_action": "switch_account",
+                        },
+                    )
+                continue
             err_code = report_error(
                 request,
                 error=str(exc.detail),
