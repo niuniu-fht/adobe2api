@@ -37,7 +37,8 @@ except Exception:
 logger = logging.getLogger("adobe2api")
 
 DEFAULT_GPT_IMAGE_MODEL_QUALITIES = {
-    "gpt-image-2-high": "medium",
+    "gpt-image-2-high": "high",
+    "gpt-image-2-higher": "high",
 }
 
 

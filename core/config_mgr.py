@@ -41,7 +41,10 @@ class ConfigManager:
             "generated_max_size_mb": 1024,
             "generated_prune_size_mb": 200,
             "gpt_image_quality": "low",
-            "gpt_image_model_qualities": {"gpt-image-2-high": "medium"},
+            "gpt_image_model_qualities": {
+                "gpt-image-2-high": "high",
+                "gpt-image-2-higher": "high",
+            },
         }
         self.load()
 

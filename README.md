@@ -155,16 +155,17 @@ GPT Image 图像模型（实验接入）：
 - 比例后缀：`1x1` / `5x4` / `9x16` / `21x9` / `16x9` / `4x3` / `3x2` / `4x5` / `3x4` / `2x3`
 - 当前实现会携带 `outputResolution` 和对应像素 `size`
 - GPT Image 默认质量由系统配置 `gpt_image_quality` 控制：`low` / `medium` / `high`，默认 `low`
-- 新增兼容模型 ID：`gpt-image-2-high`。它同样调用上游 `gpt-image` / version `2`，但默认质量可通过 `gpt_image_model_qualities` 单独配置，例如：
+- 兼容模型 ID：`gpt-image-2-high` 和 `gpt-image-2-higher`。两者同样调用上游 `gpt-image` / version `2`，默认均为 `high`，也可通过 `gpt_image_model_qualities` 分别配置，例如：
   ```json
   {
     "gpt_image_quality": "low",
     "gpt_image_model_qualities": {
-      "gpt-image-2-high": "high"
+      "gpt-image-2-high": "medium",
+      "gpt-image-2-higher": "high"
     }
   }
   ```
-  请求 `gpt-image-2` 时仍使用原来的 `gpt_image_quality`；请求 `gpt-image-2-high` 时使用 `gpt_image_model_qualities["gpt-image-2-high"]`。
+  请求 `gpt-image-2` 时使用 `gpt_image_quality`；另外两个模型 ID 使用各自的映射，因此可以配置三个独立质量档案。
 - 示例：
   - `firefly-gpt-image-2k-16x9`
   - `firefly-gpt-image-4k-1x1`

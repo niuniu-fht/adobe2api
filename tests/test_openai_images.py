@@ -241,6 +241,55 @@ def test_custom_gpt_image_alias_can_keep_requested_model_id_and_quality():
     assert payload["generationSettings"]["detailLevel"] == 5
 
 
+def test_builtin_gpt_image_quality_aliases_default_to_high():
+    client = AdobeClient()
+    client.apply_config(
+        {
+            "gpt_image_quality": "low",
+            "gpt_image_model_qualities": {},
+        }
+    )
+
+    for model_id in ("gpt-image-2-high", "gpt-image-2-higher"):
+        assert client.is_gpt_image_model_alias(model_id)
+        assert client.get_gpt_image_quality(model_id) == "high"
+
+        options = build_native_gpt_image_options(
+            {"model": model_id, "prompt": "draw a dashboard", "size": "auto"},
+            model_id_override="gpt-image-2",
+            response_model=model_id,
+        )
+        payload = build_image_payload_candidates(
+            prompt="draw a dashboard",
+            aspect_ratio=options.aspect_ratio,
+            output_resolution=options.output_resolution,
+            upstream_model_id=options.upstream_model_id or "",
+            upstream_model_version=options.upstream_model_version or "",
+            quality_level=client.get_gpt_image_quality(model_id),
+            requested_size=options.requested_size,
+        )[0]
+
+        assert options.response_model == model_id
+        assert payload["generationSettings"]["detailLevel"] == 5
+
+
+def test_higher_alias_quality_can_be_configured_independently():
+    client = AdobeClient()
+    client.apply_config(
+        {
+            "gpt_image_quality": "low",
+            "gpt_image_model_qualities": {
+                "gpt-image-2-high": "medium",
+                "gpt-image-2-higher": "high",
+            },
+        }
+    )
+
+    assert client.get_gpt_image_quality("gpt-image-2") == "low"
+    assert client.get_gpt_image_quality("gpt-image-2-high") == "medium"
+    assert client.get_gpt_image_quality("gpt-image-2-higher") == "high"
+
+
 def test_gpt_image_converts_large_size_to_ratio_and_resolution():
     options = build_native_gpt_image_options(
         {
