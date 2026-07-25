@@ -182,14 +182,13 @@ class RateLimitWaitExceededError(AdobeRequestError):
 
 
 class SubmitRateLimitedError(AdobeRequestError):
-    def __init__(self, retry_after: float = 0.0):
+    def __init__(self):
         super().__init__(
             "Adobe image submit rate limited; switch account",
             status_code=429,
             error_type="rate_limit_error",
             user_message="Too many requests. Please try again later.",
         )
-        self.retry_after = max(0.0, float(retry_after or 0.0))
 
 
 class ImageStageTerminalError(AdobeRequestError):
@@ -2327,15 +2326,11 @@ class AdobeClient:
                     or self._is_rate_limited_response(submit_resp)
                 )
                 if is_rate_limited:
-                    cooldown = (
-                        self._response_retry_after(submit_resp)
-                        or self._image_submit_rate_limit_wait_seconds()
-                    )
                     if progress_cb is not None:
                         progress_cb(
                             {
-                                "task_status": "RATE_LIMITED",
-                                "retry_after": int(round(cooldown)),
+                                "task_status": "SUBMITTING",
+                                "retry_after": None,
                                 "retry_count": 0,
                                 "rate_limit_wait_seconds": 0,
                                 "error": submit_resp.text[:300],
@@ -2348,7 +2343,7 @@ class AdobeClient:
                             response=response_snapshot(submit_resp),
                             error="submit rate limited; switch account",
                         )
-                    raise SubmitRateLimitedError(cooldown)
+                    raise SubmitRateLimitedError()
                 if self._is_retryable_image_status(submit_resp.status_code):
                     now = time.time()
                     network_started = network_started or now

@@ -684,7 +684,7 @@ def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
             self.success.append(token)
 
         def report_invalid(self, _token):
-            pytest.fail("submit 429 is a cooldown, not an invalid token")
+            pytest.fail("submit 429 must not invalidate the token")
 
     class ClientStub:
         retry_enabled = False
@@ -710,7 +710,7 @@ def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
     def run_once(token):
         attempts.append(token)
         if token == "TOKEN-A":
-            raise app.SubmitRateLimitedError(60)
+            raise app.SubmitRateLimitedError()
         return "ok"
 
     result = app._run_with_token_retries(
@@ -725,6 +725,76 @@ def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
     assert attempts == ["TOKEN-A", "TOKEN-B"]
     assert unavailable_callbacks == ["TOKEN-A"]
     assert token_manager.success == ["TOKEN-B"]
+
+
+def test_submit_rate_limit_switches_at_most_five_more_accounts(monkeypatch):
+    import app
+
+    tokens = [f"TOKEN-{index}" for index in range(10)]
+
+    class TokenManagerStub:
+        def list_active_ids(self):
+            return list(tokens)
+
+        def list_active_account_tokens(self):
+            return [
+                {"token": token, "account_id": f"account-{index}"}
+                for index, token in enumerate(tokens)
+            ]
+
+        def get_available(self, strategy=None):
+            return tokens[0]
+
+        def get_meta_by_value(self, token):
+            index = tokens.index(token)
+            return {
+                "token_id": f"token-{index}",
+                "token_account_id": f"account-{index}",
+            }
+
+        def report_success(self, _token):
+            pytest.fail("every submit should be rate limited")
+
+        def report_invalid(self, _token):
+            pytest.fail("submit 429 must not invalidate the token")
+
+    class ClientStub:
+        retry_enabled = False
+        retry_max_attempts = 1
+        token_rotation_strategy = "round_robin"
+
+    class RequestState:
+        log_id = "LOG_ID"
+
+    class RequestStub:
+        method = "POST"
+        url = type("Url", (), {"path": "/v1/images/generations"})()
+        state = RequestState()
+
+    attempts = []
+    unavailable_callbacks = []
+    monkeypatch.setattr(app, "token_manager", TokenManagerStub())
+    monkeypatch.setattr(app, "client", ClientStub())
+    monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
+    monkeypatch.setattr(app.time, "sleep", lambda _delay: pytest.fail("must not wait"))
+
+    def run_once(token):
+        attempts.append(token)
+        raise app.SubmitRateLimitedError()
+
+    with pytest.raises(app.HTTPException) as error_info:
+        app._run_with_token_retries(
+            request=RequestStub(),
+            operation_name="images.generations",
+            run_once=run_once,
+            set_request_error_detail=lambda *args, **kwargs: "ERR-CODE",
+            on_token_unavailable=unavailable_callbacks.append,
+        )
+
+    assert error_info.value.status_code == 400
+    assert error_info.value.detail == "Too many requests. Please try again later."
+    assert attempts == tokens[:6]
+    assert unavailable_callbacks == tokens[:5]
 
 
 def test_openai_prefixed_gemini_model_is_normalized():

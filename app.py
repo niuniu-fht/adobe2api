@@ -831,6 +831,7 @@ def _run_with_token_retries(
     report_error = set_request_error_detail or _set_request_error_detail
     attempt = 0
     limited_retry_attempts = 0
+    submit_rate_limit_retries = 0
     tried_tokens: set[str] = set()
     unavailable_account_ids: set[str] = set()
 
@@ -1031,9 +1032,11 @@ def _run_with_token_retries(
                     },
                 )
         except SubmitRateLimitedError as exc:
-            notify_token_unavailable(token)
+            submit_rate_limit_retries += 1
+            retryable = submit_rate_limit_retries <= 5
+            if retryable:
+                notify_token_unavailable(token)
             last_exc = exc
-            retryable = True
             retry_reason = "submit_rate_limited_switch_account"
             retry_error_text = str(exc.user_message or str(exc))
             err_code = report_error(
@@ -1061,10 +1064,13 @@ def _run_with_token_retries(
                     status="failed",
                     error=exc,
                     details={
-                        "retryable": True,
+                        "retryable": retryable,
                         "retry_reason": retry_reason,
-                        "next_action": "switch_account",
-                        "cooldown_seconds": exc.retry_after,
+                        "next_action": (
+                            "switch_account" if retryable else "return_error"
+                        ),
+                        "submit_rate_limit_retry": submit_rate_limit_retries,
+                        "submit_rate_limit_retry_max": 5,
                     },
                 )
         except AuthError as exc:

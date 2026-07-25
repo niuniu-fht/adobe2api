@@ -384,7 +384,7 @@ def test_images_edits_switch_reuploads_reference_with_next_account(
     def generate(**kwargs):
         generation_attempts.append((kwargs["token"], kwargs["source_image_ids"]))
         if kwargs["token"] == "TOKEN-A1" and failure_kind == "submit_rate_limit":
-            raise SubmitRateLimitedError(60)
+            raise SubmitRateLimitedError()
         return _png_bytes(), {}
 
     monkeypatch.setattr(app_module.client, "upload_image", upload_image)
@@ -483,14 +483,13 @@ def test_rate_limited_submit_switches_account_without_waiting(monkeypatch):
         lambda *args, **kwargs: pytest.fail("submit 429 must not wait"),
     )
 
-    with pytest.raises(SubmitRateLimitedError) as error_info:
+    with pytest.raises(SubmitRateLimitedError):
         client._generate_once(token="TOKEN", prompt="draw", seed=42)
 
-    assert error_info.value.retry_after == 60
     assert len(payload_ids) == 1
 
 
-def test_submit_rate_limit_uses_retry_after_as_account_cooldown(monkeypatch):
+def test_submit_rate_limit_does_not_wait_or_set_account_cooldown(monkeypatch):
     client = AdobeClient()
     progress = []
 
@@ -511,7 +510,7 @@ def test_submit_rate_limit_uses_retry_after_as_account_cooldown(monkeypatch):
         lambda *args, **kwargs: pytest.fail("submit 429 must not wait"),
     )
 
-    with pytest.raises(SubmitRateLimitedError) as error_info:
+    with pytest.raises(SubmitRateLimitedError):
         client._generate_once(
             token="TOKEN",
             prompt="draw",
@@ -519,9 +518,9 @@ def test_submit_rate_limit_uses_retry_after_as_account_cooldown(monkeypatch):
             progress_cb=progress.append,
         )
 
-    assert error_info.value.retry_after == 17
-    assert progress[-1]["task_status"] == "RATE_LIMITED"
-    assert progress[-1]["retry_after"] == 17
+    assert progress[-1]["task_status"] == "SUBMITTING"
+    assert progress[-1]["retry_after"] is None
+    assert progress[-1]["rate_limit_wait_seconds"] == 0
 
 
 def test_image_submit_retry_delay_uses_capped_schedule(monkeypatch):
