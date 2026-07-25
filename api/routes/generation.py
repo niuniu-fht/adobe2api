@@ -1972,7 +1972,7 @@ def build_generation_router(
                 status_code=400,
                 content={
                     "error": {
-                        "message": "图片不安全",
+                        "message": "内容审核未通过，请修改提示词后重试",
                         "type": "invalid_request_error",
                     }
                 },
@@ -2531,7 +2531,7 @@ def build_generation_router(
                 status_code=400,
                 content={
                     "error": {
-                        "message": "图片不安全",
+                        "message": "内容审核未通过，请修改提示词后重试",
                         "type": "invalid_request_error",
                     }
                 },

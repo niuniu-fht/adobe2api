@@ -199,7 +199,7 @@ def test_images_endpoint_returns_exact_unsafe_contract(monkeypatch):
     assert response.status_code == 400
     assert response.json() == {
         "error": {
-            "message": "图片不安全",
+            "message": "内容审核未通过，请修改提示词后重试",
             "type": "invalid_request_error",
         }
     }
