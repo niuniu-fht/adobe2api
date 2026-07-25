@@ -4,7 +4,7 @@ import base64
 import io
 import re
 from dataclasses import dataclass
-from math import gcd, log, sqrt
+from math import ceil, gcd, log, sqrt
 from typing import Optional
 
 try:
@@ -27,6 +27,7 @@ DEFAULT_OUTPUT_FORMAT = "png"
 MAX_IMAGE_COUNT = 10
 MAX_GPT_IMAGE_LONG_EDGE = 3840
 MAX_GPT_IMAGE_PIXELS = 8_294_400
+MIN_GPT_IMAGE_PIXELS = 655_360
 GPT_IMAGE_EDGE_ALIGNMENT = 16
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 RATIO_RE = re.compile(r"^\d+:\d+$")
@@ -317,6 +318,44 @@ def normalize_gpt_image_size(
             )
 
         aligned_width, aligned_height = min(candidates, key=distance)
+
+    if aligned_width * aligned_height < MIN_GPT_IMAGE_PIXELS:
+        original_ratio = width / height
+        upscale = sqrt(
+            MIN_GPT_IMAGE_PIXELS / (aligned_width * aligned_height)
+        )
+
+        def align_up(value: float) -> int:
+            return min(
+                MAX_GPT_IMAGE_LONG_EDGE,
+                max(
+                    GPT_IMAGE_EDGE_ALIGNMENT,
+                    int(ceil(value / GPT_IMAGE_EDGE_ALIGNMENT))
+                    * GPT_IMAGE_EDGE_ALIGNMENT,
+                ),
+            )
+
+        aligned_width = align_up(aligned_width * upscale)
+        aligned_height = align_up(aligned_height * upscale)
+
+        while aligned_width * aligned_height < MIN_GPT_IMAGE_PIXELS:
+            candidates: list[tuple[int, int]] = []
+            if aligned_width < MAX_GPT_IMAGE_LONG_EDGE:
+                candidates.append(
+                    (aligned_width + GPT_IMAGE_EDGE_ALIGNMENT, aligned_height)
+                )
+            if aligned_height < MAX_GPT_IMAGE_LONG_EDGE:
+                candidates.append(
+                    (aligned_width, aligned_height + GPT_IMAGE_EDGE_ALIGNMENT)
+                )
+            if not candidates:
+                break
+
+            def ratio_distance(candidate: tuple[int, int]) -> float:
+                candidate_width, candidate_height = candidate
+                return abs(log((candidate_width / candidate_height) / original_ratio))
+
+            aligned_width, aligned_height = min(candidates, key=ratio_distance)
 
     return {"width": aligned_width, "height": aligned_height}
 

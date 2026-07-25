@@ -3,6 +3,7 @@ import base64
 import pytest
 
 from core.models.openai_images import (
+    MIN_GPT_IMAGE_PIXELS,
     build_native_gpt_image_options,
     encode_image_response_item,
     gpt_image_model_id_from_size,
@@ -99,6 +100,37 @@ def test_native_gpt_image_2_request_converts_requested_size():
     assert payload["modelVersion"] == "2"
     assert payload["size"] == {"width": 1536, "height": 1024}
     assert payload["modelSpecificPayload"]["size"] == "1536x1024"
+
+
+@pytest.mark.parametrize(
+    ("requested", "adapted"),
+    [
+        ("256x256", {"width": 816, "height": 816}),
+        ("320x160", {"width": 1152, "height": 576}),
+    ],
+)
+def test_gpt_image_upscales_below_upstream_pixel_minimum(requested, adapted):
+    options = build_native_gpt_image_options(
+        {"model": "gpt-image-2", "prompt": "draw", "size": requested}
+    )
+
+    assert options.requested_size == adapted
+    assert adapted["width"] % 16 == 0
+    assert adapted["height"] % 16 == 0
+    assert adapted["width"] * adapted["height"] >= MIN_GPT_IMAGE_PIXELS
+
+    payload = build_image_payload_candidates(
+        prompt="draw",
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.output_resolution,
+        upstream_model_id="gpt-image",
+        upstream_model_version="2",
+        requested_size=options.requested_size,
+    )[0]
+    assert payload["size"] == adapted
+    assert payload["modelSpecificPayload"]["size"] == (
+        f'{adapted["width"]}x{adapted["height"]}'
+    )
 
 
 @pytest.mark.parametrize("raw_size", [None, "", "auto", "not-a-size"])

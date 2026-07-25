@@ -205,6 +205,34 @@ def test_images_endpoint_returns_exact_unsafe_contract(monkeypatch):
     }
 
 
+def test_images_endpoint_upscales_small_size_before_adobe_submit(monkeypatch):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    submitted_sizes = []
+
+    def generate(**kwargs):
+        submitted_sizes.append(kwargs["requested_size"])
+        return _png_bytes(), {}
+
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+    response = TestClient(app_module.app).post(
+        "/v1/images/generations",
+        headers=headers,
+        json={
+            "model": "gpt-image-2",
+            "prompt": "draw",
+            "size": "256x256",
+            "response_format": "b64_json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert submitted_sizes == [{"width": 816, "height": 816}]
+
+
 def test_images_endpoint_auth_switches_to_a_different_account(monkeypatch):
     import app as app_module
 
