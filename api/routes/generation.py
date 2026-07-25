@@ -2508,6 +2508,7 @@ def build_generation_router(
                     run_once=_run_once,
                     token_selector=_select_edit_token,
                     on_token_invalid=_exclude_invalid_edit_account,
+                    on_token_unavailable=_exclude_invalid_edit_account,
                 )
             )
             if trace is not None:

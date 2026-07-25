@@ -181,6 +181,17 @@ class RateLimitWaitExceededError(AdobeRequestError):
         )
 
 
+class SubmitRateLimitedError(AdobeRequestError):
+    def __init__(self, retry_after: float = 0.0):
+        super().__init__(
+            "Adobe image submit rate limited; switch account",
+            status_code=429,
+            error_type="rate_limit_error",
+            user_message="Too many requests. Please try again later.",
+        )
+        self.retry_after = max(0.0, float(retry_after or 0.0))
+
+
 class ImageStageTerminalError(AdobeRequestError):
     def __init__(
         self,
@@ -687,6 +698,11 @@ class AdobeClient:
 
         if primary_response is not None:
             self._raise_if_image_unsafe(primary_response, param="prompt")
+            if (
+                primary_response.status_code == 429
+                or self._is_rate_limited_response(primary_response)
+            ):
+                return primary_response
             if primary_response.status_code == 200:
                 try:
                     primary_data = primary_response.json()
@@ -2242,7 +2258,6 @@ class AdobeClient:
                     },
                 )
             network_started: Optional[float] = None
-            rate_limit_started: Optional[float] = None
             submit_retry_count = 0
             while True:
                 if cancel_check is not None:
@@ -2312,48 +2327,28 @@ class AdobeClient:
                     or self._is_rate_limited_response(submit_resp)
                 )
                 if is_rate_limited:
-                    now = time.time()
-                    rate_limit_started = rate_limit_started or now
-                    elapsed = now - rate_limit_started
-                    if elapsed >= self._image_submit_rate_limit_wait_seconds():
-                        if trace is not None:
-                            trace.finish_stage(
-                                submit_stage_id,
-                                status="failed",
-                                response=response_snapshot(submit_resp),
-                                error="rate limit wait exceeded",
-                            )
-                        raise RateLimitWaitExceededError()
-                    submit_retry_count += 1
-                    delay = self._submit_retry_delay(
-                        submit_retry_count,
-                        rate_limited=True,
-                        retry_after=self._response_retry_after(submit_resp),
-                    )
-                    delay = min(
-                        delay,
-                        max(
-                            0.05,
-                            self._image_submit_rate_limit_wait_seconds() - elapsed,
-                        ),
+                    cooldown = (
+                        self._response_retry_after(submit_resp)
+                        or self._image_submit_rate_limit_wait_seconds()
                     )
                     if progress_cb is not None:
                         progress_cb(
                             {
                                 "task_status": "RATE_LIMITED",
-                                "retry_after": int(round(delay)),
-                                "retry_count": submit_retry_count,
-                                "rate_limit_wait_seconds": min(
-                                    self._image_submit_rate_limit_wait_seconds(),
-                                    elapsed + delay,
-                                ),
+                                "retry_after": int(round(cooldown)),
+                                "retry_count": 0,
+                                "rate_limit_wait_seconds": 0,
                                 "error": submit_resp.text[:300],
                             }
                         )
-                    self._wait_for_image_retry(
-                        delay, cancel_check=cancel_check, wait_cb=wait_cb
-                    )
-                    continue
+                    if trace is not None:
+                        trace.finish_stage(
+                            submit_stage_id,
+                            status="failed",
+                            response=response_snapshot(submit_resp),
+                            error="submit rate limited; switch account",
+                        )
+                    raise SubmitRateLimitedError(cooldown)
                 if self._is_retryable_image_status(submit_resp.status_code):
                     now = time.time()
                     network_started = network_started or now

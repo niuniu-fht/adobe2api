@@ -650,6 +650,83 @@ def test_unrelated_http_401_remains_terminal(monkeypatch):
         )
 
 
+def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
+    import app
+
+    class TokenManagerStub:
+        def __init__(self):
+            self.active = ["TOKEN-A", "TOKEN-B"]
+            self.success = []
+
+        def list_active_ids(self):
+            return list(self.active)
+
+        def list_active_account_tokens(self):
+            return [
+                {
+                    "token": token,
+                    "account_id": f"account-{token.rsplit('-', 1)[-1].lower()}",
+                }
+                for token in self.active
+            ]
+
+        def get_available(self, strategy=None):
+            return self.active[0] if self.active else None
+
+        def get_meta_by_value(self, token):
+            suffix = token.rsplit("-", 1)[-1]
+            return {
+                "token_id": f"token-{suffix.lower()}",
+                "token_account_id": f"account-{suffix.lower()}",
+            }
+
+        def report_success(self, token):
+            self.success.append(token)
+
+        def report_invalid(self, _token):
+            pytest.fail("submit 429 is a cooldown, not an invalid token")
+
+    class ClientStub:
+        retry_enabled = False
+        retry_max_attempts = 1
+        token_rotation_strategy = "round_robin"
+
+    class RequestState:
+        log_id = "LOG_ID"
+
+    class RequestStub:
+        method = "POST"
+        url = type("Url", (), {"path": "/v1/images/generations"})()
+        state = RequestState()
+
+    token_manager = TokenManagerStub()
+    attempts = []
+    unavailable_callbacks = []
+    monkeypatch.setattr(app, "token_manager", token_manager)
+    monkeypatch.setattr(app, "client", ClientStub())
+    monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
+    monkeypatch.setattr(app.time, "sleep", lambda _delay: pytest.fail("must not wait"))
+
+    def run_once(token):
+        attempts.append(token)
+        if token == "TOKEN-A":
+            raise app.SubmitRateLimitedError(60)
+        return "ok"
+
+    result = app._run_with_token_retries(
+        request=RequestStub(),
+        operation_name="images.generations",
+        run_once=run_once,
+        set_request_error_detail=lambda *args, **kwargs: "ERR-CODE",
+        on_token_unavailable=unavailable_callbacks.append,
+    )
+
+    assert result == "ok"
+    assert attempts == ["TOKEN-A", "TOKEN-B"]
+    assert unavailable_callbacks == ["TOKEN-A"]
+    assert token_manager.success == ["TOKEN-B"]
+
+
 def test_openai_prefixed_gemini_model_is_normalized():
     assert normalize_openai_gemini_model_id(
         "gpt-image-gemini-3.1-flash-image"

@@ -37,6 +37,7 @@ from core.adobe_client import (
     AuthError,
     ContentPolicyError,
     QuotaExhaustedError,
+    SubmitRateLimitedError,
     UpstreamTemporaryError,
 )
 from core.token_mgr import token_manager
@@ -822,6 +823,7 @@ def _run_with_token_retries(
     set_request_error_detail: Optional[Callable[..., str]] = None,
     token_selector: Optional[Callable[[], Optional[str]]] = None,
     on_token_invalid: Optional[Callable[[str], None]] = None,
+    on_token_unavailable: Optional[Callable[[str], None]] = None,
 ) -> Any:
     max_attempts = client.retry_max_attempts if client.retry_enabled else 1
     max_attempts = max(1, int(max_attempts))
@@ -830,6 +832,29 @@ def _run_with_token_retries(
     attempt = 0
     limited_retry_attempts = 0
     tried_tokens: set[str] = set()
+    unavailable_account_ids: set[str] = set()
+
+    def token_account_id(token_value: str) -> str:
+        try:
+            meta = token_manager.get_meta_by_value(token_value) or {}
+        except Exception:
+            meta = {}
+        return str(meta.get("token_account_id") or "").strip()
+
+    def notify_token_unavailable(token_value: str) -> None:
+        account_id = token_account_id(token_value)
+        if account_id:
+            unavailable_account_ids.add(account_id)
+        if on_token_unavailable is None:
+            return
+        try:
+            on_token_unavailable(token_value)
+        except Exception as callback_error:
+            logger.warning(
+                "token unavailable callback failed operation=%s error=%s",
+                operation_name,
+                callback_error,
+            )
 
     def invalidate_and_advance(token_value: str) -> None:
         try:
@@ -840,6 +865,9 @@ def _run_with_token_retries(
                 operation_name,
                 persist_error,
             )
+        account_id = token_account_id(token_value)
+        if account_id:
+            unavailable_account_ids.add(account_id)
         if on_token_invalid is None:
             return
         try:
@@ -855,20 +883,69 @@ def _run_with_token_retries(
         attempt += 1
         token = ""
         fetch_attempts = 0
+        default_candidates: list[str] = []
+        if token_selector is None:
+            try:
+                preferred_token = str(
+                    token_manager.get_available(
+                        strategy=client.token_rotation_strategy
+                    )
+                    or ""
+                ).strip()
+            except Exception:
+                preferred_token = ""
+            try:
+                account_tokens = token_manager.list_active_account_tokens()
+            except Exception:
+                account_tokens = []
+            default_candidates = list(
+                dict.fromkeys(
+                    value
+                    for value in [preferred_token]
+                    + [
+                        str(item.get("token") or "").strip()
+                        for item in account_tokens
+                        if isinstance(item, dict)
+                    ]
+                    if value
+                )
+            )
+        try:
+            selection_limit = max(
+                1,
+                len(default_candidates),
+                len(token_manager.list_active_ids()) + len(tried_tokens) + 1,
+            )
+        except Exception:
+            selection_limit = max(
+                1,
+                len(tried_tokens) + len(unavailable_account_ids) + 2,
+            )
         while not token:
             fetch_attempts += 1
             candidate = (
                 token_selector()
                 if token_selector is not None
-                else token_manager.get_available(strategy=client.token_rotation_strategy)
+                else (
+                    default_candidates[fetch_attempts - 1]
+                    if fetch_attempts <= len(default_candidates)
+                    else None
+                )
             )
             candidate = str(candidate or "").strip()
             if not candidate:
                 break
-            if candidate not in tried_tokens:
+            candidate_account_id = token_account_id(candidate)
+            if (
+                candidate not in tried_tokens
+                and (
+                    not candidate_account_id
+                    or candidate_account_id not in unavailable_account_ids
+                )
+            ):
                 token = candidate
                 break
-            if fetch_attempts >= max(1, len(tried_tokens) + 1):
+            if fetch_attempts >= selection_limit:
                 break
         if not token:
             break
@@ -951,6 +1028,43 @@ def _run_with_token_retries(
                     details={
                         "retryable": retryable,
                         "retry_reason": retry_reason,
+                    },
+                )
+        except SubmitRateLimitedError as exc:
+            notify_token_unavailable(token)
+            last_exc = exc
+            retryable = True
+            retry_reason = "submit_rate_limited_switch_account"
+            retry_error_text = str(exc.user_message or str(exc))
+            err_code = report_error(
+                request,
+                error=retry_error_text,
+                status_code=429,
+                error_type="rate_limit_error",
+                include_traceback=False,
+            )
+            _append_attempt_log(
+                request=request,
+                operation=operation_name,
+                token_meta=token_meta,
+                attempt=attempt,
+                attempt_started=attempt_started,
+                status_code=429,
+                error=retry_error_text,
+                error_code=err_code,
+                task_status_override="FAILED",
+            )
+            request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={
+                        "retryable": True,
+                        "retry_reason": retry_reason,
+                        "next_action": "switch_account",
+                        "cooldown_seconds": exc.retry_after,
                     },
                 )
         except AuthError as exc:
@@ -1195,6 +1309,11 @@ def _run_with_token_retries(
         break
 
     if last_exc is not None:
+        if isinstance(last_exc, SubmitRateLimitedError):
+            raise HTTPException(
+                status_code=400,
+                detail="Too many requests. Please try again later.",
+            )
         if isinstance(last_exc, AuthError):
             raise HTTPException(
                 status_code=401, detail="All available tokens are invalid or expired"

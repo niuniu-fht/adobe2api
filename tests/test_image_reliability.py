@@ -16,6 +16,7 @@ from core.adobe_client import (
     ImageStageTerminalError,
     RateLimitWaitExceededError,
     ReferenceImageRequiredError,
+    SubmitRateLimitedError,
     UpstreamTemporaryError,
 )
 from core.image_queue import ImageTaskCancelled, ImageTaskCoordinator
@@ -124,6 +125,19 @@ def test_submit_auth_error_skips_candidate_and_transport_retries(monkeypatch):
         client._generate_once(token="TOKEN-A", prompt="draw", seed=42)
 
     assert submissions == [{"candidate": "first"}]
+
+
+def test_primary_submit_429_skips_requests_fallback(monkeypatch):
+    client = AdobeClient()
+    response = FakeResponse(429, {"error_code": "rate_limited"})
+    monkeypatch.setattr(client, "_post_json", lambda *args, **kwargs: response)
+    monkeypatch.setattr(
+        client,
+        "_post_json_requests_once",
+        lambda *args, **kwargs: pytest.fail("429 must switch accounts immediately"),
+    )
+
+    assert client._post_image_json("https://example.test", {}, {}) is response
 
 
 def test_candidate_unsafe_stops_before_later_candidates(monkeypatch):
@@ -310,7 +324,10 @@ def test_images_endpoint_auth_switches_to_a_different_account(monkeypatch):
     assert response.json()["data"][0]["b64_json"]
 
 
-def test_images_edits_auth_switch_reuploads_reference_with_next_account(monkeypatch):
+@pytest.mark.parametrize("failure_kind", ["upload_auth", "submit_rate_limit"])
+def test_images_edits_switch_reuploads_reference_with_next_account(
+    monkeypatch, failure_kind
+):
     import app as app_module
 
     records = [
@@ -358,14 +375,16 @@ def test_images_edits_auth_switch_reuploads_reference_with_next_account(monkeypa
 
     def upload_image(token, *_args, **_kwargs):
         upload_attempts.append(token)
-        if token == "TOKEN-A1":
+        if token == "TOKEN-A1" and failure_kind == "upload_auth":
             raise AuthError("Token invalid or expired")
         if token == "TOKEN-A2":
             pytest.fail("must re-upload with a different account")
-        return "reference-b"
+        return "reference-a" if token == "TOKEN-A1" else "reference-b"
 
     def generate(**kwargs):
         generation_attempts.append((kwargs["token"], kwargs["source_image_ids"]))
+        if kwargs["token"] == "TOKEN-A1" and failure_kind == "submit_rate_limit":
+            raise SubmitRateLimitedError(60)
         return _png_bytes(), {}
 
     monkeypatch.setattr(app_module.client, "upload_image", upload_image)
@@ -385,7 +404,13 @@ def test_images_edits_auth_switch_reuploads_reference_with_next_account(monkeypa
 
     assert response.status_code == 200
     assert upload_attempts == ["TOKEN-A1", "TOKEN-B"]
-    assert generation_attempts == [("TOKEN-B", ["reference-b"])]
+    if failure_kind == "upload_auth":
+        assert generation_attempts == [("TOKEN-B", ["reference-b"])]
+    else:
+        assert generation_attempts == [
+            ("TOKEN-A1", ["reference-a"]),
+            ("TOKEN-B", ["reference-b"]),
+        ]
     assert response.json()["data"][0]["b64_json"]
 
 
@@ -440,71 +465,63 @@ def test_admin_image_queue_endpoint_exposes_read_only_snapshot(monkeypatch):
     assert isinstance(payload["items"], list)
 
 
-def test_rate_limited_json_reuses_frozen_submit_payload(monkeypatch):
+def test_rate_limited_submit_switches_account_without_waiting(monkeypatch):
     client = AdobeClient()
     payload_ids = []
-    responses = iter(
-        [
-            FakeResponse(400, {"error_code": "rate_limited"}),
-            _submit_success(),
-        ]
-    )
 
     def submit(*args, **kwargs):
         payload_ids.append(id(kwargs["payload"]))
-        return next(responses)
+        return FakeResponse(400, {"error_code": "rate_limited"})
 
     monkeypatch.setattr(
         client, "_build_payload_candidates", lambda **kwargs: [{"seed": 42}]
     )
     monkeypatch.setattr(client, "_post_image_json", submit)
-    monkeypatch.setattr(client, "_wait_with_cancel", lambda *args, **kwargs: None)
-    monkeypatch.setattr(client, "_submit_retry_delay", lambda *args, **kwargs: 2.0)
     monkeypatch.setattr(
         client,
-        "_get",
-        lambda *args, **kwargs: FakeResponse(
-            200, {"nested": {"code": "IMAGE_UNSAFE"}}
-        ),
+        "_wait_with_cancel",
+        lambda *args, **kwargs: pytest.fail("submit 429 must not wait"),
     )
 
-    with pytest.raises(ContentPolicyError):
+    with pytest.raises(SubmitRateLimitedError) as error_info:
         client._generate_once(token="TOKEN", prompt="draw", seed=42)
 
-    assert len(payload_ids) == 2
-    assert len(set(payload_ids)) == 1
+    assert error_info.value.retry_after == 60
+    assert len(payload_ids) == 1
 
 
-def test_rate_limit_budget_returns_fixed_terminal_error(monkeypatch):
+def test_submit_rate_limit_uses_retry_after_as_account_cooldown(monkeypatch):
     client = AdobeClient()
-    clock = [1000.0]
-    payload_ids = []
+    progress = []
 
     def submit(*args, **kwargs):
-        payload_ids.append(id(kwargs["payload"]))
-        return FakeResponse(429, {"error_code": "rate_limited"})
-
-    def wait(delay, **kwargs):
-        clock[0] += float(delay)
+        return FakeResponse(
+            429,
+            {"error_code": "rate_limited"},
+            headers={"retry-after": "17"},
+        )
 
     monkeypatch.setattr(
         client, "_build_payload_candidates", lambda **kwargs: [{"seed": 99}]
     )
     monkeypatch.setattr(client, "_post_image_json", submit)
-    monkeypatch.setattr(client, "_image_submit_rate_limit_wait_seconds", lambda: 180)
-    monkeypatch.setattr(client, "_submit_retry_delay", lambda *args, **kwargs: 30.0)
-    monkeypatch.setattr(client, "_wait_with_cancel", wait)
-    monkeypatch.setattr("core.adobe_client.time.time", lambda: clock[0])
+    monkeypatch.setattr(
+        client,
+        "_wait_with_cancel",
+        lambda *args, **kwargs: pytest.fail("submit 429 must not wait"),
+    )
 
-    with pytest.raises(
-        RateLimitWaitExceededError,
-        match="Too many requests. Please try again later.",
-    ):
-        client._generate_once(token="TOKEN", prompt="draw", seed=99)
+    with pytest.raises(SubmitRateLimitedError) as error_info:
+        client._generate_once(
+            token="TOKEN",
+            prompt="draw",
+            seed=99,
+            progress_cb=progress.append,
+        )
 
-    assert clock[0] == 1180.0
-    assert len(payload_ids) == 7
-    assert len(set(payload_ids)) == 1
+    assert error_info.value.retry_after == 17
+    assert progress[-1]["task_status"] == "RATE_LIMITED"
+    assert progress[-1]["retry_after"] == 17
 
 
 def test_image_submit_retry_delay_uses_capped_schedule(monkeypatch):
