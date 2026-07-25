@@ -1,5 +1,8 @@
 # Seedance 官方兼容 API 用户文档
 
+> 本文记录保留的旧兼容协议。新接入使用 README 中的
+> `POST /v1/video/generations` 统一视频协议和通用模型 ID。
+
 本项目在 `6001` 提供与 ModelArk Seedance 视频任务接口相同的核心调用形态：
 
 ```text

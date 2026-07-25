@@ -136,6 +136,7 @@ def _compact_request_params(data: dict[str, Any]) -> Optional[str]:
     for key in (
         "n",
         "size",
+        "ratio",
         "aspect_ratio",
         "duration",
         "resolution",
@@ -306,6 +307,7 @@ def _set_request_error_detail(
         "/v1/images/edits": "images.edits",
         "/api/v1/generate": "api.generate",
         "/api/v3/contents/generations/tasks": "contents.generations.tasks.create",
+        "/v1/video/generations": "video.generations",
         "/v1/videos": "videos.generations",
         "/v1/videos/generations": "videos.generations",
     }
@@ -563,6 +565,7 @@ async def request_logger(request: Request, call_next):
         "/api/v3/contents/generations/tasks": (
             "contents.generations.tasks.create" if method == "POST" else ""
         ),
+        "/v1/video/generations": "video.generations" if method == "POST" else "",
         "/v1/videos": "videos.generations" if method == "POST" else "",
         "/v1/videos/generations": "videos.generations" if method == "POST" else "",
     }
@@ -588,6 +591,7 @@ async def request_logger(request: Request, call_next):
                     "/v1/entities",
                     "/api/v1/generate",
                     "/api/v3/contents/generations/tasks",
+                    "/v1/video/generations",
                     "/v1/videos",
                     "/v1/videos/generations",
                 }:

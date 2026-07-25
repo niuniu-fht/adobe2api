@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import requests
 from starlette.concurrency import run_in_threadpool
 
@@ -656,23 +656,35 @@ def resolve_video_request_parameters(
                 raise ValueError("seed must be an integer between 0 and 4294967295")
         return fixed_duration, fixed_ratio, fixed_resolution, seed
 
-    engine = str(video_conf.get("engine") or "")
-    if engine not in {"seedance2", "seedance2-fast"}:
-        return duration, ratio, resolution, seed
-
     try:
-        duration = int(data.get("duration", duration))
+        duration = int(data.get("duration", data.get("seconds", duration)))
     except (TypeError, ValueError) as exc:
-        raise ValueError("duration must be an integer between 4 and 15") from exc
-    if duration < 4 or duration > 15:
-        raise ValueError("duration must be an integer between 4 and 15")
+        raise ValueError("duration must be an integer") from exc
+    supported_durations = tuple(
+        int(value) for value in video_conf.get("supported_durations", ())
+    )
+    if supported_durations and duration not in supported_durations:
+        choices = ", ".join(str(value) for value in supported_durations)
+        raise ValueError(f"duration must be one of: {choices}")
+    duration_min = int(video_conf.get("duration_min") or 4)
+    duration_max = int(video_conf.get("duration_max") or 15)
+    if not supported_durations and not duration_min <= duration <= duration_max:
+        raise ValueError(
+            f"duration must be an integer between {duration_min} and {duration_max}"
+        )
 
     ratio = str(
-        data.get("aspect_ratio") or data.get("aspectRatio") or ratio
+        data.get("ratio")
+        or data.get("aspect_ratio")
+        or data.get("aspectRatio")
+        or ratio
     ).strip()
-    if ratio not in SEEDANCE2_RATIOS:
+    supported_ratios = tuple(
+        str(value) for value in video_conf.get("supported_ratios", SEEDANCE2_RATIOS)
+    )
+    if ratio not in supported_ratios:
         raise ValueError(
-            "aspect_ratio must be one of: auto, 21:9, 16:9, 4:3, 1:1, 3:4, 9:16"
+            f"ratio/aspect_ratio must be one of: {', '.join(supported_ratios)}"
         )
 
     resolution = str(
@@ -699,6 +711,126 @@ def resolve_video_request_parameters(
             raise ValueError("seed must be an integer between 0 and 4294967295")
 
     return duration, ratio, resolution, seed
+
+
+def _parse_unified_video_urls(data: dict, field: str, maximum: int) -> list[str]:
+    raw_values = data.get(field, [])
+    if raw_values is None:
+        return []
+    if not isinstance(raw_values, list):
+        raise ValueError(f"{field} must be an array of URLs")
+    if len(raw_values) > maximum:
+        raise ValueError(f"{field} supports at most {maximum} item(s)")
+    urls: list[str] = []
+    for index, raw_value in enumerate(raw_values):
+        value = str(raw_value or "").strip() if isinstance(raw_value, str) else ""
+        if not value.lower().startswith(("http://", "https://")):
+            raise ValueError(f"{field}[{index}] must be an http or https URL")
+        urls.append(value)
+    return urls
+
+
+def parse_unified_video_request(data: dict, video_model_catalog: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("request body must be an object")
+
+    requested_model = str(data.get("model") or "").strip()
+    if not requested_model:
+        raise ValueError("model is required")
+    conf = video_model_catalog.get(requested_model)
+    if not isinstance(conf, dict):
+        raise ValueError(f"video model not found: {requested_model}")
+
+    prompt = str(data.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("prompt is required")
+    prompt_max_length = int(conf.get("prompt_max_length") or 2500)
+    if len(prompt) > prompt_max_length:
+        raise ValueError(f"prompt must be at most {prompt_max_length} characters")
+    if bool(data.get("watermark", False)):
+        raise ValueError("watermark=true is not supported by the Adobe Firefly bridge")
+
+    duration, ratio, resolution, seed = resolve_video_request_parameters(data, conf)
+    max_images = int(conf.get("max_images") or 0)
+    max_videos = int(conf.get("max_videos") or 0)
+    max_audios = int(conf.get("max_audios") or 0)
+    images = _parse_unified_video_urls(data, "images", max_images)
+    videos = _parse_unified_video_urls(data, "videos", max_videos)
+    audios = _parse_unified_video_urls(data, "audios", max_audios)
+    max_references = int(
+        conf.get("max_references") or (max_images + max_videos + max_audios)
+    )
+    if len(images) + len(videos) + len(audios) > max_references:
+        raise ValueError(f"images, videos and audios support {max_references} items total")
+    if audios and not (images or videos):
+        raise ValueError("audios requires at least one image or video reference")
+
+    reference_mode = str(conf.get("reference_mode") or "").strip()
+    engine = str(conf.get("engine") or "")
+    use_multimodal_references = bool(
+        engine in {"seedance2", "seedance2-fast"}
+        or videos
+        or audios
+        or len(images) > 2
+    )
+    image_role = (
+        "reference_image"
+        if reference_mode == "image" or use_multimodal_references
+        else "first_frame"
+    )
+    image_refs = []
+    for index, url in enumerate(images):
+        role = image_role
+        if image_role == "first_frame" and index == 1:
+            role = "last_frame"
+        image_refs.append({"url": url, "role": role})
+
+    internal_model = str(conf.get("canonical_model") or requested_model)
+    upstream_ratio = "auto" if ratio in {"auto", "adaptive"} else ratio
+    return {
+        "model": internal_model,
+        "response_model": requested_model,
+        "prompt": prompt,
+        "ratio": ratio,
+        "upstream_ratio": upstream_ratio,
+        "resolution": resolution,
+        "duration": duration,
+        "generate_audio": bool(
+            data.get("generate_audio", conf.get("generate_audio", True))
+        ),
+        "seed": seed,
+        "image_refs": image_refs,
+        "video_refs": [{"url": url, "role": "reference_video"} for url in videos],
+        "audio_refs": [{"url": url, "role": "reference_audio"} for url in audios],
+        "callback_url": None,
+        "user": str(data.get("user") or "").strip() or None,
+    }
+
+
+def build_unified_video_task_response(task) -> dict:
+    status = str(task.status or "queued").lower()
+    status_map = {
+        "queued": "queued",
+        "running": "processing",
+        "succeeded": "completed",
+        "failed": "failed",
+    }
+    payload = {
+        "task_id": task.id,
+        "model": task.model,
+        "status": status_map.get(status, status),
+        "progress": round(float(task.progress or 0), 2),
+        "ratio": task.ratio,
+        "duration": int(task.duration),
+        "resolution": task.resolution,
+        "video_url": task.video_url,
+        "error": task.error,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+    if status == "succeeded":
+        payload["content_url"] = f"/v1/videos/{task.id}/content"
+    return payload
 
 
 def build_generation_router(
@@ -2547,6 +2679,131 @@ def build_generation_router(
             daemon=True,
         ).start()
         return {"id": task.id}
+
+    @router.post("/v1/video/generations")
+    def create_unified_video_task(data: dict, request: Request):
+        require_service_api_key(request)
+        try:
+            normalized = parse_unified_video_request(data, video_model_catalog)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "invalid_argument",
+                        "message": str(exc),
+                    }
+                },
+            )
+
+        log_started_at = time.time()
+        task = seedance_task_store.create(
+            model=normalized["response_model"],
+            local_model=normalized["model"],
+            prompt=normalized["prompt"],
+            ratio=normalized["ratio"],
+            resolution=normalized["resolution"],
+            duration=normalized["duration"],
+            generate_audio=normalized["generate_audio"],
+            seed=normalized["seed"],
+            callback_url=None,
+            user=normalized["user"],
+            log_id=str(getattr(request.state, "log_id", "") or "") or None,
+            log_started_at=log_started_at,
+            api_style="unified",
+        )
+        _bind_deferred_task_log(request, task, normalized)
+        output_url_root = public_generated_url(request, "OUTPUT_FILE").replace(
+            "OUTPUT_FILE", ""
+        )
+        threading.Thread(
+            target=_run_seedance_official_task,
+            args=(task.id, normalized, output_url_root),
+            daemon=True,
+        ).start()
+        return {
+            "task_id": task.id,
+            "status": "queued",
+            "model": task.model,
+        }
+
+    @router.get("/v1/video/generations/{task_id}")
+    def get_unified_video_task(task_id: str, request: Request):
+        require_service_api_key(request)
+        task = seedance_task_store.get(task_id)
+        if not task:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "task_not_found",
+                        "message": "video generation task not found",
+                    }
+                },
+            )
+        return build_unified_video_task_response(task)
+
+    @router.get("/v1/videos/{task_id}/content")
+    def get_unified_video_content(task_id: str, request: Request):
+        require_service_api_key(request)
+        task = seedance_task_store.get(task_id)
+        if not task:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "task_not_found",
+                        "message": "video generation task not found",
+                    }
+                },
+            )
+        if str(task.status or "").lower() == "failed":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": task.error
+                    or {
+                        "code": "generation_failed",
+                        "message": "video generation failed",
+                    }
+                },
+            )
+        if str(task.status or "").lower() != "succeeded":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": {
+                        "code": "task_not_completed",
+                        "message": "video generation is still processing",
+                    }
+                },
+            )
+
+        filename = Path(str(task.video_url or "").split("?", 1)[0]).name
+        target = generated_dir / filename
+        if not filename or not target.exists() or not target.is_file():
+            candidates = [
+                path
+                for path in generated_dir.glob(f"{task.id}.*")
+                if path.is_file() and not path.name.endswith(".tmp")
+            ]
+            target = candidates[0] if candidates else target
+        if not target.exists() or not target.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "content_not_found",
+                        "message": "generated video content not found",
+                    }
+                },
+            )
+        media_type = {
+            ".mp4": "video/mp4",
+            ".webm": "video/webm",
+            ".mov": "video/quicktime",
+        }.get(target.suffix.lower(), "application/octet-stream")
+        return FileResponse(path=target, media_type=media_type)
 
     @router.post("/v1/videos")
     @router.post("/v1/videos/generations")

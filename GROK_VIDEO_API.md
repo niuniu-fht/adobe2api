@@ -1,5 +1,8 @@
 # Grok 视频异步兼容接口
 
+> 本文记录保留的旧兼容协议。新接入使用 README 中的
+> `POST /v1/video/generations` 统一视频协议和通用模型 ID。
+
 本项目在 `6001` 提供 xAI Grok Imagine Video 的异步请求形态，底层仍使用已接入的
 Adobe Seedance 视频桥接。接口路径、`request_id` 和查询响应按 xAI 视频协议组织。
 `model` 可以使用 Grok 名称，也可以直接使用项目固定模型名：

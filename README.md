@@ -77,15 +77,10 @@ Video 分支 Compose 默认使用宿主机端口 `6002`，持久化目录为
 - `gemini-3.1-flash-image` / `nano-banana-2`（Nano Banana 2 兼容别名）
 - `gemini-3-pro-image` / `nano-banana-pro`（Nano Banana Pro 兼容别名）
 - `gpt-image-*`（图像，对应上游 `gpt-image:2`）
-- `sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}`（前端固定参数模型名）
-- `sd2-fast-{4s..15s}-{16x9|9x16}-{480p|720p}`（前端固定参数模型名）
-- `sora2-*`（OpenAI 视频）
-- `sora2-pro-*`（OpenAI 视频）
-- `veo31-*`（Google 视频）
-- `veo31-ref-*`（Google 视频，参考图模式）
-- `veo31-fast-*`（Google 视频）
-- `kling3-*`（Kling 3.0，支持首尾帧参考）
-- `kling-o3-*`（Kling，支持实体引用）
+- `seedance2` / `seedance2-fast`（ByteDance 视频）
+- `sora2` / `sora2-pro`（OpenAI 视频）
+- `veo31` / `veo31-ref` / `veo31-fast`（Google 视频）
+- `kling3` / `kling-o3`（Kling 视频）
 
 Nano Banana 图像模型（`nano-banana-2`）：
 
@@ -149,122 +144,61 @@ GPT Image 图像模型（实验接入）：
 - 如果请求里传入 `auto`，服务端会回退为 `1:1`
 - 请显式传具体比例，或直接使用带比例后缀的模型 ID
 
-Sora2 视频模型：
+视频模型使用通用模型 ID。时长、比例和分辨率通过请求参数传递，`/v1/models`
+不会再为每个参数组合返回一个模型 ID。旧组合 ID 作为隐藏兼容别名继续可用。
 
-- 命名：`sora2-{duration}-{ratio}`
-- 时长：`4s` / `8s` / `12s`
-- 比例：`9x16` / `16x9`
-- 示例：
-  - `sora2-4s-16x9`
-  - `sora2-8s-9x16`
+| 模型 ID | 时长（秒） | 比例 | 分辨率 | 参考素材 |
+| --- | --- | --- | --- | --- |
+| `seedance2` | `4-15` | `adaptive` / `21:9` / `16:9` / `4:3` / `1:1` / `3:4` / `9:16` | `480p` / `720p` / `1080p` | 9 图、3 视频、3 音频，合计最多 9 个 |
+| `seedance2-fast` | `4-15` | 同上 | `480p` / `720p` | 9 图、3 视频、3 音频，合计最多 9 个 |
+| `sora2` / `sora2-pro` | `4` / `8` / `12` | `16:9` / `9:16` | `720p` | 1 张图 |
+| `veo31` / `veo31-fast` | `4` / `6` / `8` | `16:9` / `9:16` | `720p` / `1080p` | 最多 2 张首尾帧图 |
+| `veo31-ref` | `4` / `6` / `8` | `16:9` / `9:16` | `720p` / `1080p` | 最多 3 张参考图 |
+| `kling3` | `5` / `10` / `15` | `16:9` / `9:16` | `720p` | 最多 2 张首尾帧图 |
+| `kling-o3` | `5` / `15` | `16:9` / `9:16` | `1080p` | 最多 2 张首尾帧图 |
 
-Sora2 Pro 视频模型：
-
-- 命名：`sora2-pro-{duration}-{ratio}`
-- 时长：`4s` / `8s` / `12s`
-- 比例：`9x16` / `16x9`
-- 示例：
-  - `sora2-pro-4s-16x9`
-  - `sora2-pro-8s-9x16`
-
-Veo31 视频模型：
-
-- 命名：`veo31-{duration}-{ratio}-{resolution}`
-- 时长：`4s` / `6s` / `8s`
-- 比例：`16x9` / `9x16`
-- 分辨率：`1080p` / `720p`
-- 最多支持 2 张参考图：
-  - 1 张：首帧参考
-  - 2 张：首帧 + 尾帧参考
-- 音频默认开启
-- 示例：
-  - `veo31-4s-16x9-1080p`
-  - `veo31-6s-9x16-720p`
-
-Veo31 Ref 视频模型（参考图模式）：
-
-- 命名：`veo31-ref-{duration}-{ratio}-{resolution}`
-- 时长：`4s` / `6s` / `8s`
-- 比例：`16x9` / `9x16`
-- 分辨率：`1080p` / `720p`
-- 始终使用参考图模式（不是首尾帧模式）
-- 最多支持 3 张参考图（映射到上游 `referenceBlobs[].usage="asset"`）
-- 示例：
-  - `veo31-ref-4s-9x16-720p`
-  - `veo31-ref-6s-16x9-1080p`
-  - `veo31-ref-8s-9x16-1080p`
-
-Veo31 Fast 视频模型：
-
-- 命名：`veo31-fast-{duration}-{ratio}-{resolution}`
-- 时长：`4s` / `6s` / `8s`
-- 比例：`16x9` / `9x16`
-- 分辨率：`1080p` / `720p`
-- 最多支持 2 张参考图：
-  - 1 张：首帧参考
-  - 2 张：首帧 + 尾帧参考
-- 音频默认开启
-- 示例：
-  - `veo31-fast-4s-16x9-1080p`
-  - `veo31-fast-6s-9x16-720p`
-
-Kling 3.0 视频模型：
-
-- 命名：`kling3-{duration}-{ratio}`
-- 时长：`5s` / `10s` / `15s`
-- 比例：`16x9` / `9x16`
-- 分辨率：`720p`
-- 最多支持 2 张帧参考图：1 张为首帧，2 张为首帧 + 尾帧
-- 音频默认开启；可通过 `generate_audio` / `generateAudio` 覆盖
-- 上游模型版本：`kling_v3_standard_i2v`
-- 示例：
-  - `kling3-5s-16x9`
-  - `kling3-15s-9x16`
-
-Kling O3 视频模型：
-
-- 命名：`kling-o3-{duration}-{ratio}`
-- 时长：`5s` / `15s`
-- 比例：`16x9` / `9x16`
-- 分辨率：`1080p`
-- 最多支持 2 张帧参考图
-- 支持通过 `@entity:实体名` 引用已创建的实体
-- 示例：
-  - `kling-o3-5s-16x9`
-  - `kling-o3-15s-9x16`
-
-Seedance 2.0 系列使用固定参数模型名。标准版格式为
-`sd2-{4s..15s}-{16x9|9x16}-{720p|1080p}`，Fast 格式为
-`sd2-fast-{4s..15s}-{16x9|9x16}-{480p|720p}`。模型名直接确定时长、比例和
-分辨率。所有公开视频模型的时长和比例都只由模型 ID 决定；请求体出现
-`duration`、`seconds`、`ratio`、`aspect_ratio` 或 `aspectRatio` 会返回参数错误。
-两者均支持音频开关、seed、首尾帧和
-图片/视频/音频多模态参考；参考素材可在一次请求中使用 URL、Data URL 或纯
-Base64。标准版完整参数和实测示例见
-[`SEEDANCE2_API.md`](SEEDANCE2_API.md)，Fast 版见
-[`SEEDANCE2_FAST_API.md`](SEEDANCE2_FAST_API.md)。
-
-新接入建议使用 Seedance 官方兼容的异步接口：
+统一视频异步协议：
 
 ```text
-POST /api/v3/contents/generations/tasks
-GET  /api/v3/contents/generations/tasks/{id}
+POST /v1/video/generations
+GET  /v1/video/generations/{task_id}
+GET  /v1/videos/{task_id}/content
 ```
 
-完整调用说明、比例表和 Adobe bridge 差异见
-[`SEEDANCE_OFFICIAL_API.md`](SEEDANCE_OFFICIAL_API.md)。
+创建视频：
 
-xAI Grok Imagine Video 异步兼容入口：
-
-```text
-POST /v1/videos/generations
-POST /v1/videos
-GET  /v1/videos/{request_id}
+```bash
+curl -X POST "http://127.0.0.1:6002/v1/video/generations" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "seedance2",
+    "prompt": "@图片1 是主角，保持人物一致性",
+    "images": ["https://example.com/character.jpg"],
+    "videos": [],
+    "audios": [],
+    "ratio": "16:9",
+    "duration": 15,
+    "resolution": "720p",
+    "watermark": false
+  }'
 ```
 
-创建接口返回 `request_id`，查询接口返回 `pending`、`done` 或 `failed`，并包含
-`progress` 与最终 `video.url`。详细参数和参考图示例见
-[`GROK_VIDEO_API.md`](GROK_VIDEO_API.md)。
+创建响应包含 `task_id`。查询接口返回 `queued`、`processing`、`completed` 或
+`failed`；完成后通过内容端点播放或下载：
+
+```bash
+curl "http://127.0.0.1:6002/v1/video/generations/<task_id>" \
+  -H "Authorization: Bearer <service_api_key>"
+
+curl -L "http://127.0.0.1:6002/v1/videos/<task_id>/content" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -o result.mp4
+```
+
+`images`、`videos`、`audios` 按数组顺序分别对应提示词里的 `@图片1`、
+`@视频1`、`@音频1`。统一协议只接收可直接访问的 HTTP(S) 素材 URL。
+原有 Seedance 官方兼容接口和 xAI Grok 兼容接口继续保留。
 
 ### 3.1 获取模型列表
 

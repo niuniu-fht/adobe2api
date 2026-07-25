@@ -111,7 +111,6 @@ DEFAULT_MODEL_ID = "nano-banana-pro-2k-16x9"
 
 VIDEO_MODEL_CATALOG: dict[str, dict] = {
     "seedance2": {
-        "hidden": True,
         "provider": "bytedance",
         "engine": "seedance2",
         "upstream_model_id": "seedance",
@@ -119,13 +118,19 @@ VIDEO_MODEL_CATALOG: dict[str, dict] = {
         "duration": 8,
         "aspect_ratio": "16:9",
         "resolution": "720p",
+        "duration_min": 4,
+        "duration_max": 15,
+        "supported_ratios": ("adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
         "supported_resolutions": ("480p", "720p", "1080p"),
+        "max_images": 9,
+        "max_videos": 3,
+        "max_audios": 3,
+        "max_references": 9,
         "generate_audio": True,
         "prompt_max_length": 2500,
         "description": "Firefly Seedance 2.0 video model (4-15s, 480p/720p/1080p)",
     },
     "seedance2-fast": {
-        "hidden": True,
         "provider": "bytedance",
         "engine": "seedance2-fast",
         "upstream_model_id": "seedance",
@@ -133,7 +138,14 @@ VIDEO_MODEL_CATALOG: dict[str, dict] = {
         "duration": 8,
         "aspect_ratio": "16:9",
         "resolution": "720p",
+        "duration_min": 4,
+        "duration_max": 15,
+        "supported_ratios": ("adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
         "supported_resolutions": ("480p", "720p"),
+        "max_images": 9,
+        "max_videos": 3,
+        "max_audios": 3,
+        "max_references": 9,
         "generate_audio": True,
         "prompt_max_length": 2500,
         "description": "Firefly Seedance 2.0 Fast video model (4-15s, 480p/720p)",
@@ -156,6 +168,7 @@ def _register_seedance_preset_family(
                     f"{prefix}-{duration}s-{RATIO_SUFFIX_MAP[ratio]}-{resolution}"
                 )
                 VIDEO_MODEL_CATALOG[model_id] = {
+                    "hidden": True,
                     "provider": "bytedance",
                     "engine": engine,
                     "upstream_model_id": "seedance",
@@ -200,10 +213,26 @@ def _register_sora_family(
     upstream_model: str,
     family_label: str,
 ) -> None:
+    VIDEO_MODEL_CATALOG[prefix] = {
+        "provider": "openai",
+        "engine": "sora2",
+        "upstream_model": upstream_model,
+        "duration": 8,
+        "supported_durations": (4, 8, 12),
+        "aspect_ratio": "16:9",
+        "supported_ratios": ("16:9", "9:16"),
+        "resolution": "720p",
+        "supported_resolutions": ("720p",),
+        "max_images": 1,
+        "max_videos": 0,
+        "max_audios": 0,
+        "description": f"{family_label} (duration, ratio and resolution are request parameters)",
+    }
     for duration in (4, 8, 12):
         for ratio in ("9:16", "16:9"):
             model_id = f"{prefix}-{duration}s-{RATIO_SUFFIX_MAP[ratio]}"
             VIDEO_MODEL_CATALOG[model_id] = {
+                "hidden": True,
                 "provider": "openai",
                 "engine": "sora2",
                 "upstream_model": upstream_model,
@@ -227,11 +256,64 @@ _register_sora_family(
 )
 
 
+VIDEO_MODEL_CATALOG.update(
+    {
+        "veo31": {
+            "provider": "google",
+            "engine": "veo31-standard",
+            "upstream_model": "google:firefly:colligo:veo31",
+            "duration": 6,
+            "supported_durations": (4, 6, 8),
+            "aspect_ratio": "16:9",
+            "supported_ratios": ("16:9", "9:16"),
+            "resolution": "720p",
+            "supported_resolutions": ("720p", "1080p"),
+            "max_images": 2,
+            "max_videos": 0,
+            "max_audios": 0,
+            "description": "Veo 3.1 video model (duration, ratio and resolution are request parameters)",
+        },
+        "veo31-ref": {
+            "provider": "google",
+            "engine": "veo31-standard",
+            "upstream_model": "google:firefly:colligo:veo31",
+            "duration": 6,
+            "supported_durations": (4, 6, 8),
+            "aspect_ratio": "16:9",
+            "supported_ratios": ("16:9", "9:16"),
+            "resolution": "720p",
+            "supported_resolutions": ("720p", "1080p"),
+            "reference_mode": "image",
+            "max_images": 3,
+            "max_videos": 0,
+            "max_audios": 0,
+            "description": "Veo 3.1 reference video model (duration, ratio and resolution are request parameters)",
+        },
+        "veo31-fast": {
+            "provider": "google",
+            "engine": "veo31-fast",
+            "upstream_model": "google:firefly:colligo:veo31-fast",
+            "duration": 6,
+            "supported_durations": (4, 6, 8),
+            "aspect_ratio": "16:9",
+            "supported_ratios": ("16:9", "9:16"),
+            "resolution": "720p",
+            "supported_resolutions": ("720p", "1080p"),
+            "max_images": 2,
+            "max_videos": 0,
+            "max_audios": 0,
+            "description": "Veo 3.1 Fast video model (duration, ratio and resolution are request parameters)",
+        },
+    }
+)
+
+
 for dur in (4, 6, 8):
     for ratio in ("16:9", "9:16"):
         for res in ("1080p", "720p"):
             model_id = f"veo31-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
             VIDEO_MODEL_CATALOG[model_id] = {
+                "hidden": True,
                 "provider": "google",
                 "engine": "veo31-standard",
                 "upstream_model": "google:firefly:colligo:veo31",
@@ -247,6 +329,7 @@ for dur in (4, 6, 8):
         for res in ("1080p", "720p"):
             model_id = f"veo31-ref-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
             VIDEO_MODEL_CATALOG[model_id] = {
+                "hidden": True,
                 "provider": "google",
                 "engine": "veo31-standard",
                 "upstream_model": "google:firefly:colligo:veo31",
@@ -263,6 +346,7 @@ for dur in (4, 6, 8):
         for res in ("1080p", "720p"):
             model_id = f"veo31-fast-{dur}s-{RATIO_SUFFIX_MAP[ratio]}-{res}"
             VIDEO_MODEL_CATALOG[model_id] = {
+                "hidden": True,
                 "provider": "google",
                 "engine": "veo31-fast",
                 "upstream_model": "google:firefly:colligo:veo31-fast",
@@ -273,10 +357,27 @@ for dur in (4, 6, 8):
                 "description": f"Veo 3.1 Fast video model ({dur}s {ratio} {res})",
             }
 
+VIDEO_MODEL_CATALOG["kling-o3"] = {
+    "provider": "kling",
+    "engine": "kling-o3",
+    "upstream_model": "kling:firefly:colligo:o3",
+    "duration": 5,
+    "supported_durations": (5, 15),
+    "aspect_ratio": "16:9",
+    "supported_ratios": ("16:9", "9:16"),
+    "resolution": "1080p",
+    "supported_resolutions": ("1080p",),
+    "max_images": 2,
+    "max_videos": 0,
+    "max_audios": 0,
+    "description": "Kling O3 video model (duration, ratio and resolution are request parameters)",
+}
+
 for dur in (5, 15):
     for ratio in ("16:9", "9:16"):
         model_id = f"kling-o3-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
         VIDEO_MODEL_CATALOG[model_id] = {
+            "hidden": True,
             "provider": "kling",
             "engine": "kling-o3",
             "upstream_model": "kling:firefly:colligo:o3",
@@ -287,10 +388,28 @@ for dur in (5, 15):
             "description": f"Kling O3 video model ({dur}s {ratio})",
         }
 
+VIDEO_MODEL_CATALOG["kling3"] = {
+    "provider": "kling",
+    "engine": "kling3",
+    "upstream_model": "kling:firefly:colligo:3.0",
+    "duration": 5,
+    "supported_durations": (5, 10, 15),
+    "aspect_ratio": "16:9",
+    "supported_ratios": ("16:9", "9:16"),
+    "resolution": "720p",
+    "supported_resolutions": ("720p",),
+    "max_images": 2,
+    "max_videos": 0,
+    "max_audios": 0,
+    "generate_audio": True,
+    "description": "Kling 3.0 video model (duration, ratio and resolution are request parameters)",
+}
+
 for dur in (5, 10, 15):
     for ratio in ("16:9", "9:16"):
         model_id = f"kling3-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
         VIDEO_MODEL_CATALOG[model_id] = {
+            "hidden": True,
             "provider": "kling",
             "engine": "kling3",
             "upstream_model": "kling:firefly:colligo:3.0",

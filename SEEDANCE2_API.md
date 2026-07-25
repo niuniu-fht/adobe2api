@@ -1,5 +1,8 @@
 # Seedance 2.0 标准版本机调用文档
 
+> 本文记录保留的旧兼容协议。新接入使用 README 中的
+> `POST /v1/video/generations` 统一视频协议和通用模型 ID。
+
 本文档对应 Adobe Firefly 的 Seedance 2.0 标准版接入。服务地址为
 `http://127.0.0.1:6002`，新请求统一使用 `sd2-{时长}-{比例}-{分辨率}` 模型名。
 

@@ -77,9 +77,10 @@ Current supported model families are:
 - `nano-banana2-*` (image, maps to upstream `nano-banana-3`)
 - `nano-banana-pro-*` (image)
 - `gpt-image-*` (image, maps to upstream `gpt-image:2`)
-- `sora2-*` / `sora2-pro-*` (OpenAI video)
-- `veo31-*` / `veo31-ref-*` / `veo31-fast-*` (Google video)
-- `kling3-*` / `kling-o3-*` (Kling video)
+- `seedance2` / `seedance2-fast` (ByteDance video)
+- `sora2` / `sora2-pro` (OpenAI video)
+- `veo31` / `veo31-ref` / `veo31-fast` (Google video)
+- `kling3` / `kling-o3` (Kling video)
 
 Nano Banana image models (`nano-banana-2`):
 
@@ -133,81 +134,62 @@ About `auto`:
 - If `auto` is sent, the service falls back to `1:1`
 - Prefer sending an explicit ratio or using a model ID with a ratio suffix
 
-Sora2 video models:
+Video models now use one public ID per model family. Duration, ratio, and
+resolution are request parameters. Legacy combination IDs remain available as
+hidden compatibility aliases and are omitted from `/v1/models`.
 
-- Pattern: `sora2-{duration}-{ratio}`
-- Duration: `4s` / `8s` / `12s`
-- Ratio: `9x16` / `16x9`
-- Examples:
-  - `sora2-4s-16x9`
-  - `sora2-8s-9x16`
+| Model ID | Duration (seconds) | Ratios | Resolutions | References |
+| --- | --- | --- | --- | --- |
+| `seedance2` | `4-15` | `adaptive`, `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16` | `480p`, `720p`, `1080p` | 9 images, 3 videos, 3 audios; 9 total |
+| `seedance2-fast` | `4-15` | Same as above | `480p`, `720p` | 9 images, 3 videos, 3 audios; 9 total |
+| `sora2` / `sora2-pro` | `4`, `8`, `12` | `16:9`, `9:16` | `720p` | 1 image |
+| `veo31` / `veo31-fast` | `4`, `6`, `8` | `16:9`, `9:16` | `720p`, `1080p` | Up to 2 frame images |
+| `veo31-ref` | `4`, `6`, `8` | `16:9`, `9:16` | `720p`, `1080p` | Up to 3 reference images |
+| `kling3` | `5`, `10`, `15` | `16:9`, `9:16` | `720p` | Up to 2 frame images |
+| `kling-o3` | `5`, `15` | `16:9`, `9:16` | `1080p` | Up to 2 frame images |
 
-Sora2 Pro video models:
+Unified asynchronous video protocol:
 
-- Pattern: `sora2-pro-{duration}-{ratio}`
-- Duration: `4s` / `8s` / `12s`
-- Ratio: `9x16` / `16x9`
-- Examples:
-  - `sora2-pro-4s-16x9`
-  - `sora2-pro-8s-9x16`
+```text
+POST /v1/video/generations
+GET  /v1/video/generations/{task_id}
+GET  /v1/videos/{task_id}/content
+```
 
-Veo31 video models:
+Create a video:
 
-- Pattern: `veo31-{duration}-{ratio}-{resolution}`
-- Duration: `4s` / `6s` / `8s`
-- Ratio: `16x9` / `9x16`
-- Resolution: `1080p` / `720p`
-- Supports up to 2 reference images:
-  - 1 image: first-frame reference
-  - 2 images: first-frame + last-frame reference
-- Audio defaults to enabled
-- Examples:
-  - `veo31-4s-16x9-1080p`
-  - `veo31-6s-9x16-720p`
+```bash
+curl -X POST "http://127.0.0.1:6002/v1/video/generations" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "seedance2",
+    "prompt": "@Image1 is the main character; keep the character consistent",
+    "images": ["https://example.com/character.jpg"],
+    "videos": [],
+    "audios": [],
+    "ratio": "16:9",
+    "duration": 15,
+    "resolution": "720p",
+    "watermark": false
+  }'
+```
 
-Veo31 Ref video models (reference-image mode):
+The create response includes `task_id`. Query status is `queued`, `processing`,
+`completed`, or `failed`. After completion, play or download the content:
 
-- Pattern: `veo31-ref-{duration}-{ratio}-{resolution}`
-- Duration: `4s` / `6s` / `8s`
-- Ratio: `16x9` / `9x16`
-- Resolution: `1080p` / `720p`
-- Always uses reference image mode (not first/last frame mode)
-- Supports up to 3 reference images (mapped to upstream `referenceBlobs[].usage="asset"`)
-- Examples:
-  - `veo31-ref-4s-9x16-720p`
-  - `veo31-ref-6s-16x9-1080p`
-  - `veo31-ref-8s-9x16-1080p`
+```bash
+curl "http://127.0.0.1:6002/v1/video/generations/<task_id>" \
+  -H "Authorization: Bearer <service_api_key>"
 
-Veo31 Fast video models:
+curl -L "http://127.0.0.1:6002/v1/videos/<task_id>/content" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -o result.mp4
+```
 
-- Pattern: `veo31-fast-{duration}-{ratio}-{resolution}`
-- Duration: `4s` / `6s` / `8s`
-- Ratio: `16x9` / `9x16`
-- Resolution: `1080p` / `720p`
-- Supports up to 2 reference images:
-  - 1 image: first-frame reference
-  - 2 images: first-frame + last-frame reference
-- Audio defaults to enabled
-- Examples:
-  - `veo31-fast-4s-16x9-1080p`
-  - `veo31-fast-6s-9x16-720p`
-
-Kling 3.0 video models:
-
-- Pattern: `kling3-{duration}-{ratio}`
-- Duration: `5s` / `10s` / `15s`
-- Ratio: `16x9` / `9x16`
-- Resolution: `720p`
-- Supports up to 2 frame reference images: 1 image is first frame, 2 images are first frame + last frame
-- Audio defaults to enabled; override with `generate_audio` / `generateAudio`
-- Upstream model version: `kling_v3_standard_i2v`
-- Examples:
-  - `kling3-5s-16x9`
-  - `kling3-15s-9x16`
-
-For every public video model, duration and ratio come only from the model ID.
-Requests containing `duration`, `seconds`, `ratio`, `aspect_ratio`, or
-`aspectRatio` are rejected.
+Array order maps `images`, `videos`, and `audios` to `@Image1`, `@Video1`, and
+`@Audio1` in the prompt. This endpoint accepts directly accessible HTTP(S)
+material URLs. Existing Seedance official and xAI Grok compatibility routes remain available.
 
 ### 3.1 List models
 
@@ -255,17 +237,20 @@ curl -X POST "http://127.0.0.1:6002/v1/chat/completions" \
   -H "Authorization: Bearer <service_api_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "sora2-4s-16x9",
+    "model": "sora2",
+    "duration": 4,
+    "ratio": "16:9",
+    "resolution": "720p",
     "messages": [{"role":"user","content":"a drone shot over snowy forest"}]
   }'
 ```
 
 Veo31 single-image semantics:
 
-- `veo31-*` / `veo31-fast-*`: frame mode
+- `veo31` / `veo31-fast`: frame mode
   - 1 image => first frame
   - 2 images => first frame + last frame
-- `veo31-ref-*`: reference-image mode
+- `veo31-ref`: reference-image mode
   - 1~3 images => reference images
 
 Image-to-video:
@@ -275,7 +260,10 @@ curl -X POST "http://127.0.0.1:6002/v1/chat/completions" \
   -H "Authorization: Bearer <service_api_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "sora2-8s-9x16",
+    "model": "sora2",
+    "duration": 8,
+    "ratio": "9:16",
+    "resolution": "720p",
     "messages": [{
       "role":"user",
       "content":[
