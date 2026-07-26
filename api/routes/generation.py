@@ -833,6 +833,13 @@ def build_unified_video_task_response(task) -> dict:
     return payload
 
 
+def handle_video_auth_failure(token_manager, token: str) -> tuple[str, str]:
+    result = token_manager.handle_auth_failure(token)
+    status = str(result.get("status") or "invalid").strip().lower()
+    message = str(result.get("message") or "Token invalid or expired").strip()
+    return status, message
+
+
 def build_generation_router(
     *,
     store,
@@ -2486,7 +2493,10 @@ def build_generation_router(
         last_error = "No active tokens available in the pool"
         last_code = "NoAvailableToken"
 
-        for attempt in range(1, max_attempts + 1):
+        attempt = 0
+        auth_recovery_retry_granted = False
+        while attempt < max_attempts:
+            attempt += 1
             token = token_manager.get_available(strategy=client.token_rotation_strategy)
             if not token:
                 break
@@ -2597,9 +2607,20 @@ def build_generation_router(
                 last_code = "QuotaExceeded"
                 retryable = attempt < max_attempts
             except auth_error_cls as exc:
-                token_manager.report_invalid(token)
-                last_error = str(exc)
+                auth_status, auth_message = handle_video_auth_failure(
+                    token_manager, token
+                )
+                last_error = (
+                    auth_message if auth_status != "invalid" else str(exc)
+                )
                 last_code = "AuthenticationError"
+                if (
+                    auth_status == "refreshed"
+                    and not auth_recovery_retry_granted
+                    and attempt >= max_attempts
+                ):
+                    max_attempts += 1
+                    auth_recovery_retry_granted = True
                 retryable = attempt < max_attempts
             except upstream_temp_error_cls as exc:
                 last_error = str(exc)

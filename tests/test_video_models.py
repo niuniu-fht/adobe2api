@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from api.routes.generation import (
     build_unified_video_task_response,
+    handle_video_auth_failure,
     parse_unified_video_request,
     resolve_video_request_parameters,
 )
@@ -42,6 +43,32 @@ def test_public_video_models_expose_one_id_per_model_family():
         "kling3",
     }
     assert all("s-" not in model_id for model_id in public_ids)
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            {"status": "refreshed", "message": "token refreshed via cookie"},
+            ("refreshed", "token refreshed via cookie"),
+        ),
+        (
+            {"status": "retry", "message": "auto refresh failed: expired cookie"},
+            ("retry", "auto refresh failed: expired cookie"),
+        ),
+        ({}, ("invalid", "Token invalid or expired")),
+    ],
+)
+def test_video_auth_failure_uses_bound_token_refresh(result, expected):
+    calls = []
+
+    class TokenManagerStub:
+        def handle_auth_failure(self, token):
+            calls.append(token)
+            return result
+
+    assert handle_video_auth_failure(TokenManagerStub(), "STALE_TOKEN") == expected
+    assert calls == ["STALE_TOKEN"]
 
 
 @pytest.mark.parametrize(
