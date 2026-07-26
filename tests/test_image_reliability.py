@@ -75,7 +75,26 @@ def test_submit_unsafe_stops_before_other_recovery(monkeypatch, unsafe_source):
     assert calls["fallback"] == (0 if unsafe_source == "primary" else 1)
 
 
-def test_poll_unsafe_stops_before_download(monkeypatch):
+@pytest.mark.parametrize(
+    ("status_code", "unsafe_body", "upstream_code"),
+    [
+        (200, {"result": {"error_code": "image_unsafe"}}, "image_unsafe"),
+        (
+            451,
+            {
+                "error_code": "prompt_unsafe",
+                "message": (
+                    "The provided prompt is considered unsafe and it cannot be used "
+                    "to generate content."
+                ),
+            },
+            "prompt_unsafe",
+        ),
+    ],
+)
+def test_poll_unsafe_stops_before_download(
+    monkeypatch, status_code, unsafe_body, upstream_code
+):
     client = AdobeClient()
     download_calls = []
     monkeypatch.setattr(
@@ -85,9 +104,7 @@ def test_poll_unsafe_stops_before_download(monkeypatch):
     monkeypatch.setattr(
         client,
         "_get",
-        lambda *args, **kwargs: FakeResponse(
-            200, {"result": {"error_code": "image_unsafe"}}
-        ),
+        lambda *args, **kwargs: FakeResponse(status_code, unsafe_body),
     )
     monkeypatch.setattr(
         client,
@@ -95,9 +112,10 @@ def test_poll_unsafe_stops_before_download(monkeypatch):
         lambda **kwargs: download_calls.append(kwargs),
     )
 
-    with pytest.raises(ContentPolicyError, match="图片不安全"):
+    with pytest.raises(ContentPolicyError, match="图片不安全") as error_info:
         client._generate_once(token="TOKEN", prompt="draw", seed=42)
 
+    assert error_info.value.upstream_code == upstream_code
     assert download_calls == []
 
 
@@ -208,6 +226,50 @@ def test_images_endpoint_returns_exact_unsafe_contract(monkeypatch):
         "/v1/images/generations",
         headers=headers,
         json={"model": "gpt-image-2", "prompt": "draw", "n": 3},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "message": "内容审核未通过，请修改提示词后重试",
+            "type": "invalid_request_error",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gpt-image-gemini-3.1-flash-image",
+        "gpt-image-gemini-3-pro-image",
+    ],
+)
+def test_gemini_images_edits_returns_gpt_image_unsafe_contract(
+    monkeypatch, model_id
+):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    monkeypatch.setattr(
+        app_module.client,
+        "upload_image",
+        lambda *_args, **_kwargs: "reference-image-id",
+    )
+    monkeypatch.setattr(
+        app_module.client,
+        "generate",
+        lambda **kwargs: (_ for _ in ()).throw(
+            ContentPolicyError("unsafe", upstream_code="prompt_unsafe")
+        ),
+    )
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+
+    response = TestClient(app_module.app).post(
+        "/v1/images/edits",
+        headers=headers,
+        data={"model": model_id, "prompt": "edit"},
+        files={"image": ("reference.png", _png_bytes(), "image/png")},
     )
 
     assert response.status_code == 400

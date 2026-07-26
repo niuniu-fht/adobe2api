@@ -1353,7 +1353,7 @@ class AdobeClient:
         upstream_code = (
             str(data.get("error_code") or data.get("code") or "").strip().lower()
         )
-        if upstream_code == "image_unsafe":
+        if upstream_code in {"image_unsafe", "prompt_unsafe"}:
             raise ContentPolicyError(
                 "图片不安全", upstream_code=upstream_code, param=param
             )
