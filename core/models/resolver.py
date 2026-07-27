@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from .catalog import DEFAULT_MODEL_ID, MODEL_CATALOG, SUPPORTED_RATIOS
 from .gemini import GEMINI_IMAGE_MODELS, normalize_gemini_model_id
 from .openai_images import (
+    normalize_openai_gemini_aspect_ratio,
     normalize_openai_gemini_model_id,
     parse_openai_gemini_size,
 )
@@ -42,10 +43,11 @@ def _resolve_compatible_model_id(
     if canonical_model_id is None:
         return None
     family_prefix = GEMINI_IMAGE_MODELS[canonical_model_id]["family_prefix"]
+    catalog_ratio = "1:1" if aspect_ratio == "auto" else aspect_ratio
     for candidate_id, config in MODEL_CATALOG.items():
         if not candidate_id.startswith(f"{family_prefix}-"):
             continue
-        if str(config.get("aspect_ratio") or "") != aspect_ratio:
+        if str(config.get("aspect_ratio") or "") != catalog_ratio:
             continue
         if str(config.get("output_resolution") or "").upper() != output_resolution:
             continue
@@ -99,12 +101,13 @@ def resolve_ratio_and_resolution(
     )
     size_ratio = compatible_size[0] if compatible_size else ""
     size_resolution = compatible_size[1] if compatible_size else None
-    ratio = (
-        str(data.get("aspect_ratio") or "").strip()
-        or size_ratio
-        or ratio_from_size(data.get("size", "1024x1024"))
+    explicit_ratio = str(data.get("aspect_ratio") or "").strip()
+    ratio = explicit_ratio or size_ratio or ratio_from_size(
+        data.get("size", "1024x1024")
     )
-    if ratio not in SUPPORTED_RATIOS:
+    if canonical_model_id:
+        ratio = normalize_openai_gemini_aspect_ratio(ratio)
+    elif ratio not in SUPPORTED_RATIOS:
         ratio = "1:1"
 
     if model_id and canonical_model_id:

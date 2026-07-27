@@ -857,12 +857,81 @@ def test_openai_prefixed_gemini_model_is_normalized():
 
 
 def test_openai_sizes_map_to_gemini_ratio_and_resolution():
+    assert parse_openai_gemini_size("auto") == ("auto", "2K")
     assert parse_openai_gemini_size("1024x1024") == ("1:1", "1K")
     assert parse_openai_gemini_size("1536x1024") == ("3:2", "2K")
     assert parse_openai_gemini_size("1024x1536") == ("2:3", "2K")
     assert parse_openai_gemini_size("1792x1024") == ("16:9", "2K")
     assert parse_openai_gemini_size("1024x1792") == ("9:16", "2K")
     assert parse_openai_gemini_size("4096x4096") == ("1:1", "4K")
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ("8:1", "8:1"),
+        ("4:1", "4:1"),
+        ("21:9", "21:9"),
+        ("16:9", "16:9"),
+        ("5:4", "5:4"),
+        ("4:3", "4:3"),
+        ("3:2", "3:2"),
+        ("1:1", "1:1"),
+        ("4:5", "4:5"),
+        ("3:4", "3:4"),
+        ("2:3", "2:3"),
+        ("9:16", "9:16"),
+        ("1:4", "1:4"),
+        ("1:8", "1:8"),
+        ("7:5", "4:3"),
+        ("5:7", "3:4"),
+    ],
+)
+def test_openai_gemini_ratios_use_nearest_upstream_ratio(requested, expected):
+    assert parse_openai_gemini_size(requested) == (expected, "2K")
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gpt-image-gemini-3.1-flash-image",
+        "gpt-image-gemini-3-pro-image",
+    ],
+)
+def test_openai_prefixed_gemini_auto_reaches_upstream_payload(model_id):
+    ratio, resolution, response_model = resolve_ratio_and_resolution(
+        {"size": "auto"},
+        model_id,
+    )
+    model_conf = resolve_model(response_model)
+
+    assert (ratio, resolution, response_model) == ("auto", "2K", model_id)
+
+    payload = build_image_payload_candidates(
+        prompt="draw freely",
+        aspect_ratio=ratio,
+        output_resolution=resolution,
+        upstream_model_id=model_conf["upstream_model_id"],
+        upstream_model_version=model_conf["upstream_model_version"],
+    )[0]
+
+    assert payload["modelSpecificPayload"]["aspectRatio"] == "auto"
+    assert payload["modelSpecificPayload"]["imageSize"] == "2K"
+    assert "size" not in payload
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gpt-image-gemini-3.1-flash-image",
+        "gpt-image-gemini-3-pro-image",
+    ],
+)
+def test_openai_prefixed_gemini_explicit_ratio_uses_nearest_upstream(model_id):
+    assert resolve_ratio_and_resolution(
+        {"aspect_ratio": "7:5", "image_size": "4K"},
+        model_id,
+    ) == ("4:3", "4K", model_id)
 
 
 def test_openai_prefixed_gemini_size_reaches_gemini_payload():

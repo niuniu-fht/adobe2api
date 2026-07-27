@@ -202,7 +202,6 @@ def build_image_payload_candidates(
         "modelVersion": upstream_model_version,
         "n": 1,
         "prompt": prompt,
-        "size": size_from_ratio(effective_ratio, normalized_output_resolution),
         "seeds": [int(time.time()) % 999999],
         "groundSearch": False,
         "skipCai": False,
@@ -216,7 +215,11 @@ def build_image_payload_candidates(
         },
         "outputResolution": normalized_output_resolution,
     }
-    if normalized_ratio and normalized_ratio != "auto":
+    if effective_ratio != "auto":
+        base_payload["size"] = size_from_ratio(
+            effective_ratio, normalized_output_resolution
+        )
+    if normalized_ratio:
         base_payload["modelSpecificPayload"]["aspectRatio"] = normalized_ratio
     if str(upstream_model_id or "").strip().lower().startswith("gemini"):
         base_payload["modelSpecificPayload"]["imageSize"] = (

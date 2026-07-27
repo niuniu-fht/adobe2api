@@ -128,9 +128,9 @@ GPT Image models (experimental):
 
 About `auto`:
 
-- Current implementation does **not** support `aspect_ratio=auto`
-- If `auto` is sent, the service falls back to `1:1`
-- Prefer sending an explicit ratio or using a model ID with a ratio suffix
+- `gpt-image-2` and the `gpt-image-gemini-*` compatibility models support `auto`
+- `gpt-image-gemini-*` forwards `auto` upstream instead of falling back to `1:1`
+- Fixed-ratio `firefly-*` model IDs continue to use the ratio in the model ID
 
 Sora2 video models:
 

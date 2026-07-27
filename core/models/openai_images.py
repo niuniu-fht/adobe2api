@@ -88,19 +88,40 @@ def _nearest_supported_ratio(width: int, height: int) -> str:
     return _nearest_ratio(width, height, SUPPORTED_RATIOS)
 
 
+def normalize_openai_gemini_aspect_ratio(
+    raw_ratio: object,
+    *,
+    param: str = "aspect_ratio",
+) -> str:
+    ratio = str(raw_ratio or "").strip().lower()
+    if ratio == "auto":
+        return "auto"
+    if not RATIO_RE.match(ratio):
+        raise OpenAIImageRequestError(
+            "aspect ratio must be auto or WIDTH:HEIGHT",
+            param,
+        )
+    raw_width, raw_height = ratio.split(":", 1)
+    width = int(raw_width)
+    height = int(raw_height)
+    if width <= 0 or height <= 0:
+        raise OpenAIImageRequestError(
+            "aspect ratio dimensions must be positive",
+            param,
+        )
+    return _nearest_supported_ratio(width, height)
+
+
 def parse_openai_gemini_size(raw_size: object) -> Optional[tuple[str, str]]:
     if raw_size is None:
         return None
     size = str(raw_size or "").strip().lower()
-    if not size or size == "auto":
+    if not size:
         return None
-    if size in SUPPORTED_RATIOS:
-        return size, "2K"
+    if size == "auto":
+        return "auto", "2K"
     if RATIO_RE.match(size):
-        raise OpenAIImageRequestError(
-            f"unsupported Gemini aspect ratio: {size}",
-            "size",
-        )
+        return normalize_openai_gemini_aspect_ratio(size, param="size"), "2K"
     match = SIZE_RE.match(size)
     if not match:
         raise OpenAIImageRequestError(
