@@ -403,7 +403,7 @@ class AdobeClient:
         return self._config_int("image_submit_rate_limit_wait_seconds", 60, 30, 1800)
 
     def _image_rate_limit_single_retry_seconds(self) -> float:
-        return 5.0
+        return 3.0
 
     def _image_download_attempts(self) -> int:
         return self._config_int("image_download_attempts", 5, 1, 10)

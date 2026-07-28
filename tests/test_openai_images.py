@@ -774,7 +774,7 @@ def test_submit_rate_limit_waits_five_seconds_then_switches_account(monkeypatch)
 
     assert result == "ok"
     assert attempts == ["TOKEN-A", "TOKEN-B"]
-    assert sleep_calls == [5.0]
+    assert sleep_calls == [3.0]
     assert unavailable_callbacks == ["TOKEN-A"]
     assert token_manager.success == ["TOKEN-B"]
 
@@ -847,7 +847,7 @@ def test_submit_rate_limit_switches_until_tokens_exhausted_with_delay(monkeypatc
     assert error_info.value.status_code == 400
     assert error_info.value.detail == "Too many requests. Please try again later."
     assert attempts == tokens
-    assert sleep_calls == [5.0] * len(tokens)
+    assert sleep_calls == [3.0, 6.0] + [9.0] * (len(tokens) - 2)
     assert unavailable_callbacks == tokens
 
 

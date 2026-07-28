@@ -603,8 +603,8 @@ def test_submit_rate_limit_reports_switch_delay_without_local_wait(monkeypatch):
     retry_updates = [item for item in progress if "retry_after" in item]
     assert wait_calls == []
     assert retry_updates[0]["task_status"] == "SUBMITTING"
-    assert retry_updates[0]["retry_after"] == 5
-    assert retry_updates[0]["rate_limit_wait_seconds"] == 5.0
+    assert retry_updates[0]["retry_after"] == 3
+    assert retry_updates[0]["rate_limit_wait_seconds"] == 3.0
 
 
 

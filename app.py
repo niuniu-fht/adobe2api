@@ -1045,10 +1045,12 @@ def _run_with_token_retries(
             if rate_limit_switch_started is None:
                 rate_limit_switch_started = now
             rate_limit_elapsed = now - rate_limit_switch_started
-            try:
-                delay = float(client._image_rate_limit_single_retry_seconds())
-            except Exception:
-                delay = 5.0
+            if submit_rate_limit_retries <= 1:
+                delay = 3.0
+            elif submit_rate_limit_retries == 2:
+                delay = 6.0
+            else:
+                delay = 9.0
             retryable = rate_limit_elapsed + delay <= rate_limit_switch_timeout_seconds
             if retryable:
                 logger.warning(
@@ -1064,25 +1066,8 @@ def _run_with_token_retries(
             last_exc = exc
             retry_reason = "rate_limited_switch_account"
             retry_error_text = str(exc.user_message or str(exc))
-            err_code = report_error(
-                request,
-                error=retry_error_text,
-                status_code=400,
-                error_type="rate_limit_error",
-                include_traceback=False,
-            )
-            _append_attempt_log(
-                request=request,
-                operation=operation_name,
-                token_meta=token_meta,
-                attempt=attempt,
-                attempt_started=attempt_started,
-                status_code=400,
-                error=retry_error_text,
-                error_code=err_code,
-                task_status_override="FAILED",
-            )
-            request.state.trace_final_error = exc
+            if not retryable:
+                request.state.trace_final_error = exc
             if request_trace is not None:
                 request_trace.finish_stage(
                     trace_attempt_id,
@@ -1104,7 +1089,7 @@ def _run_with_token_retries(
                     request_trace.add_stage(
                         layer="service",
                         kind="rate_limit_switch",
-                        name="429 后等待 5 秒并切换账号重试",
+                        name="429 后按 3/6/9 秒间隔切换账号重试",
                         status="succeeded",
                         parent_id=getattr(
                             request.state, "trace_operation_stage_id", None
@@ -1353,6 +1338,7 @@ def _run_with_token_retries(
             _set_request_task_progress(
                 request,
                 task_status="IN_PROGRESS",
+                retry_after=int(round(delay)) if delay > 0 else None,
                 error=retry_error_text or f"retry attempt {attempt}: {retry_reason}",
             )
             if delay > 0:
