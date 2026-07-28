@@ -1749,7 +1749,7 @@ def build_generation_router(
                 detail = detail.get("message") or str(detail)
             return _gemini_error_response(int(exc.status_code or 500), str(detail))
         except quota_error_cls:
-            return _gemini_error_response(429, "Token quota exhausted")
+            return _gemini_error_response(400, "Token quota exhausted")
         except auth_error_cls:
             return _gemini_error_response(401, "Token invalid or expired")
         except upstream_temp_error_cls as exc:
@@ -1969,7 +1969,7 @@ def build_generation_router(
             ) or set_request_error_detail(
                 request,
                 error="Token quota exhausted",
-                status_code=429,
+                status_code=400,
                 error_type="rate_limit_error",
                 include_traceback=False,
             )
@@ -1988,7 +1988,7 @@ def build_generation_router(
             }
             return _traced_json_response(
                 request,
-                status_code=429,
+                status_code=400,
                 content=content,
             )
         except auth_error_cls:
@@ -2543,7 +2543,7 @@ def build_generation_router(
             ) or set_request_error_detail(
                 request,
                 error="Token quota exhausted",
-                status_code=429,
+                status_code=400,
                 error_type="rate_limit_error",
                 include_traceback=False,
             )
@@ -2562,7 +2562,7 @@ def build_generation_router(
             }
             return _traced_json_response(
                 request,
-                status_code=429,
+                status_code=400,
                 content=content,
             )
         except auth_error_cls:
@@ -3087,7 +3087,7 @@ def build_generation_router(
             ) or set_request_error_detail(
                 request,
                 error="Token quota exhausted",
-                status_code=429,
+                status_code=400,
                 error_type="rate_limit_error",
                 include_traceback=False,
             )
@@ -3098,7 +3098,7 @@ def build_generation_router(
                 error="Token quota exhausted",
             )
             return JSONResponse(
-                status_code=429,
+                status_code=400,
                 content={
                     "error": {
                         "message": "Token quota exhausted",

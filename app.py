@@ -1012,7 +1012,7 @@ def _run_with_token_retries(
             err_code = report_error(
                 request,
                 error=exc,
-                status_code=429,
+                status_code=400,
                 error_type="rate_limit_error",
                 include_traceback=False,
             )
@@ -1022,7 +1022,7 @@ def _run_with_token_retries(
                 token_meta=token_meta,
                 attempt=attempt,
                 attempt_started=attempt_started,
-                status_code=429,
+                status_code=400,
                 error=str(exc),
                 error_code=err_code,
                 task_status_override="FAILED",
@@ -1067,7 +1067,7 @@ def _run_with_token_retries(
             err_code = report_error(
                 request,
                 error=retry_error_text,
-                status_code=429,
+                status_code=400,
                 error_type="rate_limit_error",
                 include_traceback=False,
             )
@@ -1077,7 +1077,7 @@ def _run_with_token_retries(
                 token_meta=token_meta,
                 attempt=attempt,
                 attempt_started=attempt_started,
-                status_code=429,
+                status_code=400,
                 error=retry_error_text,
                 error_code=err_code,
                 task_status_override="FAILED",
