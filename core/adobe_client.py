@@ -1275,25 +1275,14 @@ class AdobeClient:
                 resp.status_code == 429 or self._is_rate_limited_response(resp)
             )
             if is_rate_limited:
+                delay = self._image_rate_limit_single_retry_seconds()
                 logger.warning(
-                    "image upload rate_limited token=%s retry_used=%s status=%s body=%s",
+                    "image upload rate_limited token=%s action=switch_account_after_delay delay=%s status=%s body=%s",
                     str(token or "")[:8],
-                    rate_limit_retry_used,
+                    delay,
                     getattr(resp, "status_code", None),
                     str(getattr(resp, "text", "") or "")[:300],
                 )
-                if rate_limit_retry_used:
-                    if trace is not None:
-                        trace.finish_stage(
-                            trace_stage_id,
-                            status="failed",
-                            response=response_snapshot(resp),
-                            error="upload rate limited after same-account retry; switch account",
-                        )
-                    raise SubmitRateLimitedError()
-                rate_limit_retry_used = True
-                retry_count += 1
-                delay = self._image_rate_limit_single_retry_seconds()
                 if progress_cb is not None:
                     progress_cb(
                         {
@@ -1304,10 +1293,14 @@ class AdobeClient:
                             "error": resp.text[:300],
                         }
                     )
-                self._wait_for_image_retry(
-                    delay, cancel_check=cancel_check, wait_cb=wait_cb
-                )
-                continue
+                if trace is not None:
+                    trace.finish_stage(
+                        trace_stage_id,
+                        status="failed",
+                        response=response_snapshot(resp),
+                        error="upload rate limited; switch account",
+                    )
+                raise SubmitRateLimitedError()
             if self._is_retryable_image_status(resp.status_code):
                 now = time.time()
                 network_started = network_started or now
@@ -2206,7 +2199,7 @@ class AdobeClient:
                         pass
                 raise AdobeRequestError(f"video job failed: {latest}")
 
-            if time.time() - start > timeout:
+            if time.time() - start > timeout and not self._is_in_progress_status(status_val):
                 if progress_cb:
                     try:
                         progress_cb(
@@ -2391,35 +2384,14 @@ class AdobeClient:
                     or self._is_rate_limited_response(submit_resp)
                 )
                 if is_rate_limited:
+                    delay = self._image_rate_limit_single_retry_seconds()
                     logger.warning(
-                        "image submit rate_limited token=%s retry_used=%s status=%s body=%s",
+                        "image submit rate_limited token=%s action=switch_account_after_delay delay=%s status=%s body=%s",
                         str(token or "")[:8],
-                        submit_rate_limit_retry_used,
+                        delay,
                         getattr(submit_resp, "status_code", None),
                         str(getattr(submit_resp, "text", "") or "")[:300],
                     )
-                    if submit_rate_limit_retry_used:
-                        if progress_cb is not None:
-                            progress_cb(
-                                {
-                                    "task_status": "SUBMITTING",
-                                    "retry_after": None,
-                                    "retry_count": submit_retry_count,
-                                    "rate_limit_wait_seconds": 0,
-                                    "error": submit_resp.text[:300],
-                                }
-                            )
-                        if trace is not None:
-                            trace.finish_stage(
-                                submit_stage_id,
-                                status="failed",
-                                response=response_snapshot(submit_resp),
-                                error="submit rate limited after same-account retry; switch account",
-                            )
-                        raise SubmitRateLimitedError()
-                    submit_rate_limit_retry_used = True
-                    submit_retry_count += 1
-                    delay = self._image_rate_limit_single_retry_seconds()
                     if progress_cb is not None:
                         progress_cb(
                             {
@@ -2430,10 +2402,14 @@ class AdobeClient:
                                 "error": submit_resp.text[:300],
                             }
                         )
-                    self._wait_for_image_retry(
-                        delay, cancel_check=cancel_check, wait_cb=wait_cb
-                    )
-                    continue
+                    if trace is not None:
+                        trace.finish_stage(
+                            submit_stage_id,
+                            status="failed",
+                            response=response_snapshot(submit_resp),
+                            error="submit rate limited; switch account",
+                        )
+                    raise SubmitRateLimitedError()
                 if self._is_retryable_image_status(submit_resp.status_code):
                     now = time.time()
                     network_started = network_started or now
@@ -2644,19 +2620,15 @@ class AdobeClient:
                 or self._is_rate_limited_response(poll_resp)
             )
             if is_rate_limited:
+                delay = self._image_rate_limit_single_retry_seconds()
                 logger.warning(
-                    "image poll rate_limited token=%s upstream_job_id=%s retry_used=%s status=%s body=%s",
+                    "image poll rate_limited token=%s upstream_job_id=%s action=switch_account_after_delay delay=%s status=%s body=%s",
                     str(token or "")[:8],
                     upstream_job_id,
-                    poll_rate_limit_retry_used,
+                    delay,
                     getattr(poll_resp, "status_code", None),
                     str(getattr(poll_resp, "text", "") or "")[:300],
                 )
-                if poll_rate_limit_retry_used:
-                    raise SubmitRateLimitedError()
-                poll_rate_limit_retry_used = True
-                poll_retry_count += 1
-                delay = self._image_rate_limit_single_retry_seconds()
                 if progress_cb is not None:
                     progress_cb(
                         {
@@ -2668,10 +2640,7 @@ class AdobeClient:
                             "error": poll_resp.text[:300],
                         }
                     )
-                self._wait_for_image_retry(
-                    delay, cancel_check=cancel_check, wait_cb=wait_cb
-                )
-                continue
+                raise SubmitRateLimitedError()
             if poll_resp.status_code != 200:
                 logger.error(
                     "poll failed status=%s body=%s",

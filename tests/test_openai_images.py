@@ -630,7 +630,8 @@ def test_invalid_token_immediately_switches_to_next_account(monkeypatch, error_k
     monkeypatch.setattr(app, "token_manager", token_manager)
     monkeypatch.setattr(app, "client", ClientStub())
     monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
-    monkeypatch.setattr(app.time, "sleep", lambda _delay: pytest.fail("must not wait"))
+    sleep_calls = []
+    monkeypatch.setattr(app.time, "sleep", lambda delay: sleep_calls.append(delay))
 
     def run_once(token):
         attempts.append(token)
@@ -699,7 +700,7 @@ def test_unrelated_http_401_remains_terminal(monkeypatch):
         )
 
 
-def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
+def test_submit_rate_limit_waits_five_seconds_then_switches_account(monkeypatch):
     import app
 
     class TokenManagerStub:
@@ -754,7 +755,8 @@ def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
     monkeypatch.setattr(app, "token_manager", token_manager)
     monkeypatch.setattr(app, "client", ClientStub())
     monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
-    monkeypatch.setattr(app.time, "sleep", lambda _delay: pytest.fail("must not wait"))
+    sleep_calls = []
+    monkeypatch.setattr(app.time, "sleep", lambda delay: sleep_calls.append(delay))
 
     def run_once(token):
         attempts.append(token)
@@ -772,11 +774,12 @@ def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
 
     assert result == "ok"
     assert attempts == ["TOKEN-A", "TOKEN-B"]
+    assert sleep_calls == [5.0]
     assert unavailable_callbacks == ["TOKEN-A"]
     assert token_manager.success == ["TOKEN-B"]
 
 
-def test_submit_rate_limit_switches_at_most_three_more_accounts(monkeypatch):
+def test_submit_rate_limit_switches_until_tokens_exhausted_with_delay(monkeypatch):
     import app
 
     tokens = [f"TOKEN-{index}" for index in range(10)]
@@ -825,7 +828,8 @@ def test_submit_rate_limit_switches_at_most_three_more_accounts(monkeypatch):
     monkeypatch.setattr(app, "token_manager", TokenManagerStub())
     monkeypatch.setattr(app, "client", ClientStub())
     monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
-    monkeypatch.setattr(app.time, "sleep", lambda _delay: pytest.fail("must not wait"))
+    sleep_calls = []
+    monkeypatch.setattr(app.time, "sleep", lambda delay: sleep_calls.append(delay))
 
     def run_once(token):
         attempts.append(token)
@@ -842,8 +846,9 @@ def test_submit_rate_limit_switches_at_most_three_more_accounts(monkeypatch):
 
     assert error_info.value.status_code == 400
     assert error_info.value.detail == "Too many requests. Please try again later."
-    assert attempts == tokens[:4]
-    assert unavailable_callbacks == tokens[:3]
+    assert attempts == tokens
+    assert sleep_calls == [5.0] * len(tokens)
+    assert unavailable_callbacks == tokens
 
 
 def test_openai_prefixed_gemini_model_is_normalized():

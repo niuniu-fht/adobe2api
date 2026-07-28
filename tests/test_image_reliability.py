@@ -544,7 +544,7 @@ def test_admin_image_queue_endpoint_exposes_read_only_snapshot(monkeypatch):
     assert isinstance(payload["items"], list)
 
 
-def test_rate_limited_submit_retries_once_then_switches_account(monkeypatch):
+def test_rate_limited_submit_switches_account_without_same_account_retry(monkeypatch):
     client = AdobeClient()
     payload_ids = []
 
@@ -566,11 +566,11 @@ def test_rate_limited_submit_retries_once_then_switches_account(monkeypatch):
     with pytest.raises(SubmitRateLimitedError):
         client._generate_once(token="TOKEN", prompt="draw", seed=42)
 
-    assert len(payload_ids) == 2
-    assert wait_calls == [5.0]
+    assert len(payload_ids) == 1
+    assert wait_calls == []
 
 
-def test_submit_rate_limit_retries_once_before_account_switch(monkeypatch):
+def test_submit_rate_limit_reports_switch_delay_without_local_wait(monkeypatch):
     client = AdobeClient()
     progress = []
 
@@ -601,11 +601,10 @@ def test_submit_rate_limit_retries_once_before_account_switch(monkeypatch):
         )
 
     retry_updates = [item for item in progress if "retry_after" in item]
-    assert wait_calls == [5.0]
+    assert wait_calls == []
     assert retry_updates[0]["task_status"] == "SUBMITTING"
     assert retry_updates[0]["retry_after"] == 5
     assert retry_updates[0]["rate_limit_wait_seconds"] == 5.0
-    assert retry_updates[-1]["retry_after"] is None
 
 
 
@@ -656,7 +655,7 @@ def test_invalid_image_size_aspect_retries_once_with_auto_payload(monkeypatch):
     assert "outputResolution" not in submissions[1]
     assert submissions[1]["modelSpecificPayload"] == {"size": "auto"}
 
-def test_poll_rate_limit_retries_once_then_switches_account(monkeypatch):
+def test_poll_rate_limit_switches_account_without_same_account_retry(monkeypatch):
     client = AdobeClient()
     waits = []
     poll_calls = []
@@ -674,11 +673,11 @@ def test_poll_rate_limit_retries_once_then_switches_account(monkeypatch):
     with pytest.raises(SubmitRateLimitedError):
         client._generate_once(token="TOKEN", prompt="draw", seed=1)
 
-    assert len(poll_calls) == 2
-    assert waits == [5.0]
+    assert len(poll_calls) == 1
+    assert waits == []
 
 
-def test_upload_rate_limit_retries_once_then_switches_account(monkeypatch):
+def test_upload_rate_limit_switches_account_without_same_account_retry(monkeypatch):
     client = AdobeClient()
     waits = []
     upload_calls = []
@@ -693,8 +692,8 @@ def test_upload_rate_limit_retries_once_then_switches_account(monkeypatch):
     with pytest.raises(SubmitRateLimitedError):
         client.upload_image("TOKEN", _png_bytes(), "image/png")
 
-    assert len(upload_calls) == 2
-    assert waits == [5.0]
+    assert len(upload_calls) == 1
+    assert waits == []
 
 def test_image_submit_retry_delay_uses_capped_schedule(monkeypatch):
     client = AdobeClient()

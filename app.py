@@ -832,6 +832,8 @@ def _run_with_token_retries(
     attempt = 0
     limited_retry_attempts = 0
     submit_rate_limit_retries = 0
+    rate_limit_switch_started: Optional[float] = None
+    rate_limit_switch_timeout_seconds = 300.0
     tried_tokens: set[str] = set()
     unavailable_account_ids: set[str] = set()
 
@@ -1039,19 +1041,28 @@ def _run_with_token_retries(
                 )
         except SubmitRateLimitedError as exc:
             submit_rate_limit_retries += 1
-            max_submit_rate_limit_switches = 3
-            retryable = submit_rate_limit_retries <= max_submit_rate_limit_switches
+            now = time.time()
+            if rate_limit_switch_started is None:
+                rate_limit_switch_started = now
+            rate_limit_elapsed = now - rate_limit_switch_started
+            try:
+                delay = float(client._image_rate_limit_single_retry_seconds())
+            except Exception:
+                delay = 5.0
+            retryable = rate_limit_elapsed + delay <= rate_limit_switch_timeout_seconds
             if retryable:
                 logger.warning(
-                    "image rate limit switch account operation=%s token=%s switch=%s/%s",
+                    "image rate limit switch account operation=%s token=%s switch_attempt=%s elapsed=%.2fs timeout=%.2fs delay=%.2fs",
                     operation_name,
                     str(token or "")[:8],
                     submit_rate_limit_retries,
-                    max_submit_rate_limit_switches,
+                    rate_limit_elapsed,
+                    rate_limit_switch_timeout_seconds,
+                    delay,
                 )
                 notify_token_unavailable(token)
             last_exc = exc
-            retry_reason = "submit_rate_limited_switch_account"
+            retry_reason = "rate_limited_switch_account"
             retry_error_text = str(exc.user_message or str(exc))
             err_code = report_error(
                 request,
@@ -1083,10 +1094,31 @@ def _run_with_token_retries(
                         "next_action": (
                             "switch_account" if retryable else "return_error"
                         ),
-                        "submit_rate_limit_retry": submit_rate_limit_retries,
-                        "submit_rate_limit_retry_max": max_submit_rate_limit_switches,
+                        "rate_limit_switch_attempt": submit_rate_limit_retries,
+                        "rate_limit_switch_timeout_seconds": rate_limit_switch_timeout_seconds,
+                        "rate_limit_switch_elapsed_seconds": round(rate_limit_elapsed, 3),
+                        "retry_delay_seconds": delay if retryable else 0,
                     },
                 )
+                if retryable:
+                    request_trace.add_stage(
+                        layer="service",
+                        kind="rate_limit_switch",
+                        name="429 后等待 5 秒并切换账号重试",
+                        status="succeeded",
+                        parent_id=getattr(
+                            request.state, "trace_operation_stage_id", None
+                        ),
+                        details={
+                            "operation": operation_name,
+                            "from_token_id": token_meta.get("token_id"),
+                            "from_account_name": token_meta.get("token_account_name"),
+                            "switch_attempt": submit_rate_limit_retries,
+                            "retry_delay_seconds": delay,
+                            "timeout_seconds": rate_limit_switch_timeout_seconds,
+                            "elapsed_seconds": round(rate_limit_elapsed, 3),
+                        },
+                    )
         except AuthError as exc:
             invalidate_and_advance(token)
             last_exc = exc
