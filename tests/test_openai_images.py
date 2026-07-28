@@ -776,7 +776,7 @@ def test_submit_rate_limit_immediately_switches_to_next_account(monkeypatch):
     assert token_manager.success == ["TOKEN-B"]
 
 
-def test_submit_rate_limit_switches_at_most_five_more_accounts(monkeypatch):
+def test_submit_rate_limit_switches_at_most_three_more_accounts(monkeypatch):
     import app
 
     tokens = [f"TOKEN-{index}" for index in range(10)]
@@ -842,8 +842,8 @@ def test_submit_rate_limit_switches_at_most_five_more_accounts(monkeypatch):
 
     assert error_info.value.status_code == 400
     assert error_info.value.detail == "Too many requests. Please try again later."
-    assert attempts == tokens[:6]
-    assert unavailable_callbacks == tokens[:5]
+    assert attempts == tokens[:4]
+    assert unavailable_callbacks == tokens[:3]
 
 
 def test_openai_prefixed_gemini_model_is_normalized():
@@ -858,6 +858,7 @@ def test_openai_prefixed_gemini_model_is_normalized():
 
 def test_openai_sizes_map_to_gemini_ratio_and_resolution():
     assert parse_openai_gemini_size("auto") == ("auto", "2K")
+    assert parse_openai_gemini_size("not-a-size") == ("auto", "2K")
     assert parse_openai_gemini_size("1024x1024") == ("1:1", "1K")
     assert parse_openai_gemini_size("1536x1024") == ("3:2", "2K")
     assert parse_openai_gemini_size("1024x1536") == ("2:3", "2K")
@@ -915,9 +916,24 @@ def test_openai_prefixed_gemini_auto_reaches_upstream_payload(model_id):
         upstream_model_version=model_conf["upstream_model_version"],
     )[0]
 
-    assert payload["modelSpecificPayload"]["aspectRatio"] == "auto"
+    assert "aspectRatio" not in payload["modelSpecificPayload"]
     assert payload["modelSpecificPayload"]["imageSize"] == "2K"
-    assert "size" not in payload
+    assert payload["size"] == {"width": 4096, "height": 4096}
+
+    auto_4k = resolve_ratio_and_resolution(
+        {"size": "auto", "image_size": "4K"},
+        model_id,
+    )
+    payload_4k = build_image_payload_candidates(
+        prompt="draw freely",
+        aspect_ratio=auto_4k[0],
+        output_resolution=auto_4k[1],
+        upstream_model_id=model_conf["upstream_model_id"],
+        upstream_model_version=model_conf["upstream_model_version"],
+    )[0]
+    assert auto_4k == ("auto", "4K", model_id)
+    assert "aspectRatio" not in payload_4k["modelSpecificPayload"]
+    assert payload_4k["size"] == {"width": 4096, "height": 4096}
 
 
 @pytest.mark.parametrize(
@@ -932,6 +948,20 @@ def test_openai_prefixed_gemini_explicit_ratio_uses_nearest_upstream(model_id):
         {"aspect_ratio": "7:5", "image_size": "4K"},
         model_id,
     ) == ("4:3", "4K", model_id)
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gpt-image-gemini-3.1-flash-image",
+        "gpt-image-gemini-3-pro-image",
+    ],
+)
+def test_openai_prefixed_gemini_unknown_ratio_uses_upstream_auto(model_id):
+    assert resolve_ratio_and_resolution(
+        {"aspect_ratio": "not-a-ratio", "image_size": "1K"},
+        model_id,
+    ) == ("auto", "1K", model_id)
 
 
 def test_openai_prefixed_gemini_size_reaches_gemini_payload():

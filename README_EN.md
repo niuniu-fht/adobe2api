@@ -129,7 +129,7 @@ GPT Image models (experimental):
 About `auto`:
 
 - `gpt-image-2` and the `gpt-image-gemini-*` compatibility models support `auto`
-- `gpt-image-gemini-*` forwards `auto` upstream instead of falling back to `1:1`
+- For `auto` or an unrecognized value, `gpt-image-gemini-*` omits upstream `aspectRatio` to select auto mode; top-level `size` still carries the square dimensions for the requested `1K`, `2K`, or `4K` resolution
 - Fixed-ratio `firefly-*` model IDs continue to use the ratio in the model ID
 
 Sora2 video models:

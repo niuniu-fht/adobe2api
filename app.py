@@ -952,6 +952,12 @@ def _run_with_token_retries(
             break
         tried_tokens.add(token)
         token_meta = _set_request_token_context(request, token, attempt)
+        logger.info(
+            "image token attempt operation=%s attempt=%s token=%s",
+            operation_name,
+            attempt,
+            str(token or "")[:8],
+        )
         attempt_started = time.time()
         retryable = False
         retry_reason = ""
@@ -1033,8 +1039,16 @@ def _run_with_token_retries(
                 )
         except SubmitRateLimitedError as exc:
             submit_rate_limit_retries += 1
-            retryable = submit_rate_limit_retries <= 5
+            max_submit_rate_limit_switches = 3
+            retryable = submit_rate_limit_retries <= max_submit_rate_limit_switches
             if retryable:
+                logger.warning(
+                    "image rate limit switch account operation=%s token=%s switch=%s/%s",
+                    operation_name,
+                    str(token or "")[:8],
+                    submit_rate_limit_retries,
+                    max_submit_rate_limit_switches,
+                )
                 notify_token_unavailable(token)
             last_exc = exc
             retry_reason = "submit_rate_limited_switch_account"
@@ -1070,7 +1084,7 @@ def _run_with_token_retries(
                             "switch_account" if retryable else "return_error"
                         ),
                         "submit_rate_limit_retry": submit_rate_limit_retries,
-                        "submit_rate_limit_retry_max": 5,
+                        "submit_rate_limit_retry_max": max_submit_rate_limit_switches,
                     },
                 )
         except AuthError as exc:

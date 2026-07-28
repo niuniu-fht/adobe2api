@@ -97,18 +97,12 @@ def normalize_openai_gemini_aspect_ratio(
     if ratio == "auto":
         return "auto"
     if not RATIO_RE.match(ratio):
-        raise OpenAIImageRequestError(
-            "aspect ratio must be auto or WIDTH:HEIGHT",
-            param,
-        )
+        return "auto"
     raw_width, raw_height = ratio.split(":", 1)
     width = int(raw_width)
     height = int(raw_height)
     if width <= 0 or height <= 0:
-        raise OpenAIImageRequestError(
-            "aspect ratio dimensions must be positive",
-            param,
-        )
+        return "auto"
     return _nearest_supported_ratio(width, height)
 
 
@@ -124,14 +118,11 @@ def parse_openai_gemini_size(raw_size: object) -> Optional[tuple[str, str]]:
         return normalize_openai_gemini_aspect_ratio(size, param="size"), "2K"
     match = SIZE_RE.match(size)
     if not match:
-        raise OpenAIImageRequestError(
-            "size must be auto, a supported ASPECT_RATIO, or WIDTHxHEIGHT",
-            "size",
-        )
+        return "auto", "2K"
     width = int(match.group(1))
     height = int(match.group(2))
     if width <= 0 or height <= 0:
-        raise OpenAIImageRequestError("size dimensions must be positive", "size")
+        return "auto", "2K"
     requested_size = {"width": width, "height": height}
     return (
         _nearest_supported_ratio(width, height),

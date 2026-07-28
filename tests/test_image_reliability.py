@@ -544,7 +544,7 @@ def test_admin_image_queue_endpoint_exposes_read_only_snapshot(monkeypatch):
     assert isinstance(payload["items"], list)
 
 
-def test_rate_limited_submit_switches_account_without_waiting(monkeypatch):
+def test_rate_limited_submit_retries_once_then_switches_account(monkeypatch):
     client = AdobeClient()
     payload_ids = []
 
@@ -556,19 +556,21 @@ def test_rate_limited_submit_switches_account_without_waiting(monkeypatch):
         client, "_build_payload_candidates", lambda **kwargs: [{"seed": 42}]
     )
     monkeypatch.setattr(client, "_post_image_json", submit)
+    wait_calls = []
     monkeypatch.setattr(
         client,
         "_wait_with_cancel",
-        lambda *args, **kwargs: pytest.fail("submit 429 must not wait"),
+        lambda delay, **kwargs: wait_calls.append(delay),
     )
 
     with pytest.raises(SubmitRateLimitedError):
         client._generate_once(token="TOKEN", prompt="draw", seed=42)
 
-    assert len(payload_ids) == 1
+    assert len(payload_ids) == 2
+    assert wait_calls == [5.0]
 
 
-def test_submit_rate_limit_does_not_wait_or_set_account_cooldown(monkeypatch):
+def test_submit_rate_limit_retries_once_before_account_switch(monkeypatch):
     client = AdobeClient()
     progress = []
 
@@ -583,10 +585,11 @@ def test_submit_rate_limit_does_not_wait_or_set_account_cooldown(monkeypatch):
         client, "_build_payload_candidates", lambda **kwargs: [{"seed": 99}]
     )
     monkeypatch.setattr(client, "_post_image_json", submit)
+    wait_calls = []
     monkeypatch.setattr(
         client,
         "_wait_with_cancel",
-        lambda *args, **kwargs: pytest.fail("submit 429 must not wait"),
+        lambda delay, **kwargs: wait_calls.append(delay),
     )
 
     with pytest.raises(SubmitRateLimitedError):
@@ -597,10 +600,101 @@ def test_submit_rate_limit_does_not_wait_or_set_account_cooldown(monkeypatch):
             progress_cb=progress.append,
         )
 
-    assert progress[-1]["task_status"] == "SUBMITTING"
-    assert progress[-1]["retry_after"] is None
-    assert progress[-1]["rate_limit_wait_seconds"] == 0
+    retry_updates = [item for item in progress if "retry_after" in item]
+    assert wait_calls == [5.0]
+    assert retry_updates[0]["task_status"] == "SUBMITTING"
+    assert retry_updates[0]["retry_after"] == 5
+    assert retry_updates[0]["rate_limit_wait_seconds"] == 5.0
+    assert retry_updates[-1]["retry_after"] is None
 
+
+
+
+def test_invalid_image_size_aspect_retries_once_with_auto_payload(monkeypatch):
+    client = AdobeClient()
+    submissions = []
+
+    initial_payload = {
+        "modelId": "gpt-image",
+        "modelVersion": "2",
+        "prompt": "draw",
+        "size": {"width": 208, "height": 3840},
+        "outputResolution": "4K",
+        "modelSpecificPayload": {"size": "208x3840"},
+    }
+
+    def submit(*args, **kwargs):
+        submissions.append(dict(kwargs["payload"]))
+        if len(submissions) == 1:
+            return FakeResponse(
+                400,
+                {
+                    "error_code": "bad_request",
+                    "message": "Invalid image size 208x3840: aspect ratio must not exceed 3:1 (got 18.46:1)",
+                },
+            )
+        return _submit_success("job-auto")
+
+    monkeypatch.setattr(client, "_build_payload_candidates", lambda **kwargs: [initial_payload])
+    monkeypatch.setattr(client, "_post_image_json", submit)
+    monkeypatch.setattr(
+        client,
+        "_get",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {"outputs": [{"image": {"presignedUrl": "https://example.test/image.png"}}]},
+        ),
+    )
+    monkeypatch.setattr(client, "_download_image_result", lambda **kwargs: _png_bytes())
+
+    image_bytes, _meta = client._generate_once(token="TOKEN", prompt="draw", seed=1)
+
+    assert image_bytes == _png_bytes()
+    assert len(submissions) == 2
+    assert submissions[0]["size"] == {"width": 208, "height": 3840}
+    assert "size" not in submissions[1]
+    assert "outputResolution" not in submissions[1]
+    assert submissions[1]["modelSpecificPayload"] == {"size": "auto"}
+
+def test_poll_rate_limit_retries_once_then_switches_account(monkeypatch):
+    client = AdobeClient()
+    waits = []
+    poll_calls = []
+
+    monkeypatch.setattr(client, "_build_payload_candidates", lambda **kwargs: [{"seed": 1}])
+    monkeypatch.setattr(client, "_post_image_json", lambda *args, **kwargs: _submit_success("job-rl"))
+
+    def poll(*args, **kwargs):
+        poll_calls.append(args[0] if args else kwargs.get("url"))
+        return FakeResponse(429, {"error_code": "rate_limited"})
+
+    monkeypatch.setattr(client, "_get", poll)
+    monkeypatch.setattr(client, "_wait_with_cancel", lambda delay, **kwargs: waits.append(delay))
+
+    with pytest.raises(SubmitRateLimitedError):
+        client._generate_once(token="TOKEN", prompt="draw", seed=1)
+
+    assert len(poll_calls) == 2
+    assert waits == [5.0]
+
+
+def test_upload_rate_limit_retries_once_then_switches_account(monkeypatch):
+    client = AdobeClient()
+    waits = []
+    upload_calls = []
+
+    def upload(*args, **kwargs):
+        upload_calls.append(kwargs.get("payload"))
+        return FakeResponse(429, {"error_code": "rate_limited"})
+
+    monkeypatch.setattr(client, "_post_bytes", upload)
+    monkeypatch.setattr(client, "_wait_with_cancel", lambda delay, **kwargs: waits.append(delay))
+
+    with pytest.raises(SubmitRateLimitedError):
+        client.upload_image("TOKEN", _png_bytes(), "image/png")
+
+    assert len(upload_calls) == 2
+    assert waits == [5.0]
 
 def test_image_submit_retry_delay_uses_capped_schedule(monkeypatch):
     client = AdobeClient()

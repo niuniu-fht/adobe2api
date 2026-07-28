@@ -402,6 +402,9 @@ class AdobeClient:
     def _image_submit_rate_limit_wait_seconds(self) -> int:
         return self._config_int("image_submit_rate_limit_wait_seconds", 60, 30, 1800)
 
+    def _image_rate_limit_single_retry_seconds(self) -> float:
+        return 5.0
+
     def _image_download_attempts(self) -> int:
         return self._config_int("image_download_attempts", 5, 1, 10)
 
@@ -447,6 +450,27 @@ class AdobeClient:
     def _is_retryable_image_status(status_code: int) -> bool:
         normalized = int(status_code or 0)
         return normalized in {408, 425, 451} or 500 <= normalized <= 599
+
+    @staticmethod
+    def _is_invalid_image_size_aspect_response(resp: Any) -> bool:
+        if int(getattr(resp, "status_code", 0) or 0) != 400:
+            return False
+        text = str(getattr(resp, "text", "") or "").lower()
+        return "invalid image size" in text and "aspect ratio must not exceed" in text
+
+    @staticmethod
+    def _auto_size_fallback_payload(payload: dict) -> dict:
+        fallback = dict(payload or {})
+        model_specific = dict(fallback.get("modelSpecificPayload") or {})
+        model_id = str(fallback.get("modelId") or "").strip().lower()
+        if model_id != "gpt-image":
+            return fallback
+        model_specific.pop("aspectRatio", None)
+        model_specific["size"] = "auto"
+        fallback.pop("size", None)
+        fallback.pop("outputResolution", None)
+        fallback["modelSpecificPayload"] = model_specific
+        return fallback
 
     @staticmethod
     def _wait_with_cancel(
@@ -1192,8 +1216,15 @@ class AdobeClient:
                     ),
                 },
             )
+        logger.info(
+            "image upload start token=%s bytes=%s mime=%s",
+            str(token or "")[:8],
+            len(image_bytes or b""),
+            mime_type,
+        )
         network_started: Optional[float] = None
         rate_limit_started: Optional[float] = None
+        rate_limit_retry_used = False
         retry_count = 0
         while True:
             if cancel_check is not None:
@@ -1244,37 +1275,32 @@ class AdobeClient:
                 resp.status_code == 429 or self._is_rate_limited_response(resp)
             )
             if is_rate_limited:
-                now = time.time()
-                rate_limit_started = rate_limit_started or now
-                elapsed = now - rate_limit_started
-                if elapsed >= self._image_rate_limit_wait_seconds():
+                logger.warning(
+                    "image upload rate_limited token=%s retry_used=%s status=%s body=%s",
+                    str(token or "")[:8],
+                    rate_limit_retry_used,
+                    getattr(resp, "status_code", None),
+                    str(getattr(resp, "text", "") or "")[:300],
+                )
+                if rate_limit_retry_used:
                     if trace is not None:
                         trace.finish_stage(
                             trace_stage_id,
                             status="failed",
                             response=response_snapshot(resp),
-                            error="rate limit wait exceeded",
+                            error="upload rate limited after same-account retry; switch account",
                         )
-                    raise RateLimitWaitExceededError()
+                    raise SubmitRateLimitedError()
+                rate_limit_retry_used = True
                 retry_count += 1
-                delay = self._retry_delay(
-                    retry_count,
-                    rate_limited=True,
-                    retry_after=self._response_retry_after(resp),
-                )
-                delay = min(
-                    delay,
-                    max(0.05, self._image_rate_limit_wait_seconds() - elapsed),
-                )
+                delay = self._image_rate_limit_single_retry_seconds()
                 if progress_cb is not None:
                     progress_cb(
                         {
                             "task_status": "RATE_LIMITED",
                             "retry_after": int(round(delay)),
                             "retry_count": retry_count,
-                            "rate_limit_wait_seconds": min(
-                                self._image_rate_limit_wait_seconds(), elapsed + delay
-                            ),
+                            "rate_limit_wait_seconds": delay,
                             "error": resp.text[:300],
                         }
                     )
@@ -2258,7 +2284,20 @@ class AdobeClient:
                     },
                 )
             network_started: Optional[float] = None
+            submit_rate_limit_retry_used = False
+            invalid_size_auto_retry_used = False
             submit_retry_count = 0
+            logger.info(
+                "image submit start token=%s candidate=%s/%s model=%s version=%s ratio=%s resolution=%s source_images=%s",
+                str(token or "")[:8],
+                candidate_index,
+                len(payload_candidates),
+                upstream_model_id,
+                upstream_model_version,
+                aspect_ratio,
+                output_resolution,
+                len(source_image_ids or []),
+            )
             while True:
                 if cancel_check is not None:
                     cancel_check()
@@ -2322,29 +2361,79 @@ class AdobeClient:
                             error=exc,
                         )
                     raise
+                if (
+                    str(payload.get("modelId") or "").strip().lower() == "gpt-image"
+                    and not invalid_size_auto_retry_used
+                    and self._is_invalid_image_size_aspect_response(submit_resp)
+                ):
+                    invalid_size_auto_retry_used = True
+                    logger.warning(
+                        "image submit invalid_size_aspect auto_retry token=%s status=%s body=%s",
+                        str(token or "")[:8],
+                        getattr(submit_resp, "status_code", None),
+                        str(getattr(submit_resp, "text", "") or "")[:300],
+                    )
+                    if trace is not None:
+                        trace.add_stage(
+                            layer="adobe",
+                            kind="submit_retry",
+                            name="Invalid image size，改用 auto 尺寸重试",
+                            status="succeeded",
+                            parent_id=trace_parent_id,
+                            response=response_snapshot(submit_resp),
+                            details={"fallback": "auto_size_no_aspect_ratio"},
+                        )
+                    payload = self._auto_size_fallback_payload(payload)
+                    submit_headers = self._submit_headers(token, prompt=prompt)
+                    continue
                 is_rate_limited = (
                     submit_resp.status_code == 429
                     or self._is_rate_limited_response(submit_resp)
                 )
                 if is_rate_limited:
+                    logger.warning(
+                        "image submit rate_limited token=%s retry_used=%s status=%s body=%s",
+                        str(token or "")[:8],
+                        submit_rate_limit_retry_used,
+                        getattr(submit_resp, "status_code", None),
+                        str(getattr(submit_resp, "text", "") or "")[:300],
+                    )
+                    if submit_rate_limit_retry_used:
+                        if progress_cb is not None:
+                            progress_cb(
+                                {
+                                    "task_status": "SUBMITTING",
+                                    "retry_after": None,
+                                    "retry_count": submit_retry_count,
+                                    "rate_limit_wait_seconds": 0,
+                                    "error": submit_resp.text[:300],
+                                }
+                            )
+                        if trace is not None:
+                            trace.finish_stage(
+                                submit_stage_id,
+                                status="failed",
+                                response=response_snapshot(submit_resp),
+                                error="submit rate limited after same-account retry; switch account",
+                            )
+                        raise SubmitRateLimitedError()
+                    submit_rate_limit_retry_used = True
+                    submit_retry_count += 1
+                    delay = self._image_rate_limit_single_retry_seconds()
                     if progress_cb is not None:
                         progress_cb(
                             {
                                 "task_status": "SUBMITTING",
-                                "retry_after": None,
-                                "retry_count": 0,
-                                "rate_limit_wait_seconds": 0,
+                                "retry_after": int(round(delay)),
+                                "retry_count": submit_retry_count,
+                                "rate_limit_wait_seconds": delay,
                                 "error": submit_resp.text[:300],
                             }
                         )
-                    if trace is not None:
-                        trace.finish_stage(
-                            submit_stage_id,
-                            status="failed",
-                            response=response_snapshot(submit_resp),
-                            error="submit rate limited; switch account",
-                        )
-                    raise SubmitRateLimitedError()
+                    self._wait_for_image_retry(
+                        delay, cancel_check=cancel_check, wait_cb=wait_cb
+                    )
+                    continue
                 if self._is_retryable_image_status(submit_resp.status_code):
                     now = time.time()
                     network_started = network_started or now
@@ -2423,10 +2512,22 @@ class AdobeClient:
 
         submit_data = submit_resp.json()
         poll_url = self._extract_result_link(submit_resp, submit_data)
+        logger.info(
+            "image submit success token=%s status=%s poll_url=%s",
+            str(token or "")[:8],
+            getattr(submit_resp, "status_code", None),
+            sanitize_url(poll_url),
+        )
         if not poll_url:
             raise AdobeRequestError("submit succeeded but no poll url returned")
 
         upstream_job_id = self._extract_job_id(poll_url)
+        logger.info(
+            "image poll start token=%s upstream_job_id=%s poll_url=%s",
+            str(token or "")[:8],
+            upstream_job_id,
+            sanitize_url(poll_url),
+        )
         if progress_cb:
             try:
                 progress_cb(
@@ -2446,6 +2547,7 @@ class AdobeClient:
         sleep_time = 3.0
         poll_network_started: Optional[float] = None
         poll_rate_limit_started: Optional[float] = None
+        poll_rate_limit_retry_used = False
         poll_retry_count = 0
         while True:
             if cancel_check is not None:
@@ -2511,6 +2613,15 @@ class AdobeClient:
                     body_status.upper(),
                 ]
             )
+            logger.info(
+                "image poll response token=%s upstream_job_id=%s status=%s task_status=%s body_status=%s retry_after=%s",
+                str(token or "")[:8],
+                upstream_job_id,
+                getattr(poll_resp, "status_code", None),
+                str(poll_resp.headers.get("x-task-status") or ""),
+                body_status,
+                poll_resp.headers.get("retry-after") or poll_resp.headers.get("Retry-After"),
+            )
             if trace is not None:
                 trace.record_poll(
                     parent_id=trace_parent_id,
@@ -2533,21 +2644,19 @@ class AdobeClient:
                 or self._is_rate_limited_response(poll_resp)
             )
             if is_rate_limited:
-                now = time.time()
-                poll_rate_limit_started = poll_rate_limit_started or now
-                elapsed = now - poll_rate_limit_started
-                if elapsed >= self._image_rate_limit_wait_seconds():
-                    raise RateLimitWaitExceededError()
+                logger.warning(
+                    "image poll rate_limited token=%s upstream_job_id=%s retry_used=%s status=%s body=%s",
+                    str(token or "")[:8],
+                    upstream_job_id,
+                    poll_rate_limit_retry_used,
+                    getattr(poll_resp, "status_code", None),
+                    str(getattr(poll_resp, "text", "") or "")[:300],
+                )
+                if poll_rate_limit_retry_used:
+                    raise SubmitRateLimitedError()
+                poll_rate_limit_retry_used = True
                 poll_retry_count += 1
-                delay = self._retry_delay(
-                    poll_retry_count,
-                    rate_limited=True,
-                    retry_after=self._response_retry_after(poll_resp),
-                )
-                delay = min(
-                    delay,
-                    max(0.05, self._image_rate_limit_wait_seconds() - elapsed),
-                )
+                delay = self._image_rate_limit_single_retry_seconds()
                 if progress_cb is not None:
                     progress_cb(
                         {
@@ -2555,9 +2664,7 @@ class AdobeClient:
                             "upstream_job_id": upstream_job_id,
                             "retry_after": int(round(delay)),
                             "retry_count": poll_retry_count,
-                            "rate_limit_wait_seconds": min(
-                                self._image_rate_limit_wait_seconds(), elapsed + delay
-                            ),
+                            "rate_limit_wait_seconds": delay,
                             "error": poll_resp.text[:300],
                         }
                     )
@@ -2658,6 +2765,12 @@ class AdobeClient:
                         )
                     except Exception:
                         pass
+                logger.info(
+                    "image generation success token=%s upstream_job_id=%s bytes=%s",
+                    str(token or "")[:8],
+                    upstream_job_id,
+                    len(image_bytes or b""),
+                )
                 return image_bytes, latest
 
             if status_val in {"FAILED", "CANCELLED", "ERROR"}:

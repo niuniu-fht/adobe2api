@@ -215,11 +215,13 @@ def build_image_payload_candidates(
         },
         "outputResolution": normalized_output_resolution,
     }
-    if effective_ratio != "auto":
+    if effective_ratio == "auto":
+        base_payload["size"] = {"width": 4096, "height": 4096}
+    else:
         base_payload["size"] = size_from_ratio(
             effective_ratio, normalized_output_resolution
         )
-    if normalized_ratio:
+    if normalized_ratio and normalized_ratio != "auto":
         base_payload["modelSpecificPayload"]["aspectRatio"] = normalized_ratio
     if str(upstream_model_id or "").strip().lower().startswith("gemini"):
         base_payload["modelSpecificPayload"]["imageSize"] = (

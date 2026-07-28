@@ -174,7 +174,7 @@ GPT Image 图像模型（实验接入）：
 关于 `auto`：
 
 - `gpt-image-2` 与 `gpt-image-gemini-*` 兼容模型支持 `auto`
-- `gpt-image-gemini-*` 会把 `auto` 透传到上游，不再回退为 `1:1`
+- `gpt-image-gemini-*` 的 `auto` 或无法解析的参数会省略上游 `aspectRatio`，使用上游自动模式；顶层 `size` 仍按 `1K` / `2K` / `4K` 传递对应方形尺寸
 - 带固定比例后缀的 `firefly-*` 模型仍以模型 ID 中的比例为准
 
 Sora2 视频模型：
@@ -358,7 +358,7 @@ curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
 - `1024x1536` -> `aspectRatio=2:3`、`imageSize=2K`
 - `1792x1024` -> `aspectRatio=16:9`、`imageSize=2K`
 - `1024x1792` -> `aspectRatio=9:16`、`imageSize=2K`
-- `auto` -> `aspectRatio=auto`，不写入固定像素 `size`
+- `auto` 或无法解析的参数 -> 省略 `aspectRatio`，使用上游自动模式；`size` 仍按请求分辨率传递，例如 `4K` 为 `4096x4096`
 
 支持的前缀模型为 `gpt-image-gemini-3.1-flash-image` 和 `gpt-image-gemini-3-pro-image`，同样适用于 `/v1/images/edits`。上游比例为 `8:1`、`4:1`、`21:9`、`16:9`、`5:4`、`4:3`、`3:2`、`1:1`、`4:5`、`3:4`、`2:3`、`9:16`、`1:4`、`1:8`；其他数值比例和 `WIDTHxHEIGHT` 尺寸会自动选择最接近的一项。
 
