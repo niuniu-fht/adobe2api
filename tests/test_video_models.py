@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from types import SimpleNamespace
@@ -10,6 +12,7 @@ from api.routes.generation import (
 )
 from core.adobe_client import AdobeClient
 from core.models.catalog import MODEL_CATALOG, VIDEO_MODEL_CATALOG
+from core.token_mgr import TokenManager
 
 
 def test_public_model_ids_do_not_use_firefly_prefix():
@@ -49,26 +52,62 @@ def test_public_video_models_expose_one_id_per_model_family():
     ("result", "expected"),
     [
         (
-            {"status": "refreshed", "message": "token refreshed via cookie"},
-            ("refreshed", "token refreshed via cookie"),
+            {
+                "status": "refreshed",
+                "message": "token refreshed via cookie",
+                "profile_id": "PROFILE_1",
+            },
+            ("refreshed", "token refreshed via cookie", "FRESH_TOKEN"),
         ),
         (
             {"status": "retry", "message": "auto refresh failed: expired cookie"},
-            ("retry", "auto refresh failed: expired cookie"),
+            ("retry", "auto refresh failed: expired cookie", None),
         ),
-        ({}, ("invalid", "Token invalid or expired")),
+        ({}, ("invalid", "Token invalid or expired", None)),
     ],
 )
 def test_video_auth_failure_uses_bound_token_refresh(result, expected):
-    calls = []
+    auth_calls = []
+    profile_calls = []
 
     class TokenManagerStub:
         def handle_auth_failure(self, token):
-            calls.append(token)
+            auth_calls.append(token)
             return result
 
+        def get_available_for_refresh_profile(self, profile_id):
+            profile_calls.append(profile_id)
+            return "FRESH_TOKEN"
+
     assert handle_video_auth_failure(TokenManagerStub(), "STALE_TOKEN") == expected
-    assert calls == ["STALE_TOKEN"]
+    assert auth_calls == ["STALE_TOKEN"]
+    assert profile_calls == (
+        ["PROFILE_1"] if result.get("status") == "refreshed" else []
+    )
+
+
+def test_refresh_profile_lookup_returns_new_active_token():
+    manager = TokenManager.__new__(TokenManager)
+    manager._lock = threading.Lock()
+    manager.tokens = [
+        {
+            "status": "active",
+            "refresh_profile_id": "OTHER_PROFILE",
+            "value": "OTHER_TOKEN",
+        },
+        {
+            "status": "invalid",
+            "refresh_profile_id": "PROFILE_1",
+            "value": "STALE_TOKEN",
+        },
+        {
+            "status": "active",
+            "refresh_profile_id": "PROFILE_1",
+            "value": "FRESH_TOKEN",
+        },
+    ]
+
+    assert manager.get_available_for_refresh_profile("PROFILE_1") == "FRESH_TOKEN"
 
 
 @pytest.mark.parametrize(

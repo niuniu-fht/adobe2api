@@ -833,11 +833,16 @@ def build_unified_video_task_response(task) -> dict:
     return payload
 
 
-def handle_video_auth_failure(token_manager, token: str) -> tuple[str, str]:
+def handle_video_auth_failure(token_manager, token: str) -> tuple[str, str, str | None]:
     result = token_manager.handle_auth_failure(token)
     status = str(result.get("status") or "invalid").strip().lower()
     message = str(result.get("message") or "Token invalid or expired").strip()
-    return status, message
+    refreshed_token = None
+    if status == "refreshed":
+        refreshed_token = token_manager.get_available_for_refresh_profile(
+            str(result.get("profile_id") or "")
+        )
+    return status, message, refreshed_token
 
 
 def build_generation_router(
@@ -2495,9 +2500,13 @@ def build_generation_router(
 
         attempt = 0
         auth_recovery_retry_granted = False
+        preferred_token: str | None = None
         while attempt < max_attempts:
             attempt += 1
-            token = token_manager.get_available(strategy=client.token_rotation_strategy)
+            token = preferred_token or token_manager.get_available(
+                strategy=client.token_rotation_strategy
+            )
+            preferred_token = None
             if not token:
                 break
             try:
@@ -2607,9 +2616,10 @@ def build_generation_router(
                 last_code = "QuotaExceeded"
                 retryable = attempt < max_attempts
             except auth_error_cls as exc:
-                auth_status, auth_message = handle_video_auth_failure(
+                auth_status, auth_message, refreshed_token = handle_video_auth_failure(
                     token_manager, token
                 )
+                preferred_token = refreshed_token
                 last_error = (
                     auth_message if auth_status != "invalid" else str(exc)
                 )
@@ -2634,7 +2644,11 @@ def build_generation_router(
                 retryable = False
 
             if retryable:
-                delay = client._retry_delay_for_attempt(attempt)
+                delay = (
+                    0.0
+                    if preferred_token
+                    else client._retry_delay_for_attempt(attempt)
+                )
                 if delay > 0:
                     time.sleep(delay)
                 continue

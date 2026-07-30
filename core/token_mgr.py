@@ -260,6 +260,21 @@ class TokenManager:
             chosen = self._pick_active_token_locked(strategy=strategy)
             return chosen["value"] if chosen is not None else None
 
+    def get_available_for_refresh_profile(self, profile_id: str) -> Optional[str]:
+        pid = str(profile_id or "").strip()
+        if not pid:
+            return None
+        with self._lock:
+            for token in self.tokens:
+                if token.get("status") not in {"active", "error"}:
+                    continue
+                if str(token.get("refresh_profile_id") or "").strip() != pid:
+                    continue
+                value = str(token.get("value") or "").strip()
+                if value:
+                    return value
+        return None
+
     @classmethod
     def account_id_from_token(cls, value: str) -> str:
         data = cls._decode_jwt_payload(value)
