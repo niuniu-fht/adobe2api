@@ -9,7 +9,7 @@ from api.routes.generation import (
     parse_seedance_official_request,
     resolve_video_request_parameters,
 )
-from core.adobe_client import AdobeClient
+from core.adobe_client import AdobeClient, AdobeRequestError
 from core.models.catalog import VIDEO_MODEL_CATALOG
 from core.stores import RequestLogStore
 
@@ -515,6 +515,31 @@ def test_seedance_multimodal_payload_maps_adobe_reference_blobs():
             "mention": {"id": "seedance-audio-ref-01", "label": "Audio1"},
         },
     ]
+
+
+def test_seedance_submit_reports_model_not_authorized():
+    client = AdobeClient()
+    client._post_json = lambda *args, **kwargs: SimpleNamespace(
+        status_code=403,
+        headers={"x-access-error": "model_not_authorized"},
+        text='{"error_code":"access_error"}',
+    )
+
+    with pytest.raises(AdobeRequestError) as error_info:
+        client.generate_video(
+            token="TOKEN",
+            video_conf=SEEDANCE_CONF,
+            prompt="test",
+            aspect_ratio="16:9",
+            duration=5,
+            resolution="720p",
+        )
+
+    error = error_info.value
+    assert error.status_code == 403
+    assert error.error_type == "permission_denied"
+    assert error.upstream_code == "model_not_authorized"
+    assert error.error_code == "ModelNotAuthorized"
 
 
 @pytest.mark.parametrize(

@@ -845,6 +845,22 @@ def handle_video_auth_failure(token_manager, token: str) -> tuple[str, str, str 
     return status, message, refreshed_token
 
 
+def normalize_video_generation_error(exc: Exception) -> tuple[str, str, int]:
+    message = str(
+        getattr(exc, "user_message", None)
+        or getattr(exc, "detail", None)
+        or exc
+    )
+    error_code = str(getattr(exc, "error_code", None) or "GenerationFailed")
+    try:
+        status_code = int(getattr(exc, "status_code", None) or 502)
+    except (TypeError, ValueError):
+        status_code = 502
+    if status_code < 400 or status_code > 599:
+        status_code = 502
+    return error_code, message, status_code
+
+
 def build_generation_router(
     *,
     store,
@@ -2497,6 +2513,7 @@ def build_generation_router(
         max_attempts = max(1, int(max_attempts))
         last_error = "No active tokens available in the pool"
         last_code = "NoAvailableToken"
+        last_status_code = 502
 
         attempt = 0
         auth_recovery_retry_granted = False
@@ -2639,8 +2656,9 @@ def build_generation_router(
                     exc
                 )
             except Exception as exc:
-                last_error = str(getattr(exc, "detail", None) or exc)
-                last_code = "GenerationFailed"
+                last_code, last_error, last_status_code = (
+                    normalize_video_generation_error(exc)
+                )
                 retryable = False
 
             if retryable:
@@ -2667,7 +2685,7 @@ def build_generation_router(
                 str(getattr(failed_task, "upstream_job_id", None) or "") or None
             ),
             error=last_error,
-            status_code=502,
+            status_code=last_status_code,
             final=True,
         )
         _notify_seedance_callback(task_id)

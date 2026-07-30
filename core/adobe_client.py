@@ -99,6 +99,8 @@ class AdobeRequestError(Exception):
         status_code: Optional[int] = None,
         error_type: str = "",
         user_message: str = "",
+        upstream_code: str = "",
+        error_code: str = "",
     ):
         super().__init__(message)
         self.status_code = status_code
@@ -106,6 +108,8 @@ class AdobeRequestError(Exception):
         self.user_message = (
             str(user_message or "").strip() or str(message or "").strip()
         )
+        self.upstream_code = str(upstream_code or "").strip()
+        self.error_code = str(error_code or "").strip()
 
 
 class QuotaExhaustedError(AdobeRequestError):
@@ -1554,6 +1558,14 @@ class AdobeClient:
             access_error = submit_resp.headers.get("x-access-error")
             if access_error == "taste_exhausted":
                 raise QuotaExhaustedError("Adobe quota exhausted for this account")
+            if submit_resp.status_code == 403 and access_error == "model_not_authorized":
+                raise AdobeRequestError(
+                    "Adobe account is not authorized for the requested video model",
+                    status_code=403,
+                    error_type="permission_denied",
+                    upstream_code=access_error,
+                    error_code="ModelNotAuthorized",
+                )
             raise AuthError("Token invalid or expired")
 
         if submit_resp.status_code != 200:

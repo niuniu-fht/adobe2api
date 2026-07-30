@@ -7,10 +7,11 @@ from types import SimpleNamespace
 from api.routes.generation import (
     build_unified_video_task_response,
     handle_video_auth_failure,
+    normalize_video_generation_error,
     parse_unified_video_request,
     resolve_video_request_parameters,
 )
-from core.adobe_client import AdobeClient
+from core.adobe_client import AdobeClient, AdobeRequestError
 from core.models.catalog import MODEL_CATALOG, VIDEO_MODEL_CATALOG
 from core.token_mgr import TokenManager
 
@@ -108,6 +109,22 @@ def test_refresh_profile_lookup_returns_new_active_token():
     ]
 
     assert manager.get_available_for_refresh_profile("PROFILE_1") == "FRESH_TOKEN"
+
+
+def test_video_model_permission_error_preserves_upstream_status():
+    error = AdobeRequestError(
+        "Adobe account is not authorized for the requested video model",
+        status_code=403,
+        error_type="permission_denied",
+        upstream_code="model_not_authorized",
+        error_code="ModelNotAuthorized",
+    )
+
+    assert normalize_video_generation_error(error) == (
+        "ModelNotAuthorized",
+        "Adobe account is not authorized for the requested video model",
+        403,
+    )
 
 
 @pytest.mark.parametrize(
