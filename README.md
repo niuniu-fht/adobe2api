@@ -154,6 +154,8 @@ GPT Image 图像模型（实验接入）：
 - 分辨率：`1k` / `2k` / `4k`
 - 比例后缀：`1x1` / `5x4` / `9x16` / `21x9` / `16x9` / `4x3` / `3x2` / `4x5` / `3x4` / `2x3`
 - 当前实现会携带 `outputResolution` 和对应像素 `size`
+- 原生兼容模型 ID：`gpt-image-1.5` / `gpt-image-2`
+- `gpt-image-1.5` 调用上游 `gpt-image` / version `1.5`，仅向上游发送 1K 的 `1:1` `1024x1024`、`3:2` `1536x1024`、`2:3` `1024x1536`；传入其他尺寸或比例时会先映射到最接近的支持尺寸
 - GPT Image 默认质量由系统配置 `gpt_image_quality` 控制：`low` / `medium` / `high`，默认 `low`
 - 兼容模型 ID：`gpt-image-2-high` 和 `gpt-image-2-higher`。两者同样调用上游 `gpt-image` / version `2`，默认均为 `high`，也可通过 `gpt_image_model_qualities` 分别配置，例如：
   ```json
@@ -173,6 +175,7 @@ GPT Image 图像模型（实验接入）：
 
 关于 `auto`：
 
+- `gpt-image-1.5` 的 `auto` 会映射为 `1024x1024`
 - `gpt-image-2` 与 `gpt-image-gemini-*` 兼容模型支持 `auto`
 - `gpt-image-gemini-*` 的 `auto` 或无法解析的参数会省略上游 `aspectRatio`，使用上游自动模式；顶层 `size` 仍按 `1K` / `2K` / `4K` 传递对应方形尺寸
 - 带固定比例后缀的 `firefly-*` 模型仍以模型 ID 中的比例为准

@@ -102,6 +102,64 @@ def test_native_gpt_image_2_request_converts_requested_size():
     assert payload["modelSpecificPayload"]["size"] == "1536x1024"
 
 
+def test_native_gpt_image_15_uses_version_15_and_supported_1k_size():
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-1.5",
+            "prompt": "draw a dashboard",
+            "size": "1536x1024",
+        }
+    )
+
+    assert options.response_model == "gpt-image-1.5"
+    assert options.aspect_ratio == "3:2"
+    assert options.output_resolution == "1K"
+    assert options.requested_size == {"width": 1536, "height": 1024}
+    assert options.upstream_model_id == "gpt-image"
+    assert options.upstream_model_version == "1.5"
+
+    payload = build_image_payload_candidates(
+        prompt="draw a dashboard",
+        aspect_ratio=options.aspect_ratio,
+        output_resolution=options.output_resolution,
+        upstream_model_id=options.upstream_model_id or "",
+        upstream_model_version=options.upstream_model_version or "",
+        quality_level="low",
+        requested_size=options.requested_size,
+    )[0]
+
+    assert payload["modelId"] == "gpt-image"
+    assert payload["modelVersion"] == "1.5"
+    assert payload["size"] == {"width": 1536, "height": 1024}
+
+
+@pytest.mark.parametrize(
+    ("requested", "adapted", "ratio"),
+    [
+        (None, {"width": 1024, "height": 1024}, "1:1"),
+        ("auto", {"width": 1024, "height": 1024}, "1:1"),
+        ("1024x1024", {"width": 1024, "height": 1024}, "1:1"),
+        ("1024x1536", {"width": 1024, "height": 1536}, "2:3"),
+        ("9:16", {"width": 1024, "height": 1536}, "2:3"),
+        ("1264x848", {"width": 1536, "height": 1024}, "3:2"),
+        ("16:9", {"width": 1536, "height": 1024}, "3:2"),
+    ],
+)
+def test_native_gpt_image_15_maps_unsupported_sizes_before_upstream(
+    requested, adapted, ratio
+):
+    data = {"model": "gpt-image-1.5", "prompt": "draw"}
+    if requested is not None:
+        data["size"] = requested
+
+    options = build_native_gpt_image_options(data)
+
+    assert options.upstream_model_version == "1.5"
+    assert options.output_resolution == "1K"
+    assert options.aspect_ratio == ratio
+    assert options.requested_size == adapted
+
+
 @pytest.mark.parametrize(
     ("requested", "adapted"),
     [

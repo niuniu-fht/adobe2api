@@ -18,6 +18,7 @@ from .payloads import gpt_image_pixels_from_ratio
 
 
 OPENAI_GPT_IMAGE_MODEL_VERSIONS = {
+    "gpt-image-1.5": "1.5",
     "gpt-image-2": "2",
 }
 OPENAI_GEMINI_MODEL_PREFIX = "gpt-image-"
@@ -33,6 +34,11 @@ SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 RATIO_RE = re.compile(r"^\d+:\d+$")
 DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP = {
     "16:9": {"width": 2560, "height": 1440},
+}
+GPT_IMAGE_15_RATIO_SIZE_MAP = {
+    "1:1": {"width": 1024, "height": 1024},
+    "3:2": {"width": 1536, "height": 1024},
+    "2:3": {"width": 1024, "height": 1536},
 }
 
 
@@ -281,6 +287,44 @@ def gpt_image_output_resolution_from_size(
     return min(("1K", "2K", "4K"), key=distance)
 
 
+def gpt_image_15_size_from_requested(
+    size: Optional[dict[str, int]],
+) -> dict[str, int]:
+    if not size:
+        return dict(GPT_IMAGE_15_RATIO_SIZE_MAP["1:1"])
+    ratio = _nearest_ratio(
+        int(size["width"]),
+        int(size["height"]),
+        set(GPT_IMAGE_15_RATIO_SIZE_MAP),
+    )
+    return dict(GPT_IMAGE_15_RATIO_SIZE_MAP[ratio])
+
+
+def parse_gpt_image_15_size(raw_size: object) -> dict[str, int]:
+    size = str(raw_size or "").strip().lower()
+    if not size or size == "auto":
+        return dict(GPT_IMAGE_15_RATIO_SIZE_MAP["1:1"])
+    if size in GPT_IMAGE_15_RATIO_SIZE_MAP:
+        return dict(GPT_IMAGE_15_RATIO_SIZE_MAP[size])
+    if RATIO_RE.match(size):
+        width_part, height_part = size.split(":", 1)
+        width = int(width_part)
+        height = int(height_part)
+        if width > 0 and height > 0:
+            return gpt_image_15_size_from_requested(
+                {"width": width, "height": height}
+            )
+        return dict(GPT_IMAGE_15_RATIO_SIZE_MAP["1:1"])
+    match = SIZE_RE.match(size)
+    if not match:
+        return dict(GPT_IMAGE_15_RATIO_SIZE_MAP["1:1"])
+    width = int(match.group(1))
+    height = int(match.group(2))
+    if width <= 0 or height <= 0:
+        return dict(GPT_IMAGE_15_RATIO_SIZE_MAP["1:1"])
+    return gpt_image_15_size_from_requested({"width": width, "height": height})
+
+
 def normalize_gpt_image_size(
     size: Optional[dict[str, int]],
 ) -> Optional[dict[str, int]]:
@@ -393,27 +437,38 @@ def build_native_gpt_image_options(
         raise OpenAIImageRequestError(f"Invalid model: {model_id}", "model")
 
     raw_size = data.get("size")
-    is_auto_size = raw_size is None or str(raw_size or "").strip().lower() in {
-        "",
-        "auto",
-    }
-    try:
-        parsed_size = None if is_auto_size else parse_requested_size(raw_size)
-    except OpenAIImageRequestError:
-        is_auto_size = True
-        parsed_size = None
-
-    requested_size = normalize_gpt_image_size(parsed_size)
-    aspect_ratio = (
-        "auto" if is_auto_size else gpt_image_aspect_ratio_from_size(requested_size)
-    )
-    output_resolution = (
-        "auto" if is_auto_size else gpt_image_output_resolution_from_size(requested_size)
-    )
-    output_format = parse_output_format(data.get("output_format"))
     model_version = str(
         upstream_model_version or OPENAI_GPT_IMAGE_MODEL_VERSIONS[model_id]
     )
+    if model_version == "1.5":
+        requested_size = parse_gpt_image_15_size(raw_size)
+        aspect_ratio = aspect_ratio_from_size(requested_size)
+        output_resolution = "1K"
+        resolved_model_id = gpt_image_model_id_from_size(requested_size)
+    else:
+        is_auto_size = raw_size is None or str(raw_size or "").strip().lower() in {
+            "",
+            "auto",
+        }
+        try:
+            parsed_size = None if is_auto_size else parse_requested_size(raw_size)
+        except OpenAIImageRequestError:
+            is_auto_size = True
+            parsed_size = None
+
+        requested_size = normalize_gpt_image_size(parsed_size)
+        aspect_ratio = (
+            "auto" if is_auto_size else gpt_image_aspect_ratio_from_size(requested_size)
+        )
+        output_resolution = (
+            "auto"
+            if is_auto_size
+            else gpt_image_output_resolution_from_size(requested_size)
+        )
+        resolved_model_id = (
+            None if is_auto_size else gpt_image_model_id_from_size(requested_size)
+        )
+    output_format = parse_output_format(data.get("output_format"))
     return OpenAIImageGenerationOptions(
         n=parse_image_count(data.get("n")),
         aspect_ratio=aspect_ratio,
@@ -429,9 +484,7 @@ def build_native_gpt_image_options(
         is_native_gpt_image=True,
         upstream_model_id="gpt-image",
         upstream_model_version=model_version,
-        resolved_model_id=(
-            None if is_auto_size else gpt_image_model_id_from_size(requested_size)
-        ),
+        resolved_model_id=resolved_model_id,
     )
 
 

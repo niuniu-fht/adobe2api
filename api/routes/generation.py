@@ -35,6 +35,7 @@ from core.adobe_client import (
 from core.config_mgr import config_manager
 from core.models.openai_images import (
     OpenAIImageRequestError,
+    OPENAI_GPT_IMAGE_MODEL_VERSIONS,
     build_legacy_image_options,
     build_native_gpt_image_options,
     encode_image_response_item,
@@ -404,11 +405,16 @@ def build_generation_router(
 
     def _build_gpt_image_alias_options(data: dict, model_id: str | None):
         response_model = str(model_id or "gpt-image-2").strip() or "gpt-image-2"
+        native_model_id = (
+            response_model
+            if response_model in OPENAI_GPT_IMAGE_MODEL_VERSIONS
+            else "gpt-image-2"
+        )
         image_options = build_native_gpt_image_options(
             data,
-            model_id_override="gpt-image-2",
+            model_id_override=native_model_id,
             response_model=response_model,
-            upstream_model_version="2",
+            upstream_model_version=OPENAI_GPT_IMAGE_MODEL_VERSIONS[native_model_id],
         )
         model_conf = {
             "upstream_model_id": image_options.upstream_model_id,
@@ -556,6 +562,14 @@ def build_generation_router(
                     "description": conf["description"],
                 }
             )
+        data.append(
+            {
+                "id": "gpt-image-1.5",
+                "object": "model",
+                "owned_by": "adobe2api",
+                "description": "OpenAI Images compatible alias for Firefly GPT Image 1.5",
+            }
+        )
         data.append(
             {
                 "id": "gpt-image-2",
