@@ -36,6 +36,7 @@ from core.adobe_client import (
     AdobeClient,
     AuthError,
     ContentPolicyError,
+    PollNanobananaTimeoutError,
     QuotaExhaustedError,
     SubmitRateLimitedError,
     UpstreamTemporaryError,
@@ -832,6 +833,7 @@ def _run_with_token_retries(
     attempt = 0
     limited_retry_attempts = 0
     submit_rate_limit_retries = 0
+    poll_nanobanana_timeout_retries = 0
     rate_limit_switch_started: Optional[float] = None
     rate_limit_switch_timeout_seconds = 300.0
     tried_tokens: set[str] = set()
@@ -1143,6 +1145,51 @@ def _run_with_token_retries(
                         "next_action": "switch_account",
                     },
                 )
+        except PollNanobananaTimeoutError as exc:
+            poll_nanobanana_timeout_retries += 1
+            retryable = poll_nanobanana_timeout_retries <= 1
+            if retryable:
+                notify_token_unavailable(token)
+            last_exc = exc
+            retry_reason = "poll_nanobanana_timeout_switch_account"
+            retry_error_text = str(exc.user_message or str(exc))
+            delay = 0.0
+            if not retryable:
+                request.state.trace_final_error = exc
+            if request_trace is not None:
+                request_trace.finish_stage(
+                    trace_attempt_id,
+                    status="failed",
+                    error=exc,
+                    details={
+                        "retryable": retryable,
+                        "retry_reason": retry_reason,
+                        "next_action": (
+                            "switch_account_resubmit_once"
+                            if retryable
+                            else "return_error"
+                        ),
+                        "switch_attempt": poll_nanobanana_timeout_retries,
+                    },
+                )
+                if retryable:
+                    token_meta = _token_meta(token)
+                    request_trace.add_stage(
+                        layer="service",
+                        kind="poll_nanobanana_timeout_switch",
+                        name="fal-nanobanana poll 408 后切换账号重新出图一次",
+                        status="succeeded",
+                        parent_id=getattr(
+                            request.state, "trace_operation_stage_id", None
+                        ),
+                        details={
+                            "operation": operation_name,
+                            "from_token_id": token_meta.get("token_id"),
+                            "from_account_name": token_meta.get("token_account_name"),
+                            "switch_attempt": poll_nanobanana_timeout_retries,
+                            "retry_delay_seconds": delay,
+                        },
+                    )
         except UpstreamTemporaryError as exc:
             last_exc = exc
             limited_retry_attempts += 1
@@ -1351,6 +1398,11 @@ def _run_with_token_retries(
             raise HTTPException(
                 status_code=400,
                 detail="Too many requests. Please try again later.",
+            )
+        if isinstance(last_exc, PollNanobananaTimeoutError):
+            raise HTTPException(
+                status_code=408,
+                detail=str(last_exc.user_message or str(last_exc)),
             )
         if isinstance(last_exc, AuthError):
             raise HTTPException(

@@ -909,6 +909,157 @@ def test_submit_rate_limit_switches_until_tokens_exhausted_with_delay(monkeypatc
     assert unavailable_callbacks == tokens
 
 
+def test_poll_nanobanana_timeout_switches_account_once(monkeypatch):
+    import app
+
+    tokens = ["TOKEN-A", "TOKEN-B", "TOKEN-C"]
+
+    class TokenManagerStub:
+        def list_active_ids(self):
+            return list(tokens)
+
+        def list_active_account_tokens(self):
+            return [
+                {
+                    "token": token,
+                    "account_id": f"account-{token.rsplit('-', 1)[-1].lower()}",
+                }
+                for token in tokens
+            ]
+
+        def get_available(self, strategy=None):
+            return tokens[0]
+
+        def get_meta_by_value(self, token):
+            suffix = token.rsplit("-", 1)[-1].lower()
+            return {
+                "token_id": f"token-{suffix}",
+                "token_account_id": f"account-{suffix}",
+            }
+
+        def report_success(self, token):
+            self.success = token
+
+        def report_invalid(self, _token):
+            pytest.fail("poll nanobanana timeout must not invalidate token")
+
+    class ClientStub:
+        retry_enabled = False
+        retry_max_attempts = 1
+        token_rotation_strategy = "round_robin"
+
+    class RequestState:
+        log_id = "LOG_ID"
+
+    class RequestStub:
+        method = "POST"
+        url = type("Url", (), {"path": "/v1/images/edits"})()
+        state = RequestState()
+
+    attempts = []
+    unavailable_callbacks = []
+    sleep_calls = []
+    monkeypatch.setattr(app, "token_manager", TokenManagerStub())
+    monkeypatch.setattr(app, "client", ClientStub())
+    monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
+    monkeypatch.setattr(app.time, "sleep", lambda delay: sleep_calls.append(delay))
+
+    def run_once(token):
+        attempts.append(token)
+        if token == "TOKEN-A":
+            raise app.PollNanobananaTimeoutError(
+                "poll failed: 408 Gateway timeout from fal-nanobanana"
+            )
+        return "ok"
+
+    result = app._run_with_token_retries(
+        request=RequestStub(),
+        operation_name="images.edits",
+        run_once=run_once,
+        set_request_error_detail=lambda *args, **kwargs: "ERR-CODE",
+        on_token_unavailable=unavailable_callbacks.append,
+    )
+
+    assert result == "ok"
+    assert attempts == ["TOKEN-A", "TOKEN-B"]
+    assert sleep_calls == []
+    assert unavailable_callbacks == ["TOKEN-A"]
+
+
+def test_poll_nanobanana_timeout_second_failure_returns_408(monkeypatch):
+    import app
+
+    tokens = ["TOKEN-A", "TOKEN-B", "TOKEN-C"]
+
+    class TokenManagerStub:
+        def list_active_ids(self):
+            return list(tokens)
+
+        def list_active_account_tokens(self):
+            return [
+                {
+                    "token": token,
+                    "account_id": f"account-{token.rsplit('-', 1)[-1].lower()}",
+                }
+                for token in tokens
+            ]
+
+        def get_available(self, strategy=None):
+            return tokens[0]
+
+        def get_meta_by_value(self, token):
+            suffix = token.rsplit("-", 1)[-1].lower()
+            return {
+                "token_id": f"token-{suffix}",
+                "token_account_id": f"account-{suffix}",
+            }
+
+        def report_success(self, _token):
+            pytest.fail("second fal timeout should return error")
+
+        def report_invalid(self, _token):
+            pytest.fail("poll nanobanana timeout must not invalidate token")
+
+    class ClientStub:
+        retry_enabled = False
+        retry_max_attempts = 1
+        token_rotation_strategy = "round_robin"
+
+    class RequestState:
+        log_id = "LOG_ID"
+
+    class RequestStub:
+        method = "POST"
+        url = type("Url", (), {"path": "/v1/images/edits"})()
+        state = RequestState()
+
+    attempts = []
+    unavailable_callbacks = []
+    monkeypatch.setattr(app, "token_manager", TokenManagerStub())
+    monkeypatch.setattr(app, "client", ClientStub())
+    monkeypatch.setattr(app, "_append_attempt_log", lambda **kwargs: None)
+
+    def run_once(token):
+        attempts.append(token)
+        raise app.PollNanobananaTimeoutError(
+            "poll failed: 408 Gateway timeout from fal-nanobanana"
+        )
+
+    with pytest.raises(app.HTTPException) as error_info:
+        app._run_with_token_retries(
+            request=RequestStub(),
+            operation_name="images.edits",
+            run_once=run_once,
+            set_request_error_detail=lambda *args, **kwargs: "ERR-CODE",
+            on_token_unavailable=unavailable_callbacks.append,
+        )
+
+    assert error_info.value.status_code == 408
+    assert "fal-nanobanana" in str(error_info.value.detail)
+    assert attempts == ["TOKEN-A", "TOKEN-B"]
+    assert unavailable_callbacks == ["TOKEN-A"]
+
+
 def test_openai_prefixed_gemini_model_is_normalized():
     assert normalize_openai_gemini_model_id(
         "gpt-image-gemini-3.1-flash-image"

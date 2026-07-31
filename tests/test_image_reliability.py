@@ -14,6 +14,7 @@ from core.adobe_client import (
     AuthError,
     ContentPolicyError,
     ImageStageTerminalError,
+    PollNanobananaTimeoutError,
     RateLimitWaitExceededError,
     ReferenceImageRequiredError,
     SubmitRateLimitedError,
@@ -156,6 +157,39 @@ def test_primary_submit_429_skips_requests_fallback(monkeypatch):
     )
 
     assert client._post_image_json("https://example.test", {}, {}) is response
+
+
+def test_poll_fal_nanobanana_timeout_raises_switch_signal(monkeypatch):
+    client = AdobeClient()
+    monkeypatch.setattr(
+        client,
+        "_build_payload_candidates",
+        lambda **kwargs: [{"seed": 42}],
+    )
+    monkeypatch.setattr(client, "_post_image_json", lambda *args, **kwargs: _submit_success())
+    monkeypatch.setattr(
+        client,
+        "_get",
+        lambda *args, **kwargs: FakeResponse(
+            408,
+            {
+                "error_code": "timeout_error",
+                "message": (
+                    "Gateway timeout from fal-nanobanana: "
+                    "{'detail': 'Request timed out', 'error_type': 'internal_error'}"
+                ),
+            },
+            headers={"x-task-status": "FAILED", "content-type": "application/json"},
+        ),
+    )
+    monkeypatch.setattr(
+        client,
+        "_wait_for_image_retry",
+        lambda *args, **kwargs: pytest.fail("fal timeout should switch account immediately"),
+    )
+
+    with pytest.raises(PollNanobananaTimeoutError, match="fal-nanobanana"):
+        client._generate_once(token="TOKEN", prompt="draw", seed=42)
 
 
 def test_candidate_unsafe_stops_before_later_candidates(monkeypatch):

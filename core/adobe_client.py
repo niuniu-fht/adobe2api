@@ -192,6 +192,16 @@ class SubmitRateLimitedError(AdobeRequestError):
         )
 
 
+class PollNanobananaTimeoutError(AdobeRequestError):
+    def __init__(self, message: str):
+        super().__init__(
+            message,
+            status_code=408,
+            error_type="status",
+            user_message=message,
+        )
+
+
 class ImageStageTerminalError(AdobeRequestError):
     def __init__(
         self,
@@ -450,6 +460,24 @@ class AdobeClient:
     def _is_retryable_image_status(status_code: int) -> bool:
         normalized = int(status_code or 0)
         return normalized in {408, 425, 451} or 500 <= normalized <= 599
+
+    @staticmethod
+    def _is_fal_nanobanana_timeout_response(resp) -> bool:
+        if int(getattr(resp, "status_code", 0) or 0) != 408:
+            return False
+        text = str(getattr(resp, "text", "") or "").lower()
+        body = None
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            text = f"{text} {json.dumps(body, ensure_ascii=False).lower()}"
+        return (
+            "fal-nanobanana" in text
+            and "timeout" in text
+            and "request timed out" in text
+        )
 
     @staticmethod
     def _is_invalid_image_size_aspect_response(resp: Any) -> bool:
@@ -2647,6 +2675,10 @@ class AdobeClient:
                     poll_resp.status_code,
                     poll_resp.text[:500],
                 )
+                if self._is_fal_nanobanana_timeout_response(poll_resp):
+                    raise PollNanobananaTimeoutError(
+                        f"poll failed: {poll_resp.status_code} {poll_resp.text[:300]}"
+                    )
                 if self._is_retryable_image_status(poll_resp.status_code):
                     now = time.time()
                     poll_network_started = poll_network_started or now
