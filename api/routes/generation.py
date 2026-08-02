@@ -34,6 +34,7 @@ from core.adobe_client import (
 )
 from core.config_mgr import config_manager
 from core.models.openai_images import (
+    DIRECT_TRANSPARENT_MASK_MODELS,
     OpenAIImageRequestError,
     OPENAI_GPT_IMAGE_MODEL_VERSIONS,
     build_legacy_image_options,
@@ -2209,6 +2210,8 @@ def build_generation_router(
             )
 
         prompt = str(data.get("prompt") or "").strip()
+        model_id = str(data.get("model") or "gpt-image-2").strip()
+        is_direct_transparent_mask_model = model_id in DIRECT_TRANSPARENT_MASK_MODELS
         validation_stage_id = None
         if trace is not None:
             validation_stage_id = trace.start_stage(
@@ -2221,7 +2224,7 @@ def build_generation_router(
                     "input_image_count": len(input_images),
                 },
             )
-        if not prompt:
+        if not prompt and not is_direct_transparent_mask_model:
             content = {
                 "error": {
                     "message": "prompt is required",
@@ -2259,7 +2262,6 @@ def build_generation_router(
                 content=content,
             )
 
-        model_id = str(data.get("model") or "gpt-image-2").strip()
         try:
             request.state.log_model = model_id or "gpt-image-2"
             request.state.log_prompt = prompt or None

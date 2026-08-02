@@ -159,7 +159,7 @@ GPT Image 图像模型（实验接入）：
 - GPT Image 默认质量由系统配置 `gpt_image_quality` 控制：`low` / `medium` / `high`，默认 `low`
 - 兼容模型 ID：`gpt-image-2-high`、`gpt-image-2-higher`、`gpt-image-2-clarity`、`gpt-image-2-clarity-free`。这些模型同样映射到上游 `gpt-image` / version `2` 质量档案，其中 `gpt-image-2-high` / `gpt-image-2-higher` 默认 `high`，`gpt-image-2-clarity` / `gpt-image-2-clarity-free` 默认 `low`，也可通过 `gpt_image_model_qualities` 分别配置；其中：
   - `gpt-image-2-clarity`：先正常走 GPT Image 生图，再调用 `di-imaging /v1/masking/select-subject` 生成 `softMask`，并把生成图与蒙版合成为透明背景 PNG 返回。
-  - `gpt-image-2-clarity-free`：仅用于 `/v1/images/edits`，必须上传输入图；它跳过 GPT Image 生图，直接对输入图调用 `select-subject`，再把输入图与蒙版合成为透明背景 PNG。未上传输入图会返回 400。
+  - `gpt-image-2-clarity-free`：仅用于 `/v1/images/edits`，只需要上传输入图，`prompt` / `size` 等参数可省略；它跳过 GPT Image 生图，直接对输入图调用 `select-subject`，再把输入图与蒙版合成为透明背景 PNG。未上传输入图会返回 400。
   示例配置：
   ```json
   {
@@ -456,4 +456,5 @@ OpenAI `/v1/images/edits` 和 Gemini `inlineData` 均支持最多 16 张参考�
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=leik1000/adobe2api&type=Date)](https://star-history.com/#leik1000/adobe2api&Date)
+
 

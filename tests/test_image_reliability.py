@@ -428,7 +428,6 @@ def test_clarity_free_edits_directly_masks_input_without_image_generation(monkey
         headers=headers,
         json={
             "model": "gpt-image-2-clarity-free",
-            "prompt": "remove background",
             "image": image_data_url,
             "response_format": "b64_json",
             "output_format": "jpeg",

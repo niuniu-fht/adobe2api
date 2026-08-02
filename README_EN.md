@@ -120,7 +120,7 @@ GPT Image models (experimental):
 - Ratio suffix: `1x1` / `5x4` / `9x16` / `21x9` / `16x9` / `4x3` / `3x2` / `4x5` / `3x4` / `2x3`
 - The implementation sends both `outputResolution` and the mapped pixel `size`
 - GPT Image quality is controlled by system config `gpt_image_quality`: `low` / `medium` / `high`, default `low`
-- `gpt-image-2-high`, `gpt-image-2-higher`, `gpt-image-2-clarity`, and `gpt-image-2-clarity-free` are configurable aliases for upstream `gpt-image` version `2` quality profiles. `gpt-image-2-high` and `gpt-image-2-higher` default to `high`; `gpt-image-2-clarity` and `gpt-image-2-clarity-free` default to `low`. `gpt-image-2-clarity` generates an image first, then calls `di-imaging /v1/masking/select-subject`, applies the returned `softMask`, and returns a transparent PNG. `gpt-image-2-clarity-free` is for `/v1/images/edits` only: it requires an input image, skips GPT Image generation, masks the input image directly, and returns a transparent PNG; missing input image returns 400.
+- `gpt-image-2-high`, `gpt-image-2-higher`, `gpt-image-2-clarity`, and `gpt-image-2-clarity-free` are configurable aliases for upstream `gpt-image` version `2` quality profiles. `gpt-image-2-high` and `gpt-image-2-higher` default to `high`; `gpt-image-2-clarity` and `gpt-image-2-clarity-free` default to `low`. `gpt-image-2-clarity` generates an image first, then calls `di-imaging /v1/masking/select-subject`, applies the returned `softMask`, and returns a transparent PNG. `gpt-image-2-clarity-free` is for `/v1/images/edits` only: it only needs an input image; `prompt` / `size` can be omitted. It skips GPT Image generation, masks the input image directly, and returns a transparent PNG; missing input image returns 400.
 - Examples:
   - `firefly-gpt-image-2k-16x9`
   - `firefly-gpt-image-4k-1x1`
@@ -344,4 +344,5 @@ Generated media retention policy:
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=leik1000/adobe2api&type=Date)](https://star-history.com/#leik1000/adobe2api&Date)
+
 
