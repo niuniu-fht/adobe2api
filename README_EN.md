@@ -120,7 +120,7 @@ GPT Image models (experimental):
 - Ratio suffix: `1x1` / `5x4` / `9x16` / `21x9` / `16x9` / `4x3` / `3x2` / `4x5` / `3x4` / `2x3`
 - The implementation sends both `outputResolution` and the mapped pixel `size`
 - GPT Image quality is controlled by system config `gpt_image_quality`: `low` / `medium` / `high`, default `low`
-- `gpt-image-2-high` and `gpt-image-2-higher` are configurable aliases for upstream `gpt-image` version `2`. Both default to `high`; their individual quality profiles are stored in `gpt_image_model_qualities`.
+- `gpt-image-2-high`, `gpt-image-2-higher`, and `gpt-image-2-clarity` are configurable aliases for upstream `gpt-image` version `2`. `gpt-image-2-high` and `gpt-image-2-higher` default to `high`; `gpt-image-2-clarity` defaults to `low`. Their individual quality profiles are stored in `gpt_image_model_qualities`. `gpt-image-2-clarity` automatically calls `di-imaging /v1/masking/select-subject` after generation, applies the returned `softMask`, and returns a transparent PNG.
 - Examples:
   - `firefly-gpt-image-2k-16x9`
   - `firefly-gpt-image-4k-1x1`
@@ -344,3 +344,4 @@ Generated media retention policy:
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=leik1000/adobe2api&type=Date)](https://star-history.com/#leik1000/adobe2api&Date)
+

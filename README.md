@@ -157,17 +157,19 @@ GPT Image 图像模型（实验接入）：
 - 原生兼容模型 ID：`gpt-image-1.5` / `gpt-image-2`
 - `gpt-image-1.5` 调用上游 `gpt-image` / version `1.5`，仅向上游发送 1K 的 `1:1` `1024x1024`、`3:2` `1536x1024`、`2:3` `1024x1536`；传入其他尺寸或比例时会先映射到最接近的支持尺寸
 - GPT Image 默认质量由系统配置 `gpt_image_quality` 控制：`low` / `medium` / `high`，默认 `low`
-- 兼容模型 ID：`gpt-image-2-high` 和 `gpt-image-2-higher`。两者同样调用上游 `gpt-image` / version `2`，默认均为 `high`，也可通过 `gpt_image_model_qualities` 分别配置，例如：
+- 兼容模型 ID：`gpt-image-2-high`、`gpt-image-2-higher`、`gpt-image-2-clarity`。三者同样调用上游 `gpt-image` / version `2`，其中 `gpt-image-2-high` / `gpt-image-2-higher` 默认 `high`，`gpt-image-2-clarity` 默认 `low`，也可通过 `gpt_image_model_qualities` 分别配置；其中 `gpt-image-2-clarity` 会在生图完成后自动调用 `di-imaging /v1/masking/select-subject` 生成 `softMask`，并把原图与蒙版合成为透明背景 PNG 返回，例如：
   ```json
   {
     "gpt_image_quality": "low",
+    "masking_api_key": "clio-playground-web",
     "gpt_image_model_qualities": {
       "gpt-image-2-high": "medium",
-      "gpt-image-2-higher": "high"
+      "gpt-image-2-higher": "high",
+      "gpt-image-2-clarity": "low"
     }
   }
   ```
-  请求 `gpt-image-2` 时使用 `gpt_image_quality`；另外两个模型 ID 使用各自的映射，因此可以配置三个独立质量档案。
+  请求 `gpt-image-2` 时使用 `gpt_image_quality`；这几个扩展模型 ID 使用各自的映射，因此可以配置独立质量档案。
 - 示例：
   - `firefly-gpt-image-2k-16x9`
   - `firefly-gpt-image-4k-1x1`
@@ -450,3 +452,4 @@ OpenAI `/v1/images/edits` 和 Gemini `inlineData` 均支持最多 16 张参考�
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=leik1000/adobe2api&type=Date)](https://star-history.com/#leik1000/adobe2api&Date)
+

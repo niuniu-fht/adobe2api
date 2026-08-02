@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 import json
 import logging
 import os
@@ -29,9 +30,10 @@ except Exception:
     CurlSession = None
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageChops
 except Exception:
     Image = None
+    ImageChops = None
 
 
 logger = logging.getLogger("adobe2api")
@@ -39,6 +41,8 @@ logger = logging.getLogger("adobe2api")
 DEFAULT_GPT_IMAGE_MODEL_QUALITIES = {
     "gpt-image-2-high": "high",
     "gpt-image-2-higher": "high",
+    "gpt-image-2-clarity": "low",
+    "gpt-image-2-**clarity": "low",
 }
 
 
@@ -222,6 +226,7 @@ class AdobeClient:
     submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-images/generate-async"
     video_submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async"
     upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/image"
+    select_subject_url = "https://di-imaging.ff.adobe.io/v1/masking/select-subject"
     entity_api_base = "https://firefly-entity.adobe.io/api/entities/"
     platform_cs_index_url = "https://platform-cs-edge.adobe.io/index"
     platform_cs_base = "https://platform-cs-va6.adobe.io/composite/component/path"
@@ -239,6 +244,7 @@ class AdobeClient:
         self.token_rotation_strategy = "round_robin"
         self.gpt_image_quality = "low"
         self.gpt_image_model_qualities: dict[str, str] = {}
+        self.masking_api_key = "clio-playground-web"
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
         self.sec_ch_ua = (
             '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"'
@@ -286,6 +292,14 @@ class AdobeClient:
         if gpt_quality not in {"low", "medium", "high"}:
             gpt_quality = "low"
         self.gpt_image_quality = gpt_quality
+        self.masking_api_key = (
+            str(
+                cfg.get("masking_api_key")
+                or cfg.get("di_imaging_api_key")
+                or "clio-playground-web"
+            ).strip()
+            or "clio-playground-web"
+        )
         model_qualities = cfg.get("gpt_image_model_qualities", {})
         if not isinstance(model_qualities, dict):
             model_qualities = {}
@@ -624,6 +638,17 @@ class AdobeClient:
             "user-agent": self.user_agent,
             "x-api-key": self.api_key,
             "content-type": "application/json",
+        }
+
+    def _select_subject_headers(self, token: str) -> dict:
+        return {
+            "Authorization": f"Bearer {token}",
+            "accept": "application/json",
+            "content-type": "application/json",
+            "origin": "https://firefly.adobe.com",
+            "referer": "https://firefly.adobe.com/",
+            "user-agent": self.user_agent,
+            "x-api-key": self.masking_api_key,
         }
 
     def _entity_headers(self, token: str) -> dict:
@@ -1379,6 +1404,184 @@ class AdobeClient:
         if not image_id:
             raise AdobeRequestError("upload image succeeded but no image id returned")
         return str(image_id)
+
+    def select_subject_mask(
+        self,
+        token: str,
+        image_id: str,
+        *,
+        soft_mask: bool = True,
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+    ) -> dict:
+        image_id = str(image_id or "").strip()
+        if not image_id:
+            raise AdobeRequestError("masking image id is required")
+        headers = self._select_subject_headers(token)
+        payload = {"image": {"id": image_id}, "softMask": bool(soft_mask)}
+        trace_stage_id = None
+        if trace is not None:
+            trace_stage_id = trace.start_stage(
+                layer="adobe",
+                kind="mask",
+                name="Select Subject 生成透明蒙版",
+                parent_id=trace_parent_id,
+                request={
+                    "method": "POST",
+                    "url": sanitize_url(self.select_subject_url),
+                    "headers": sanitize_headers(headers),
+                    "body": sanitize_trace_value(payload),
+                },
+            )
+        resp = self._run_image_io(
+            io_call,
+            lambda: self._post_json(
+                self.select_subject_url,
+                headers=headers,
+                payload=payload,
+                legacy_451_fallback=False,
+            ),
+        )
+        if trace is not None:
+            trace.finish_stage(
+                trace_stage_id,
+                status="succeeded" if resp.status_code == 200 else "failed",
+                response=response_snapshot(resp),
+            )
+        if resp.status_code in (401, 403):
+            raise AuthError("Token invalid or expired")
+        if resp.status_code != 200:
+            if resp.status_code == 429 or self._is_rate_limited_response(resp):
+                raise SubmitRateLimitedError()
+            if resp.status_code in (429, 451) or resp.status_code >= 500:
+                raise ImageStageTerminalError(
+                    f"select subject mask failed: {resp.status_code} {resp.text[:300]}",
+                    status_code=resp.status_code,
+                    error_type="mask",
+                )
+            raise AdobeRequestError(
+                f"select subject mask failed: {resp.status_code} {resp.text[:300]}"
+            )
+        data = self._json_or_empty(resp)
+        if not isinstance(data, dict):
+            raise AdobeRequestError("select subject mask failed: invalid response")
+        masks = data.get("masks") or []
+        mask = (masks[0] or {}) if masks else {}
+        mask_url = str(mask.get("presignedUrl") or "").strip()
+        if not mask_url:
+            raise AdobeRequestError(
+                "select subject mask succeeded but no mask url returned"
+            )
+        return data
+
+    def _download_mask_bytes(
+        self,
+        mask_url: str,
+        *,
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+    ) -> bytes:
+        headers = {"accept": "*/*"}
+        trace_stage_id = None
+        if trace is not None:
+            trace_stage_id = trace.start_stage(
+                layer="adobe",
+                kind="download",
+                name="下载 Select Subject 蒙版",
+                parent_id=trace_parent_id,
+                request={
+                    "method": "GET",
+                    "url": sanitize_url(mask_url),
+                    "headers": sanitize_headers(headers),
+                },
+            )
+        resp = self._run_image_io(
+            io_call,
+            lambda: self._get(mask_url, headers=headers, timeout=30),
+        )
+        if trace is not None:
+            trace.finish_stage(
+                trace_stage_id,
+                status="succeeded" if resp.status_code == 200 else "failed",
+                response=response_snapshot(resp, include_body=False),
+            )
+        if resp.status_code != 200:
+            raise ImageStageTerminalError(
+                f"download mask failed: {resp.status_code} {resp.text[:300]}",
+                status_code=resp.status_code,
+                error_type="mask_download",
+            )
+        mask_bytes = bytes(resp.content or b"")
+        self._validate_downloaded_image(image_bytes=mask_bytes)
+        return mask_bytes
+
+    @staticmethod
+    def apply_mask_alpha(image_bytes: bytes, mask_bytes: bytes) -> bytes:
+        if Image is None or ImageChops is None:
+            raise AdobeRequestError("Pillow is required for transparent masking")
+        with Image.open(io.BytesIO(image_bytes)) as src, Image.open(
+            io.BytesIO(mask_bytes)
+        ) as mask_src:
+            image = src.convert("RGBA")
+            mask = mask_src.convert("L")
+            if mask.size != image.size:
+                mask = mask.resize(image.size, Image.Resampling.LANCZOS)
+            original_alpha = image.getchannel("A")
+            combined_alpha = ImageChops.multiply(original_alpha, mask)
+            image.putalpha(combined_alpha)
+            out = io.BytesIO()
+            image.save(out, format="PNG")
+            return out.getvalue()
+
+    def make_transparent_subject(
+        self,
+        token: str,
+        image_bytes: bytes,
+        *,
+        mime_type: str = "image/png",
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
+        progress_cb: Optional[Callable[[dict], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+        wait_cb: Optional[Callable[[float], None]] = None,
+    ) -> tuple[bytes, dict]:
+        if cancel_check is not None:
+            cancel_check()
+        if progress_cb is not None:
+            progress_cb({"task_status": "MASKING"})
+        image_id = self.upload_image(
+            token,
+            image_bytes,
+            mime_type,
+            trace=trace,
+            trace_parent_id=trace_parent_id,
+            progress_cb=progress_cb,
+            cancel_check=cancel_check,
+            io_call=io_call,
+            wait_cb=wait_cb,
+        )
+        mask_data = self.select_subject_mask(
+            token,
+            image_id,
+            soft_mask=True,
+            trace=trace,
+            trace_parent_id=trace_parent_id,
+            io_call=io_call,
+        )
+        mask = ((mask_data.get("masks") or [{}])[0] or {})
+        mask_bytes = self._download_mask_bytes(
+            str(mask.get("presignedUrl") or ""),
+            trace=trace,
+            trace_parent_id=trace_parent_id,
+            io_call=io_call,
+        )
+        transparent_bytes = self.apply_mask_alpha(image_bytes, mask_bytes)
+        if progress_cb is not None:
+            progress_cb({"task_status": "MASKED"})
+        return transparent_bytes, mask_data
 
     @staticmethod
     def _json_or_empty(resp) -> Any:
@@ -2879,3 +3082,4 @@ class AdobeClient:
             io_call=io_call,
             wait_cb=wait_cb,
         )
+

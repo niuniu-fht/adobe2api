@@ -1240,6 +1240,30 @@ def build_generation_router(
                         queue_id, delay
                     ),
                 )
+                if getattr(image_options, "transparent_background", False):
+                    source_bytes = (
+                        image_bytes
+                        if image_bytes is not None
+                        else (out_path.read_bytes() if out_path.exists() else b"")
+                    )
+                    transparent_bytes, _mask_meta = client.make_transparent_subject(
+                        selected_token,
+                        source_bytes,
+                        mime_type="image/png",
+                        trace=trace,
+                        trace_parent_id=trace_output_id or trace_group_id,
+                        progress_cb=lambda update: _image_progress_cb(
+                            response_index, selected_token, update
+                        ),
+                        cancel_check=lambda: image_task_coordinator.raise_if_cancelled(
+                            queue_id
+                        ),
+                        io_call=image_task_coordinator.run_io,
+                        wait_cb=lambda delay: image_task_coordinator.wait(
+                            queue_id, delay
+                        ),
+                    )
+                    image_bytes = transparent_bytes
             if image_bytes is not None:
                 out_path.write_bytes(image_bytes)
             new_size = int(out_path.stat().st_size) if out_path.exists() else 0
@@ -3048,6 +3072,20 @@ def build_generation_router(
                         out_path=out_path,
                         progress_cb=_image_progress_cb,
                     )
+                    if image_options and getattr(
+                        image_options, "transparent_background", False
+                    ):
+                        source_bytes = (
+                            image_bytes
+                            if image_bytes is not None
+                            else (out_path.read_bytes() if out_path.exists() else b"")
+                        )
+                        image_bytes, _mask_meta = client.make_transparent_subject(
+                            token,
+                            source_bytes,
+                            mime_type="image/png",
+                            progress_cb=_image_progress_cb,
+                        )
                     if image_bytes is not None:
                         out_path.write_bytes(image_bytes)
                     new_size = int(out_path.stat().st_size) if out_path.exists() else 0

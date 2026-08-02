@@ -62,6 +62,7 @@ class OpenAIImageGenerationOptions:
     upstream_model_id: Optional[str] = None
     upstream_model_version: Optional[str] = None
     resolved_model_id: Optional[str] = None
+    transparent_background: bool = False
 
 
 def is_native_gpt_image_model(model_id: Optional[str]) -> bool:
@@ -469,22 +470,32 @@ def build_native_gpt_image_options(
             None if is_auto_size else gpt_image_model_id_from_size(requested_size)
         )
     output_format = parse_output_format(data.get("output_format"))
+    effective_response_model = str(response_model or model_id).strip() or model_id
     return OpenAIImageGenerationOptions(
         n=parse_image_count(data.get("n")),
         aspect_ratio=aspect_ratio,
         output_resolution=output_resolution,
-        response_model=str(response_model or model_id).strip() or model_id,
+        response_model=effective_response_model,
         response_format=parse_response_format(
             data.get("response_format"),
             force_b64_json=False,
         ),
-        output_format=output_format,
+        output_format=(
+            "png"
+            if effective_response_model
+            in {"gpt-image-2-clarity", "gpt-image-2-**clarity"}
+            else output_format
+        ),
         output_compression=parse_output_compression(data.get("output_compression")),
         requested_size=requested_size,
         is_native_gpt_image=True,
         upstream_model_id="gpt-image",
         upstream_model_version=model_version,
         resolved_model_id=resolved_model_id,
+        transparent_background=(
+            effective_response_model
+            in {"gpt-image-2-clarity", "gpt-image-2-**clarity"}
+        ),
     )
 
 

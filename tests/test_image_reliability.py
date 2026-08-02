@@ -1,3 +1,4 @@
+import base64
 import json
 import threading
 import time
@@ -341,6 +342,51 @@ def test_images_endpoint_upscales_small_size_before_adobe_submit(monkeypatch):
 
     assert response.status_code == 200
     assert submitted_sizes == [{"width": 816, "height": 816}]
+
+
+def test_clarity_model_postprocesses_generated_image_to_transparent_png(monkeypatch):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    calls = []
+
+    def transparent_png():
+        output = BytesIO()
+        Image.new("RGBA", (2, 2), (20, 120, 220, 64)).save(output, format="PNG")
+        return output.getvalue()
+
+    def generate(**kwargs):
+        calls.append(("generate", kwargs["token"], kwargs["requested_size"]))
+        return _png_bytes(), {}
+
+    def make_transparent_subject(token, image_bytes, **kwargs):
+        calls.append(("mask", token, len(image_bytes)))
+        return transparent_png(), {"masks": [{"id": "mask-1"}]}
+
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    monkeypatch.setattr(
+        app_module.client, "make_transparent_subject", make_transparent_subject
+    )
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+    response = TestClient(app_module.app).post(
+        "/v1/images/generations",
+        headers=headers,
+        json={
+            "model": "gpt-image-2-clarity",
+            "prompt": "draw",
+            "response_format": "b64_json",
+            "output_format": "jpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    assert [call[0] for call in calls] == ["generate", "mask"]
+    body = response.json()
+    decoded = base64.b64decode(body["data"][0]["b64_json"])
+    with Image.open(BytesIO(decoded)) as result:
+        assert result.mode == "RGBA"
+        assert result.getpixel((0, 0))[3] == 64
 
 
 def test_images_endpoint_auth_switches_to_a_different_account(monkeypatch):

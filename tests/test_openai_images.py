@@ -331,6 +331,49 @@ def test_builtin_gpt_image_quality_aliases_default_to_high():
         assert payload["generationSettings"]["detailLevel"] == 5
 
 
+def test_clarity_alias_enables_transparent_png_postprocess():
+    client = AdobeClient()
+    client.apply_config({"gpt_image_quality": "low", "gpt_image_model_qualities": {}})
+
+    assert client.is_gpt_image_model_alias("gpt-image-2-clarity")
+    assert client.is_gpt_image_model_alias("gpt-image-2-**clarity")
+    assert client.get_gpt_image_quality("gpt-image-2-clarity") == "low"
+
+    options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2-clarity",
+            "prompt": "draw a sticker",
+            "size": "auto",
+            "output_format": "jpeg",
+        },
+        model_id_override="gpt-image-2",
+        response_model="gpt-image-2-clarity",
+    )
+
+    assert options.response_model == "gpt-image-2-clarity"
+    assert options.output_format == "png"
+    assert options.transparent_background is True
+
+
+def test_apply_mask_alpha_creates_transparent_png():
+    from io import BytesIO
+    from PIL import Image
+
+    image_io = BytesIO()
+    Image.new("RGB", (2, 1), (200, 40, 20)).save(image_io, format="PNG")
+    mask_io = BytesIO()
+    mask = Image.new("L", (2, 1))
+    mask.putdata([255, 0])
+    mask.save(mask_io, format="PNG")
+
+    output = AdobeClient.apply_mask_alpha(image_io.getvalue(), mask_io.getvalue())
+
+    with Image.open(BytesIO(output)) as result:
+        assert result.mode == "RGBA"
+        assert result.getpixel((0, 0))[3] == 255
+        assert result.getpixel((1, 0))[3] == 0
+
+
 def test_higher_alias_quality_can_be_configured_independently():
     client = AdobeClient()
     client.apply_config(
@@ -1203,3 +1246,4 @@ def test_openai_prefixed_gemini_size_reaches_gemini_payload():
     assert payload["modelSpecificPayload"]["aspectRatio"] == "3:2"
     assert payload["modelSpecificPayload"]["imageSize"] == "2K"
     assert payload["size"] == {"width": 2496, "height": 1664}
+
