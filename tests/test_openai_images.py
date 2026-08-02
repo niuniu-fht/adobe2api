@@ -337,6 +337,7 @@ def test_clarity_alias_enables_transparent_png_postprocess():
 
     assert client.is_gpt_image_model_alias("gpt-image-2-clarity")
     assert client.is_gpt_image_model_alias("gpt-image-2-**clarity")
+    assert client.is_gpt_image_model_alias("gpt-image-2-clarity-free")
     assert client.get_gpt_image_quality("gpt-image-2-clarity") == "low"
 
     options = build_native_gpt_image_options(
@@ -353,6 +354,23 @@ def test_clarity_alias_enables_transparent_png_postprocess():
     assert options.response_model == "gpt-image-2-clarity"
     assert options.output_format == "png"
     assert options.transparent_background is True
+    assert options.direct_transparent_mask is False
+
+    free_options = build_native_gpt_image_options(
+        {
+            "model": "gpt-image-2-clarity-free",
+            "prompt": "remove background",
+            "size": "1024x1024",
+            "output_format": "jpeg",
+        },
+        model_id_override="gpt-image-2",
+        response_model="gpt-image-2-clarity-free",
+    )
+
+    assert free_options.response_model == "gpt-image-2-clarity-free"
+    assert free_options.output_format == "png"
+    assert free_options.transparent_background is True
+    assert free_options.direct_transparent_mask is True
 
 
 def test_apply_mask_alpha_creates_transparent_png():

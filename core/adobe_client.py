@@ -43,6 +43,7 @@ DEFAULT_GPT_IMAGE_MODEL_QUALITIES = {
     "gpt-image-2-higher": "high",
     "gpt-image-2-clarity": "low",
     "gpt-image-2-**clarity": "low",
+    "gpt-image-2-clarity-free": "low",
 }
 
 

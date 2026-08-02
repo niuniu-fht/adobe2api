@@ -157,7 +157,10 @@ GPT Image 图像模型（实验接入）：
 - 原生兼容模型 ID：`gpt-image-1.5` / `gpt-image-2`
 - `gpt-image-1.5` 调用上游 `gpt-image` / version `1.5`，仅向上游发送 1K 的 `1:1` `1024x1024`、`3:2` `1536x1024`、`2:3` `1024x1536`；传入其他尺寸或比例时会先映射到最接近的支持尺寸
 - GPT Image 默认质量由系统配置 `gpt_image_quality` 控制：`low` / `medium` / `high`，默认 `low`
-- 兼容模型 ID：`gpt-image-2-high`、`gpt-image-2-higher`、`gpt-image-2-clarity`。三者同样调用上游 `gpt-image` / version `2`，其中 `gpt-image-2-high` / `gpt-image-2-higher` 默认 `high`，`gpt-image-2-clarity` 默认 `low`，也可通过 `gpt_image_model_qualities` 分别配置；其中 `gpt-image-2-clarity` 会在生图完成后自动调用 `di-imaging /v1/masking/select-subject` 生成 `softMask`，并把原图与蒙版合成为透明背景 PNG 返回，例如：
+- 兼容模型 ID：`gpt-image-2-high`、`gpt-image-2-higher`、`gpt-image-2-clarity`、`gpt-image-2-clarity-free`。这些模型同样映射到上游 `gpt-image` / version `2` 质量档案，其中 `gpt-image-2-high` / `gpt-image-2-higher` 默认 `high`，`gpt-image-2-clarity` / `gpt-image-2-clarity-free` 默认 `low`，也可通过 `gpt_image_model_qualities` 分别配置；其中：
+  - `gpt-image-2-clarity`：先正常走 GPT Image 生图，再调用 `di-imaging /v1/masking/select-subject` 生成 `softMask`，并把生成图与蒙版合成为透明背景 PNG 返回。
+  - `gpt-image-2-clarity-free`：仅用于 `/v1/images/edits`，必须上传输入图；它跳过 GPT Image 生图，直接对输入图调用 `select-subject`，再把输入图与蒙版合成为透明背景 PNG。未上传输入图会返回 400。
+  示例配置：
   ```json
   {
     "gpt_image_quality": "low",
@@ -165,7 +168,8 @@ GPT Image 图像模型（实验接入）：
     "gpt_image_model_qualities": {
       "gpt-image-2-high": "medium",
       "gpt-image-2-higher": "high",
-      "gpt-image-2-clarity": "low"
+      "gpt-image-2-clarity": "low",
+      "gpt-image-2-clarity-free": "low"
     }
   }
   ```

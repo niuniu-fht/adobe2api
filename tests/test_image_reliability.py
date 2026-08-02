@@ -389,6 +389,82 @@ def test_clarity_model_postprocesses_generated_image_to_transparent_png(monkeypa
         assert result.getpixel((0, 0))[3] == 64
 
 
+def test_clarity_free_edits_directly_masks_input_without_image_generation(monkeypatch):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    calls = []
+
+    def transparent_png():
+        output = BytesIO()
+        Image.new("RGBA", (2, 2), (20, 120, 220, 32)).save(output, format="PNG")
+        return output.getvalue()
+
+    def generate(**_kwargs):
+        pytest.fail("clarity-free must not call image generation")
+
+    def make_transparent_subject(token, image_bytes, **kwargs):
+        calls.append(
+            (
+                token,
+                len(image_bytes),
+                kwargs.get("mime_type"),
+            )
+        )
+        return transparent_png(), {"masks": [{"id": "mask-1"}]}
+
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    monkeypatch.setattr(
+        app_module.client, "make_transparent_subject", make_transparent_subject
+    )
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+    image_data_url = "data:image/png;base64," + base64.b64encode(
+        _png_bytes()
+    ).decode("ascii")
+
+    response = TestClient(app_module.app).post(
+        "/v1/images/edits",
+        headers=headers,
+        json={
+            "model": "gpt-image-2-clarity-free",
+            "prompt": "remove background",
+            "image": image_data_url,
+            "response_format": "b64_json",
+            "output_format": "jpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert calls[0][0] == "TOKEN"
+    assert calls[0][2] == "image/png"
+    decoded = base64.b64decode(response.json()["data"][0]["b64_json"])
+    with Image.open(BytesIO(decoded)) as result:
+        assert result.mode == "RGBA"
+        assert result.getpixel((0, 0))[3] == 32
+
+
+def test_clarity_free_generations_requires_edit_image(monkeypatch):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+
+    response = TestClient(app_module.app).post(
+        "/v1/images/generations",
+        headers=headers,
+        json={
+            "model": "gpt-image-2-clarity-free",
+            "prompt": "remove background",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "image"
+
+
 def test_images_endpoint_auth_switches_to_a_different_account(monkeypatch):
     import app as app_module
 

@@ -1934,6 +1934,18 @@ def build_generation_router(
                     },
                 },
             )
+        if getattr(image_options, "direct_transparent_mask", False):
+            return _traced_json_response(
+                request,
+                status_code=400,
+                content={
+                    "error": {
+                        "message": "image is required for gpt-image-2-clarity-free; use /v1/images/edits",
+                        "type": "invalid_request_error",
+                        "param": "image",
+                    }
+                },
+            )
 
         _set_image_log_context(
             request,
@@ -2476,12 +2488,146 @@ def build_generation_router(
                 bound_edit_account.clear()
                 source_image_ids_cache = []
 
+            def _direct_transparent_edit_items(token: str) -> list[dict]:
+                if len(result_cache) == image_options.n:
+                    return [result_cache[index] for index in range(image_options.n)]
+                if not spooled_input_images:
+                    raise AdobeRequestError(
+                        "image is required for direct transparent masking"
+                    )
+
+                def _read_input_item(item: tuple[Any, str]) -> tuple[bytes, str]:
+                    image_bytes = (
+                        item[0].read_bytes()
+                        if isinstance(item[0], Path)
+                        else bytes(item[0])
+                    )
+                    return image_bytes, item[1] or "image/png"
+
+                def _mask_progress(output_index: int, update: dict) -> None:
+                    state = str(update.get("task_status") or "MASKING").upper()
+                    retry_after = update.get("retry_after")
+                    image_task_coordinator.update_output(
+                        queue_id,
+                        output_index,
+                        state=state,
+                        token=token,
+                        next_run_at=(
+                            time.time() + float(retry_after)
+                            if retry_after not in (None, "")
+                            else None
+                        ),
+                        retry_count=update.get("retry_count"),
+                        error=update.get("error"),
+                    )
+                    set_request_task_progress(
+                        request,
+                        task_status="IN_PROGRESS",
+                        task_progress=update.get("task_progress"),
+                        retry_after=retry_after,
+                        error=update.get("error"),
+                    )
+
+                try:
+                    token_meta = token_manager.get_meta_by_value(token) or {}
+                except Exception:
+                    token_meta = {}
+                token_limit = _image_config_int(
+                    "image_per_token_concurrency", 3, 1, 10
+                )
+
+                for response_index in range(image_options.n):
+                    if response_index in result_cache:
+                        continue
+                    source_item = spooled_input_images[
+                        min(response_index, len(spooled_input_images) - 1)
+                    ]
+                    source_bytes, source_mime = _read_input_item(source_item)
+                    job_id = uuid.uuid4().hex
+                    out_path = generated_dir / f"{job_id}.png"
+                    old_size = int(out_path.stat().st_size) if out_path.exists() else 0
+                    image_task_coordinator.update_output(
+                        queue_id,
+                        response_index,
+                        state="MASKING",
+                        token=token,
+                        account_name=(
+                            token_meta.get("token_account_name")
+                            or token_meta.get("token_account_email")
+                        ),
+                    )
+                    with image_task_coordinator.token_slot(
+                        token,
+                        limit=token_limit,
+                        request_id=queue_id,
+                        output_index=response_index,
+                    ):
+                        transparent_bytes, _mask_meta = client.make_transparent_subject(
+                            token,
+                            source_bytes,
+                            mime_type=source_mime,
+                            trace=trace,
+                            trace_parent_id=getattr(
+                                request.state, "trace_token_attempt_id", None
+                            ),
+                            progress_cb=lambda update, index=response_index: (
+                                _mask_progress(index, update)
+                            ),
+                            cancel_check=lambda: image_task_coordinator.raise_if_cancelled(
+                                queue_id
+                            ),
+                            io_call=image_task_coordinator.run_io,
+                            wait_cb=lambda delay: image_task_coordinator.wait(
+                                queue_id, delay
+                            ),
+                        )
+                    out_path.write_bytes(transparent_bytes)
+                    new_size = int(out_path.stat().st_size) if out_path.exists() else 0
+                    _track_generated_path(request, out_path)
+                    image_url = public_image_url(request, job_id)
+                    set_request_preview(request, image_url, kind="image")
+                    image_file_bytes = (
+                        out_path.read_bytes()
+                        if image_options.response_format == "b64_json"
+                        else b""
+                    )
+                    item = encode_image_response_item(
+                        image_file_bytes,
+                        image_url=image_url,
+                        response_format=image_options.response_format,
+                        output_format=image_options.output_format,
+                        output_compression=image_options.output_compression,
+                    )
+                    if image_options.response_format == "b64_json":
+                        out_path.unlink(missing_ok=True)
+                    else:
+                        on_generated_file_written(out_path, old_size, new_size)
+                    result_cache[response_index] = item
+                    image_task_coordinator.update_output(
+                        queue_id,
+                        response_index,
+                        state="COMPLETED",
+                        token=token,
+                    )
+
+                if len(result_cache) != image_options.n:
+                    raise AdobeRequestError(
+                        f"direct transparent masking incomplete: expected {image_options.n}, got {len(result_cache)}"
+                    )
+                return [result_cache[index] for index in range(image_options.n)]
+
             def _run_once(token: str):
                 nonlocal source_image_ids_cache
                 if len(result_cache) == image_options.n:
                     response_items = [
                         result_cache[index] for index in range(image_options.n)
                     ]
+                    return {
+                        "created": int(time.time()),
+                        "data": response_items,
+                    }
+                if getattr(image_options, "direct_transparent_mask", False):
+                    response_items = _direct_transparent_edit_items(token)
                     return {
                         "created": int(time.time()),
                         "data": response_items,

@@ -30,6 +30,12 @@ MAX_GPT_IMAGE_LONG_EDGE = 3840
 MAX_GPT_IMAGE_PIXELS = 8_294_400
 MIN_GPT_IMAGE_PIXELS = 655_360
 GPT_IMAGE_EDGE_ALIGNMENT = 16
+TRANSPARENT_BACKGROUND_MODELS = {
+    "gpt-image-2-clarity",
+    "gpt-image-2-**clarity",
+    "gpt-image-2-clarity-free",
+}
+DIRECT_TRANSPARENT_MASK_MODELS = {"gpt-image-2-clarity-free"}
 SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
 RATIO_RE = re.compile(r"^\d+:\d+$")
 DEFAULT_GPT_IMAGE_RATIO_SIZE_MAP = {
@@ -63,6 +69,7 @@ class OpenAIImageGenerationOptions:
     upstream_model_version: Optional[str] = None
     resolved_model_id: Optional[str] = None
     transparent_background: bool = False
+    direct_transparent_mask: bool = False
 
 
 def is_native_gpt_image_model(model_id: Optional[str]) -> bool:
@@ -482,8 +489,7 @@ def build_native_gpt_image_options(
         ),
         output_format=(
             "png"
-            if effective_response_model
-            in {"gpt-image-2-clarity", "gpt-image-2-**clarity"}
+            if effective_response_model in TRANSPARENT_BACKGROUND_MODELS
             else output_format
         ),
         output_compression=parse_output_compression(data.get("output_compression")),
@@ -493,8 +499,10 @@ def build_native_gpt_image_options(
         upstream_model_version=model_version,
         resolved_model_id=resolved_model_id,
         transparent_background=(
-            effective_response_model
-            in {"gpt-image-2-clarity", "gpt-image-2-**clarity"}
+            effective_response_model in TRANSPARENT_BACKGROUND_MODELS
+        ),
+        direct_transparent_mask=(
+            effective_response_model in DIRECT_TRANSPARENT_MASK_MODELS
         ),
     )
 
