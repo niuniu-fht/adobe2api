@@ -255,6 +255,14 @@
               <p class="help">用于批量导入 Cookie 时的自动刷新与积分查询，以及批量刷新积分。默认并行 5 个。</p>
             </div>
 
+            <div class="form-group">
+              <label class="checkbox-label" style="user-select: none;">
+                <input type="checkbox" id="confAutoReplacementEnabled" />
+                开启自动补号
+              </label>
+              <p class="help">关闭后,自动巡检遇到 Arkose captcha / forbidden / 额度异常时仍触发移除异常账号,但不继续创建邮箱或自动补号。</p>
+            </div>
+
             <div class="config-inline-row">
               <div class="form-group inline-item">
                 <label for="confGeneratedMaxSizeMb">生成文件空间上限 (MB)</label>

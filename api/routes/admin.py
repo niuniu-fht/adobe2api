@@ -634,6 +634,10 @@ def build_admin_router(
                     detail="batch_concurrency must be between 1 and 100",
                 )
             update_data["batch_concurrency"] = batch_concurrency
+        if "auto_replacement_enabled" in incoming:
+            update_data["auto_replacement_enabled"] = bool(
+                incoming["auto_replacement_enabled"]
+            )
         if "generated_max_size_mb" in incoming:
             try:
                 generated_max_size_mb = int(incoming["generated_max_size_mb"])

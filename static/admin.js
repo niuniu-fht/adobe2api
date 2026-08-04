@@ -709,6 +709,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const confImageDownloadAttempts = document.getElementById("confImageDownloadAttempts");
   const confRefreshIntervalHours = document.getElementById("confRefreshIntervalHours");
   const confBatchConcurrency = document.getElementById("confBatchConcurrency");
+  const confAutoReplacementEnabled = document.getElementById("confAutoReplacementEnabled");
   const confGeneratedMaxSizeMb = document.getElementById("confGeneratedMaxSizeMb");
   const confGeneratedPruneSizeMb = document.getElementById("confGeneratedPruneSizeMb");
   const generatedUsageInfo = document.getElementById("generatedUsageInfo");
@@ -842,6 +843,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         confRefreshIntervalHours.value = Number(data.refresh_interval_hours || 15);
         currentBatchConcurrency = Math.max(1, Math.min(100, Number(data.batch_concurrency || 5)));
         confBatchConcurrency.value = currentBatchConcurrency;
+        if (confAutoReplacementEnabled) {
+          confAutoReplacementEnabled.checked = Boolean(data.auto_replacement_enabled ?? true);
+        }
         confGeneratedMaxSizeMb.value = Number(data.generated_max_size_mb || 1024);
         confGeneratedPruneSizeMb.value = Number(data.generated_prune_size_mb || 200);
         if (generatedUsageInfo) {
@@ -899,6 +903,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         image_download_attempts: Math.max(1, Math.min(10, Number(confImageDownloadAttempts.value || 5))),
         refresh_interval_hours: Number(confRefreshIntervalHours.value || 15),
         batch_concurrency: Math.max(1, Math.min(100, Number(confBatchConcurrency.value || 5))),
+        auto_replacement_enabled: Boolean(confAutoReplacementEnabled?.checked ?? true),
         generated_max_size_mb: Math.max(100, Math.min(102400, Number(confGeneratedMaxSizeMb.value || 1024))),
         generated_prune_size_mb: Math.max(10, Math.min(10240, Number(confGeneratedPruneSizeMb.value || 200))),
       };

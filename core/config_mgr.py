@@ -38,6 +38,7 @@ class ConfigManager:
             "image_submit_network_retry_seconds": 60,
             "image_download_attempts": 5,
             "batch_concurrency": 5,
+            "auto_replacement_enabled": True,
             "generated_max_size_mb": 1024,
             "generated_prune_size_mb": 200,
             "gpt_image_quality": "low",

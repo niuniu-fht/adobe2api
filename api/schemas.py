@@ -49,6 +49,7 @@ class ConfigUpdateRequest(BaseModel):
     image_submit_network_retry_seconds: Optional[int] = None
     image_download_attempts: Optional[int] = None
     batch_concurrency: Optional[int] = None
+    auto_replacement_enabled: Optional[bool] = None
     generated_max_size_mb: Optional[int] = None
     generated_prune_size_mb: Optional[int] = None
     gpt_image_quality: Optional[str] = None
