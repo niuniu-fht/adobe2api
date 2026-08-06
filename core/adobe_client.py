@@ -2451,6 +2451,535 @@ class AdobeClient:
                 raise AdobeRequestError("video generation timed out")
             time.sleep(3.0)
 
+    def submit_image_job(
+        self,
+        *,
+        token: str,
+        prompt: str,
+        aspect_ratio: str = "16:9",
+        output_resolution: str = "2K",
+        upstream_model_id: str = "gemini-flash",
+        upstream_model_version: str = "nano-banana-2",
+        quality_level: Optional[str] = None,
+        detail_level: Optional[int] = None,
+        seed: Optional[int] = None,
+        source_image_ids: Optional[list[str]] = None,
+        requested_size: Optional[dict] = None,
+        progress_cb: Optional[Callable[[dict], None]] = None,
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> dict:
+        """Submit an image task and return poll metadata without entering poll wait."""
+        submit_resp = None
+        first_error = ""
+        first_error_status: Optional[int] = None
+        payload_candidates = self._build_payload_candidates(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            output_resolution=output_resolution,
+            upstream_model_id=upstream_model_id,
+            upstream_model_version=upstream_model_version,
+            quality_level=quality_level,
+            detail_level=detail_level,
+            seed=seed,
+            source_image_ids=source_image_ids,
+            requested_size=requested_size,
+        )
+        for candidate_index, payload in enumerate(payload_candidates, start=1):
+            submit_headers = self._submit_headers(token, prompt=prompt)
+            submit_stage_id = None
+            if trace is not None:
+                submit_stage_id = trace.start_stage(
+                    layer="adobe",
+                    kind="submit",
+                    name="提交 Adobe GPT Image 任务",
+                    parent_id=trace_parent_id,
+                    attempt={
+                        "candidate": candidate_index,
+                        "candidate_count": len(payload_candidates),
+                    },
+                    request={
+                        "method": "POST",
+                        "url": sanitize_url(self.submit_url),
+                        "headers": sanitize_headers(submit_headers),
+                        "body": sanitize_trace_value(payload),
+                    },
+                )
+            network_started: Optional[float] = None
+            invalid_size_auto_retry_used = False
+            submit_retry_count = 0
+            logger.info(
+                "image async submit start token=%s candidate=%s/%s model=%s version=%s ratio=%s resolution=%s source_images=%s",
+                str(token or "")[:8],
+                candidate_index,
+                len(payload_candidates),
+                upstream_model_id,
+                upstream_model_version,
+                aspect_ratio,
+                output_resolution,
+                len(source_image_ids or []),
+            )
+            while True:
+                if cancel_check is not None:
+                    cancel_check()
+                if progress_cb is not None:
+                    progress_cb({"task_status": "SUBMITTING"})
+                try:
+                    submit_resp = self._post_image_json(
+                        self.submit_url,
+                        headers=submit_headers,
+                        payload=payload,
+                    )
+                except ContentPolicyError:
+                    if trace is not None:
+                        trace.finish_stage(
+                            submit_stage_id,
+                            status="failed",
+                            error="图片不安全",
+                        )
+                    raise
+                except UpstreamTemporaryError as exc:
+                    now = time.time()
+                    network_started = network_started or now
+                    if now - network_started >= self._image_submit_network_retry_seconds():
+                        if trace is not None:
+                            trace.finish_stage(submit_stage_id, status="failed", error=exc)
+                        raise ImageStageTerminalError(
+                            str(exc), status_code=502, error_type="network"
+                        ) from exc
+                    submit_retry_count += 1
+                    delay = self._submit_retry_delay(
+                        submit_retry_count, rate_limited=False
+                    )
+                    if progress_cb is not None:
+                        progress_cb(
+                            {
+                                "task_status": "SUBMITTING",
+                                "retry_after": int(round(delay)),
+                                "retry_count": submit_retry_count,
+                                "error": str(exc),
+                            }
+                        )
+                    self._wait_for_image_retry(
+                        delay, cancel_check=cancel_check, wait_cb=None
+                    )
+                    continue
+
+                try:
+                    self._raise_if_image_unsafe(submit_resp, param="prompt")
+                    self._raise_if_reference_image_required(submit_resp)
+                except (ContentPolicyError, ReferenceImageRequiredError) as exc:
+                    if trace is not None:
+                        trace.finish_stage(
+                            submit_stage_id,
+                            status="failed",
+                            response=response_snapshot(submit_resp),
+                            error=exc,
+                        )
+                    raise
+                if (
+                    str(payload.get("modelId") or "").strip().lower() == "gpt-image"
+                    and not invalid_size_auto_retry_used
+                    and self._is_invalid_image_size_aspect_response(submit_resp)
+                ):
+                    invalid_size_auto_retry_used = True
+                    logger.warning(
+                        "image async submit invalid_size_aspect auto_retry token=%s status=%s body=%s",
+                        str(token or "")[:8],
+                        getattr(submit_resp, "status_code", None),
+                        str(getattr(submit_resp, "text", "") or "")[:300],
+                    )
+                    if trace is not None:
+                        trace.add_stage(
+                            layer="adobe",
+                            kind="submit_retry",
+                            name="Invalid image size，改用 auto 尺寸重试",
+                            status="succeeded",
+                            parent_id=trace_parent_id,
+                            response=response_snapshot(submit_resp),
+                            details={"fallback": "auto_size_no_aspect_ratio"},
+                        )
+                    payload = self._auto_size_fallback_payload(payload)
+                    submit_headers = self._submit_headers(token, prompt=prompt)
+                    continue
+                is_rate_limited = (
+                    submit_resp.status_code == 429
+                    or self._is_rate_limited_response(submit_resp)
+                )
+                if is_rate_limited:
+                    delay = self._image_rate_limit_single_retry_seconds()
+                    logger.warning(
+                        "image async submit rate_limited token=%s action=switch_account_after_delay delay=%s status=%s body=%s",
+                        str(token or "")[:8],
+                        delay,
+                        getattr(submit_resp, "status_code", None),
+                        str(getattr(submit_resp, "text", "") or "")[:300],
+                    )
+                    if progress_cb is not None:
+                        progress_cb(
+                            {
+                                "task_status": "SUBMITTING",
+                                "retry_after": int(round(delay)),
+                                "retry_count": submit_retry_count,
+                                "rate_limit_wait_seconds": delay,
+                                "error": submit_resp.text[:300],
+                            }
+                        )
+                    if trace is not None:
+                        trace.finish_stage(
+                            submit_stage_id,
+                            status="failed",
+                            response=response_snapshot(submit_resp),
+                            error="submit rate limited; switch account",
+                        )
+                    raise SubmitRateLimitedError()
+                if self._is_retryable_image_status(submit_resp.status_code):
+                    now = time.time()
+                    network_started = network_started or now
+                    if now - network_started >= self._image_submit_network_retry_seconds():
+                        break
+                    submit_retry_count += 1
+                    delay = self._submit_retry_delay(
+                        submit_retry_count, rate_limited=False
+                    )
+                    if progress_cb is not None:
+                        progress_cb(
+                            {
+                                "task_status": "SUBMITTING",
+                                "retry_after": int(round(delay)),
+                                "retry_count": submit_retry_count,
+                                "error": submit_resp.text[:300],
+                            }
+                        )
+                    self._wait_for_image_retry(
+                        delay, cancel_check=cancel_check, wait_cb=None
+                    )
+                    continue
+                break
+            if trace is not None:
+                trace.finish_stage(
+                    submit_stage_id,
+                    status="succeeded" if submit_resp.status_code == 200 else "failed",
+                    response=response_snapshot(submit_resp),
+                )
+            if submit_resp.status_code == 200:
+                break
+            if submit_resp.status_code in (401, 403):
+                break
+            self._raise_if_image_unsafe(submit_resp, param="prompt")
+            if not first_error:
+                first_error = submit_resp.text[:300]
+                first_error_status = submit_resp.status_code
+
+        if submit_resp is None:
+            raise AdobeRequestError("submit failed: no response")
+        if submit_resp.status_code in (401, 403):
+            access_error = submit_resp.headers.get("x-access-error")
+            logger.warning(
+                "submit auth failed status=%s access_error=%s body=%s",
+                submit_resp.status_code,
+                access_error,
+                submit_resp.text[:300],
+            )
+            if access_error == "taste_exhausted":
+                raise QuotaExhaustedError("Adobe quota exhausted for this account")
+            raise AuthError("Token invalid or expired")
+        if submit_resp.status_code != 200:
+            logger.error("submit failed status=%s body=%s", submit_resp.status_code, submit_resp.text[:500])
+            self._raise_if_image_unsafe(submit_resp, param="prompt")
+            if submit_resp.status_code in (429, 451) or submit_resp.status_code >= 500:
+                raise ImageStageTerminalError(
+                    f"submit failed: {submit_resp.status_code} {submit_resp.text[:300]}",
+                    status_code=submit_resp.status_code,
+                    error_type="status",
+                )
+            if first_error:
+                raise AdobeRequestError(
+                    f"submit failed: {first_error_status or submit_resp.status_code} {first_error}"
+                )
+            raise AdobeRequestError(
+                f"submit failed: {submit_resp.status_code} {submit_resp.text[:300]}"
+            )
+
+        submit_data = submit_resp.json()
+        poll_url = self._extract_result_link(submit_resp, submit_data)
+        logger.info(
+            "image async submit success token=%s status=%s poll_url=%s",
+            str(token or "")[:8],
+            getattr(submit_resp, "status_code", None),
+            sanitize_url(poll_url),
+        )
+        if not poll_url:
+            raise AdobeRequestError("submit succeeded but no poll url returned")
+        upstream_job_id = self._extract_job_id(poll_url)
+        if progress_cb:
+            try:
+                progress_cb(
+                    {
+                        "task_status": "IN_PROGRESS",
+                        "task_progress": 0.0,
+                        "upstream_job_id": upstream_job_id,
+                        "retry_after": int(submit_resp.headers.get("retry-after") or 0)
+                        or None,
+                    }
+                )
+            except Exception:
+                pass
+        return {
+            "poll_url": poll_url,
+            "upstream_job_id": upstream_job_id,
+            "latest": submit_data,
+            "submitted_at": time.time(),
+            "sleep_time": 3.0,
+            "poll_network_started": None,
+            "poll_retry_count": 0,
+        }
+
+    def poll_image_job_once(
+        self,
+        *,
+        token: str,
+        poll_url: str,
+        state: dict,
+        timeout: int,
+        progress_cb: Optional[Callable[[dict], None]] = None,
+        trace: Optional[RequestTrace] = None,
+        trace_parent_id: Optional[str] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> dict:
+        if cancel_check is not None:
+            cancel_check()
+        upstream_job_id = str(state.get("upstream_job_id") or self._extract_job_id(poll_url))
+        started_at = float(state.get("submitted_at") or time.time())
+        poll_headers = self._poll_headers(token)
+        poll_started = time.perf_counter()
+        try:
+            poll_resp = self._get(poll_url, headers=poll_headers, timeout=60)
+        except UpstreamTemporaryError as exc:
+            if trace is not None:
+                trace.add_stage(
+                    layer="adobe",
+                    kind="poll",
+                    name="Adobe task poll",
+                    status="failed",
+                    parent_id=trace_parent_id,
+                    request={
+                        "method": "GET",
+                        "url": sanitize_url(poll_url),
+                        "headers": sanitize_headers(poll_headers),
+                    },
+                    error=exc,
+                )
+            now = time.time()
+            network_started = state.get("poll_network_started") or now
+            state["poll_network_started"] = network_started
+            if now - float(network_started) >= self._image_network_retry_seconds():
+                raise ImageStageTerminalError(str(exc), status_code=502, error_type="network") from exc
+            state["poll_retry_count"] = int(state.get("poll_retry_count") or 0) + 1
+            delay = self._retry_delay(int(state["poll_retry_count"]), rate_limited=False)
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "task_status": "WAITING_POLL",
+                        "upstream_job_id": upstream_job_id,
+                        "retry_after": int(round(delay)),
+                        "retry_count": int(state["poll_retry_count"]),
+                        "error": str(exc),
+                    }
+                )
+            return {"status": "retry", "retry_after": delay, "latest": state.get("latest") or {}}
+
+        poll_duration_ms = (time.perf_counter() - poll_started) * 1000.0
+        poll_snapshot = response_snapshot(poll_resp)
+        poll_body = poll_snapshot.get("body")
+        body_status = (
+            str(poll_body.get("status") or "") if isinstance(poll_body, dict) else ""
+        )
+        poll_status_key = "|".join(
+            [
+                str(poll_resp.status_code),
+                str(poll_resp.headers.get("x-task-status") or "").upper(),
+                body_status.upper(),
+            ]
+        )
+        logger.info(
+            "image async poll response token=%s upstream_job_id=%s status=%s task_status=%s body_status=%s retry_after=%s",
+            str(token or "")[:8],
+            upstream_job_id,
+            getattr(poll_resp, "status_code", None),
+            str(poll_resp.headers.get("x-task-status") or ""),
+            body_status,
+            poll_resp.headers.get("retry-after") or poll_resp.headers.get("Retry-After"),
+        )
+        if trace is not None:
+            trace.record_poll(
+                parent_id=trace_parent_id,
+                status_key=poll_status_key,
+                request={
+                    "method": "GET",
+                    "url": sanitize_url(poll_url),
+                    "headers": sanitize_headers(poll_headers),
+                },
+                response=poll_snapshot,
+                duration_ms=poll_duration_ms,
+                failed=(
+                    poll_resp.status_code != 200
+                    or body_status.upper() in {"FAILED", "CANCELLED", "ERROR"}
+                ),
+            )
+        self._raise_if_image_unsafe(poll_resp, param="prompt")
+        is_rate_limited = (
+            poll_resp.status_code == 429 or self._is_rate_limited_response(poll_resp)
+        )
+        if is_rate_limited:
+            delay = self._image_rate_limit_single_retry_seconds()
+            if progress_cb is not None:
+                progress_cb(
+                    {
+                        "task_status": "RATE_LIMITED",
+                        "upstream_job_id": upstream_job_id,
+                        "retry_after": int(round(delay)),
+                        "retry_count": int(state.get("poll_retry_count") or 0),
+                        "rate_limit_wait_seconds": delay,
+                        "error": poll_resp.text[:300],
+                    }
+                )
+            raise SubmitRateLimitedError()
+        if poll_resp.status_code != 200:
+            logger.error("poll failed status=%s body=%s", poll_resp.status_code, poll_resp.text[:500])
+            if self._is_fal_nanobanana_timeout_response(poll_resp):
+                raise PollNanobananaTimeoutError(
+                    f"poll failed: {poll_resp.status_code} {poll_resp.text[:300]}"
+                )
+            if self._is_retryable_image_status(poll_resp.status_code):
+                now = time.time()
+                network_started = state.get("poll_network_started") or now
+                state["poll_network_started"] = network_started
+                if now - float(network_started) < self._image_network_retry_seconds():
+                    state["poll_retry_count"] = int(state.get("poll_retry_count") or 0) + 1
+                    delay = self._retry_delay(int(state["poll_retry_count"]), rate_limited=False)
+                    if progress_cb is not None:
+                        progress_cb(
+                            {
+                                "task_status": "WAITING_POLL",
+                                "upstream_job_id": upstream_job_id,
+                                "retry_after": int(round(delay)),
+                                "retry_count": int(state["poll_retry_count"]),
+                                "error": poll_resp.text[:300],
+                            }
+                        )
+                    return {"status": "retry", "retry_after": delay, "latest": state.get("latest") or {}}
+                raise ImageStageTerminalError(
+                    f"poll failed: {poll_resp.status_code} {poll_resp.text[:300]}",
+                    status_code=poll_resp.status_code,
+                    error_type="status",
+                )
+            raise AdobeRequestError(
+                f"poll failed: {poll_resp.status_code} {poll_resp.text[:300]}"
+            )
+
+        latest = poll_resp.json()
+        state["latest"] = latest
+        self._raise_if_image_unsafe_data(latest, param="prompt")
+        status_header = str(poll_resp.headers.get("x-task-status") or "").upper()
+        status_val = str(latest.get("status") or "").upper() or status_header
+        progress_val = self._extract_progress_percent(latest, poll_resp)
+        if progress_cb and self._is_in_progress_status(status_val):
+            try:
+                progress_cb(
+                    {
+                        "task_status": "IN_PROGRESS",
+                        "task_progress": progress_val if progress_val is not None else 0.0,
+                        "upstream_job_id": upstream_job_id,
+                        "retry_after": int(poll_resp.headers.get("retry-after") or 0) or None,
+                    }
+                )
+            except Exception:
+                pass
+        outputs = latest.get("outputs") or []
+        if outputs:
+            image_url = ((outputs[0] or {}).get("image") or {}).get("presignedUrl")
+            if not image_url:
+                raise AdobeRequestError("job finished without image url")
+            return {
+                "status": "completed",
+                "image_url": image_url,
+                "latest": latest,
+                "upstream_job_id": upstream_job_id,
+            }
+        if status_val in {"FAILED", "CANCELLED", "ERROR"}:
+            if progress_cb:
+                try:
+                    progress_cb(
+                        {
+                            "task_status": "FAILED",
+                            "task_progress": progress_val if progress_val is not None else 0.0,
+                            "upstream_job_id": upstream_job_id,
+                            "retry_after": None,
+                            "error": f"image job failed: {latest}",
+                        }
+                    )
+                except Exception:
+                    pass
+            raise AdobeRequestError(f"image job failed: {latest}")
+        if time.time() - started_at > timeout:
+            if progress_cb:
+                try:
+                    progress_cb(
+                        {
+                            "task_status": "FAILED",
+                            "task_progress": progress_val if progress_val is not None else 0.0,
+                            "upstream_job_id": upstream_job_id,
+                            "retry_after": None,
+                            "error": "image generation timed out",
+                        }
+                    )
+                except Exception:
+                    pass
+            raise AdobeRequestError("generation timed out")
+        poll_delay = self._response_retry_after(poll_resp) or float(state.get("sleep_time") or 3.0)
+        if progress_cb is not None:
+            try:
+                progress_cb(
+                    {
+                        "task_status": "WAITING_POLL",
+                        "task_progress": progress_val if progress_val is not None else 0.0,
+                        "upstream_job_id": upstream_job_id,
+                        "retry_after": int(poll_delay),
+                    }
+                )
+            except Exception:
+                pass
+        return {"status": "pending", "retry_after": poll_delay, "latest": latest}
+
+    def download_image_result(
+        self,
+        *,
+        image_url: str,
+        poll_url: str,
+        token: str,
+        out_path: Optional[Path],
+        progress_cb: Optional[Callable[[dict], None]],
+        trace: Optional[RequestTrace],
+        trace_parent_id: Optional[str],
+        upstream_job_id: str,
+        cancel_check: Optional[Callable[[], None]],
+    ) -> Optional[bytes]:
+        return self._download_image_result(
+            image_url=image_url,
+            poll_url=poll_url,
+            token=token,
+            out_path=out_path,
+            progress_cb=progress_cb,
+            trace=trace,
+            trace_parent_id=trace_parent_id,
+            upstream_job_id=upstream_job_id,
+            cancel_check=cancel_check,
+            io_call=None,
+            wait_cb=None,
+        )
+
     def _generate_once(
         self,
         token: str,

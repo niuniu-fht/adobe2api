@@ -6,10 +6,11 @@ services:
     build: .
     container_name: adobe2api
     ports:
-      - "6001:6001"
+      - "127.0.0.1:6001:6001"
     environment:
       - TZ=Asia/Shanghai
       - PORT=6001
+      - ADOBE_PUBLIC_BASE_URL=${ADOBE_PUBLIC_BASE_URL:-}
       - ADOBE_API_KEY=clio-playground-web
       - ADOBE2API_OPS_KEY=${ADOBE2API_OPS_KEY:-}
       - ADOBE2API_VERSION=0.2.0

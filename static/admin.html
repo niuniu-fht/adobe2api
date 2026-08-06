@@ -298,11 +298,15 @@
         <div class="queue-summary-grid" aria-label="图片队列汇总">
           <div class="queue-summary-item"><span>正在进行</span><strong id="queueInProgress">0</strong></div>
           <div class="queue-summary-item"><span>排队</span><strong id="queueQueued">0</strong></div>
+          <div class="queue-summary-item"><span>提交中</span><strong id="queueSubmitting">0</strong></div>
           <div class="queue-summary-item"><span>等待 Poll</span><strong id="queueWaitingPoll">0</strong></div>
+          <div class="queue-summary-item"><span>Poll 中</span><strong id="queuePolling">0</strong></div>
+          <div class="queue-summary-item"><span>下载中</span><strong id="queueDownloading">0</strong></div>
           <div class="queue-summary-item"><span>429 等待</span><strong id="queueRateLimited">0</strong></div>
           <div class="queue-summary-item"><span>下载重试</span><strong id="queueDownloadRetry">0</strong></div>
           <div class="queue-summary-item"><span>全部 Output</span><strong id="queueOutputs">0</strong></div>
         </div>
+        <div id="imageQueuePools" class="queue-summary-grid" aria-label="图片线程池状态"></div>
         <div id="imageQueueList" class="image-queue-list" aria-live="polite">
           <div class="empty-state">暂无图片任务</div>
         </div>

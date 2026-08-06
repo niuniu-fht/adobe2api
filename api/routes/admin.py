@@ -195,9 +195,28 @@ def build_admin_router(
         return {"items": items, "total": len(items)}
 
     @router.get("/api/v1/image-queue")
-    def image_queue(request: Request, limit: int = 200):
+    def image_queue(request: Request, limit: int = 200, details: bool = False):
         require_admin_auth(request)
-        return image_task_coordinator.snapshot(limit=limit)
+        payload = image_task_coordinator.snapshot(limit=limit)
+        if details:
+            return payload
+        legacy_summary_keys = {
+            "requests",
+            "outputs",
+            "in_progress",
+            "queued",
+            "waiting_poll",
+            "rate_limited",
+            "download_retry",
+        }
+        summary = payload.get("summary", {})
+        return {
+            "summary": {
+                key: summary.get(key, 0)
+                for key in legacy_summary_keys
+            },
+            "items": payload.get("items", []),
+        }
 
     def _resolve_logs_stats_range(range_key: str) -> tuple[str, float, float]:
         now_dt = datetime.now()

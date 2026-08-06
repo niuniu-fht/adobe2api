@@ -765,10 +765,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   const imageQueueList = document.getElementById("imageQueueList");
   const queueInProgress = document.getElementById("queueInProgress");
   const queueQueued = document.getElementById("queueQueued");
+  const queueSubmitting = document.getElementById("queueSubmitting");
   const queueWaitingPoll = document.getElementById("queueWaitingPoll");
+  const queuePolling = document.getElementById("queuePolling");
+  const queueDownloading = document.getElementById("queueDownloading");
   const queueRateLimited = document.getElementById("queueRateLimited");
   const queueDownloadRetry = document.getElementById("queueDownloadRetry");
   const queueOutputs = document.getElementById("queueOutputs");
+  const imageQueuePools = document.getElementById("imageQueuePools");
   const LOGS_PAGE_SIZE = 20;
   let logsCurrentPage = 1;
   let logsTotalPages = 1;
@@ -1002,6 +1006,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     UPLOADING: "上传中",
     SUBMITTING: "提交中",
     WAITING_POLL: "等待 Poll",
+    POLLING: "Poll 中",
     RATE_LIMITED: "429 等待",
     DOWNLOADING: "下载中",
     DOWNLOAD_RETRY: "下载重试",
@@ -1026,11 +1031,16 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function renderImageQueue(data) {
     const summary = data?.summary || {};
+    const pools = data?.pools || {};
+    const limits = data?.limits || {};
     const items = Array.isArray(data?.items) ? data.items : [];
     const metrics = [
       [queueInProgress, summary.in_progress],
       [queueQueued, summary.queued],
+      [queueSubmitting, Number(summary.submitting || 0) + Number(summary.engine_submitting || 0)],
       [queueWaitingPoll, summary.waiting_poll],
+      [queuePolling, Number(summary.polling || 0) + Number(summary.engine_polling || 0)],
+      [queueDownloading, Number(summary.downloading || 0) + Number(summary.engine_downloading || 0)],
       [queueRateLimited, summary.rate_limited],
       [queueDownloadRetry, summary.download_retry],
       [queueOutputs, summary.outputs],
@@ -1042,6 +1052,20 @@ document.addEventListener("DOMContentLoaded", async () => {
       const running = Number(summary.in_progress || 0);
       imageQueueBadge.textContent = String(running);
       imageQueueBadge.classList.toggle("active", running > 0);
+    }
+    if (imageQueuePools) {
+      const poolOrder = ["submit", "poll", "download", "io"];
+      const poolCards = poolOrder.map((name) => {
+        const pool = pools[name] || {};
+        const active = Number(pool.active || 0);
+        const queued = Number(pool.queued || 0);
+        const maxWorkers = Number(pool.max_workers || 0);
+        const completed = Number(pool.completed || 0);
+        const failed = Number(pool.failed || 0);
+        return `<div class="queue-summary-item"><span>${escapeHtml(name)} pool</span><strong>${active}/${maxWorkers}</strong><small>排队 ${queued} · 完成 ${completed} · 失败 ${failed}</small></div>`;
+      });
+      poolCards.push(`<div class="queue-summary-item"><span>Global Active</span><strong>${Number(limits.global_active || 0)}/${Number(limits.global_limit || 0)}</strong><small>每账号 ${Number(limits.per_token_limit || 0)}</small></div>`);
+      imageQueuePools.innerHTML = poolCards.join("");
     }
     if (!imageQueueList) return;
     if (!items.length) {
@@ -1103,7 +1127,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     if (refreshImageQueueBtn) refreshImageQueueBtn.disabled = true;
     try {
-      const res = await fetch("/api/v1/image-queue?limit=200");
+      const res = await fetch("/api/v1/image-queue?limit=200&details=true");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       renderImageQueue(data);

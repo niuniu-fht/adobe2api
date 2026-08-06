@@ -721,6 +721,13 @@ table {
   font-size: 22px;
 }
 
+.queue-summary-item small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .image-queue-list {
   max-height: 65vh;
   min-height: 120px;

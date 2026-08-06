@@ -108,6 +108,7 @@ def build_generation_router(
     store,
     token_manager,
     client,
+    image_generation_engine,
     image_task_coordinator,
     generated_dir: Path,
     model_catalog: dict,
@@ -137,6 +138,14 @@ def build_generation_router(
     router = APIRouter()
     entity_ref_re = re.compile(r"@entity:([^\s@]+)")
     remote_image_error_message = "输入图片下载失败，请确认图片 URL 可公开访问"
+
+    def _use_async_image_engine() -> bool:
+        if not getattr(image_generation_engine, "enabled", False):
+            return False
+        # Keep tests/plugins that monkeypatch client.generate compatible: those
+        # callers expect the legacy sync method to remain the interception point.
+        generate_func = getattr(getattr(client, "generate", None), "__func__", None)
+        return getattr(generate_func, "__name__", "") == "generate"
 
     def _image_config_int(key: str, default: int, minimum: int, maximum: int) -> int:
         try:
@@ -1208,7 +1217,7 @@ def build_generation_router(
                         or token_meta.get("token_account_email")
                     ),
                 )
-                image_bytes, _meta = client.generate(
+                generate_kwargs = dict(
                     token=selected_token,
                     prompt=prompt,
                     aspect_ratio=image_options.aspect_ratio,
@@ -1236,11 +1245,19 @@ def build_generation_router(
                     cancel_check=lambda: image_task_coordinator.raise_if_cancelled(
                         queue_id
                     ),
-                    io_call=image_task_coordinator.run_io,
-                    wait_cb=lambda delay: image_task_coordinator.wait(
-                        queue_id, delay
-                    ),
                 )
+                if _use_async_image_engine():
+                    image_bytes, _meta = image_generation_engine.generate(
+                        client, **generate_kwargs
+                    )
+                else:
+                    image_bytes, _meta = client.generate(
+                        **generate_kwargs,
+                        io_call=image_task_coordinator.run_io,
+                        wait_cb=lambda delay: image_task_coordinator.wait(
+                            queue_id, delay
+                        ),
+                    )
                 if getattr(image_options, "transparent_background", False):
                     source_bytes = (
                         image_bytes

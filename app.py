@@ -15,7 +15,7 @@ from typing import Optional, Any, Callable
 from urllib.parse import unquote_to_bytes
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -43,6 +43,7 @@ from core.adobe_client import (
 )
 from core.token_mgr import token_manager
 from core.config_mgr import config_manager
+from core.image_engine import image_generation_engine
 from core.image_queue import image_task_coordinator
 from core.refresh_mgr import refresh_manager
 from core.stores import (
@@ -134,7 +135,28 @@ def serve_generated_file(filename: str):
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     background = BackgroundTask(_drop_generated_file_cache, target)
-    return FileResponse(path=target, filename=safe_name, background=background)
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "Content-Length, Content-Disposition, Content-Type, Accept-Ranges",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+    }
+    return FileResponse(path=target, filename=safe_name, background=background, headers=headers)
+
+
+@app.options("/generated/{filename:path}", include_in_schema=False)
+def options_generated_file(filename: str):
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+        },
+    )
 
 store = JobStore()
 log_store = RequestLogStore(DATA_DIR / "request_logs.jsonl", max_items=5000)
@@ -1932,6 +1954,7 @@ def _sse_chat_stream(payload: dict):
 
 
 _reconcile_generated_storage(force=True)
+image_task_coordinator.set_metrics_provider(image_generation_engine.snapshot)
 
 
 app.include_router(
@@ -1971,6 +1994,7 @@ app.include_router(
         store=store,
         token_manager=token_manager,
         client=client,
+        image_generation_engine=image_generation_engine,
         image_task_coordinator=image_task_coordinator,
         generated_dir=GENERATED_DIR,
         model_catalog=MODEL_CATALOG,

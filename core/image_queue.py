@@ -9,6 +9,9 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from typing import Any, Callable, Iterable, Optional
 
+from core.config_mgr import config_manager
+from core.executor_metrics import MetricsThreadPoolExecutor
+
 
 TERMINAL_STATES = {"COMPLETED", "FAILED"}
 
@@ -18,9 +21,15 @@ class ImageTaskCancelled(RuntimeError):
 
 
 class ImageTaskCoordinator:
-    def __init__(self, *, io_workers: int = 32, retention_seconds: int = 60) -> None:
+    def __init__(self, *, io_workers: Optional[int] = None, retention_seconds: int = 60) -> None:
+        if io_workers is None:
+            try:
+                io_workers = int(config_manager.get("image_io_workers", 16) or 16)
+            except Exception:
+                io_workers = 16
         self._lock = threading.RLock()
-        self._io_executor = ThreadPoolExecutor(
+        self._io_executor = MetricsThreadPoolExecutor(
+            name="io",
             max_workers=max(4, int(io_workers)),
             thread_name_prefix="image-io",
         )
@@ -33,6 +42,7 @@ class ImageTaskCoordinator:
         self._schedule_condition = threading.Condition()
         self._schedule_heap: list[tuple[float, int, threading.Event]] = []
         self._schedule_seq = 0
+        self._metrics_provider: Optional[Callable[[], dict[str, Any]]] = None
         self._scheduler = threading.Thread(
             target=self._run_scheduler,
             name="image-timer",
@@ -72,6 +82,10 @@ class ImageTaskCoordinator:
 
     def run_io(self, operation: Callable[[], Any]) -> Any:
         return self._io_executor.submit(operation).result()
+
+    def set_metrics_provider(self, provider: Optional[Callable[[], dict[str, Any]]]) -> None:
+        with self._lock:
+            self._metrics_provider = provider
 
     @staticmethod
     def token_id(token: str) -> str:
@@ -469,6 +483,7 @@ class ImageTaskCoordinator:
             for item in items
             for output in item.get("outputs") or []
         ]
+        normalized_states = [state.upper() for state in states]
         summary = {
             "requests": len(items),
             "outputs": len(states),
@@ -483,12 +498,40 @@ class ImageTaskCoordinator:
                 }
                 for state in states
             ),
-            "queued": states.count("QUEUED"),
-            "waiting_poll": states.count("WAITING_POLL"),
-            "rate_limited": states.count("RATE_LIMITED"),
-            "download_retry": states.count("DOWNLOAD_RETRY"),
+            "queued": normalized_states.count("QUEUED"),
+            "uploading": normalized_states.count("UPLOADING"),
+            "submitting": normalized_states.count("SUBMITTING"),
+            "waiting_poll": normalized_states.count("WAITING_POLL"),
+            "polling": normalized_states.count("POLLING"),
+            "rate_limited": normalized_states.count("RATE_LIMITED"),
+            "downloading": normalized_states.count("DOWNLOADING"),
+            "download_retry": normalized_states.count("DOWNLOAD_RETRY"),
+            "completed": normalized_states.count("COMPLETED"),
+            "failed": normalized_states.count("FAILED"),
         }
-        return {"summary": summary, "items": items}
+        payload: dict[str, Any] = {
+            "summary": summary,
+            "items": items,
+            "pools": {"io": self._io_executor.snapshot()},
+        }
+        provider = None
+        with self._lock:
+            provider = self._metrics_provider
+        if provider is not None:
+            try:
+                extra = provider()
+                if isinstance(extra, dict):
+                    for key, value in extra.items():
+                        if key == "pools" and isinstance(value, dict):
+                            pools = payload.setdefault("pools", {})
+                            pools.update(value)
+                        elif key == "summary" and isinstance(value, dict):
+                            payload["summary"].update(value)
+                        else:
+                            payload[key] = value
+            except Exception:
+                pass
+        return payload
 
 
 image_task_coordinator = ImageTaskCoordinator()
