@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import secrets
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -38,6 +39,10 @@ except Exception:
 
 
 logger = logging.getLogger("adobe2api")
+
+_generated_arp_cache_lock = threading.Lock()
+_generated_arp_cache: dict[str, tuple[str, float]] = {}
+_GENERATED_ARP_TTL_SECONDS = 6 * 60 * 60
 
 DEFAULT_GPT_IMAGE_MODEL_QUALITIES = {
     "gpt-image-2-high": "high",
@@ -89,9 +94,12 @@ def _build_submit_nonce(token: str, prompt: str) -> str:
 
 def _build_arp_session_id() -> str:
     now_ms = int(time.time() * 1000)
-    ftr = f"{os.urandom(16).hex()}_{now_ms}_{os.getpid()}_dUAL43-mnts-ants-d4_31ck__tt"
+    ftr = (
+        f"{os.urandom(16).hex()}_{now_ms}_{random.randint(10000, 99999)}"
+        f"_UDF43-m4_31ck_{secrets.token_urlsafe(9)}-{random.randint(1000, 9999)}-v2_tt"
+    )
     ark = (
-        f"{secrets.token_hex(8)}.{random.randint(1000000000, 9999999999)}"
+        f"{random.randint(1, 9)}{secrets.token_hex(8)}.{random.randint(1000000000, 9999999999)}"
         "|r=ap-southeast-1"
         "|meta=3"
         "|metabgclr=transparent"
@@ -111,6 +119,33 @@ def _build_arp_session_id() -> str:
         separators=(",", ":"),
     )
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _generated_arp_cache_key(token: str) -> str:
+    claims = _decode_jwt_payload(token)
+    return str(
+        claims.get("user_id")
+        or claims.get("aa_id")
+        or claims.get("sub")
+        or claims.get("sid")
+        or token[:24]
+        or "default"
+    ).strip()
+
+
+def _generated_arp_session_id_for_token(token: str) -> str:
+    cache_key = _generated_arp_cache_key(token)
+    now = time.time()
+    with _generated_arp_cache_lock:
+        cached = _generated_arp_cache.get(cache_key)
+        if cached and cached[1] > now and _looks_like_firefly_arp_session_id(cached[0]):
+            return cached[0]
+        value = _build_arp_session_id()
+        _generated_arp_cache[cache_key] = (
+            value,
+            now + _GENERATED_ARP_TTL_SECONDS,
+        )
+        return value
 
 
 def _arp_session_id_for_token(token: str) -> str:
@@ -668,7 +703,7 @@ class AdobeClient:
         arp_session_id = (
             _arp_session_id_for_token(token)
             or _configured_arp_session_id()
-            or _build_arp_session_id()
+            or _generated_arp_session_id_for_token(token)
         )
         if _looks_like_firefly_arp_session_id(arp_session_id):
             headers["x-arp-session-id"] = arp_session_id
@@ -698,11 +733,19 @@ class AdobeClient:
         return {
             "Authorization": f"Bearer {token}",
             "accept": "*/*",
-            "referer": "https://new.express.adobe.com/",
-            "origin": "https://new.express.adobe.com",
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+            "cache-control": "no-cache",
+            "origin": "https://firefly.adobe.com",
+            "pragma": "no-cache",
+            "priority": "u=1, i",
+            "referer": "https://firefly.adobe.com/",
+            "sec-ch-ua": self.sec_ch_ua,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
             "user-agent": self.user_agent,
-            "x-api-key": self.api_key,
-            "content-type": "application/json",
         }
 
     def _select_subject_headers(self, token: str) -> dict:
