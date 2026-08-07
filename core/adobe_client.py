@@ -233,7 +233,7 @@ class AdobeClient:
     platform_cs_base = "https://platform-cs-va6.adobe.io/composite/component/path"
 
     def __init__(self) -> None:
-        self.api_key = "projectx_webapp"
+        self.api_key = "clio-playground-web"
         self.impersonate = "chrome124"
         self.proxy = ""
         self.generate_timeout = 300
@@ -602,12 +602,25 @@ class AdobeClient:
         headers = self._browser_headers()
         headers.update(
             {
+                "origin": "https://firefly.adobe.com",
+                "referer": "https://firefly.adobe.com/",
+                "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+            }
+        )
+        headers.update(
+            {
                 "Authorization": f"Bearer {token}",
                 "x-api-key": self.api_key,
                 "content-type": "application/json",
                 "accept": "*/*",
             }
         )
+        nonce = _build_submit_nonce(token, prompt)
+        if nonce:
+            headers["x-nonce"] = nonce
+        arp_session_id = _arp_session_id_for_token(token) or _build_arp_session_id()
+        if arp_session_id:
+            headers["x-arp-session-id"] = arp_session_id
         return headers
 
     def _submit_headers_minimal(self, token: str) -> dict:
