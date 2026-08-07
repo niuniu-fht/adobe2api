@@ -693,6 +693,10 @@ def build_admin_router(
                     detail="gpt_image_quality must be one of: low, medium, high",
                 )
             update_data["gpt_image_quality"] = gpt_image_quality
+        if "firefly_x_arp_session_id" in incoming:
+            update_data["firefly_x_arp_session_id"] = str(
+                incoming["firefly_x_arp_session_id"] or ""
+            ).strip()
         if "gpt_image_model_qualities" in incoming:
             raw_model_qualities = incoming.get("gpt_image_model_qualities") or {}
             if not isinstance(raw_model_qualities, dict):

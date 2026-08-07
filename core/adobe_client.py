@@ -111,6 +111,33 @@ def _arp_session_id_for_token(token: str) -> str:
         return ""
 
 
+def _configured_arp_session_id() -> str:
+    return str(
+        os.getenv("ADOBE_X_ARP_SESSION_ID")
+        or config_manager.get("firefly_x_arp_session_id", "")
+        or ""
+    ).strip()
+
+
+def _looks_like_firefly_arp_session_id(value: str) -> bool:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return False
+    try:
+        padding = (-len(raw_value)) % 4
+        decoded = base64.b64decode((raw_value + ("=" * padding)).encode("ascii"))
+        data = json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    return bool(
+        str(data.get("sid") or "").strip()
+        and str(data.get("ark") or "").strip()
+        and str(data.get("ftr") or "").strip()
+    )
+
+
 class AdobeRequestError(Exception):
     def __init__(
         self,
@@ -246,9 +273,9 @@ class AdobeClient:
         self.gpt_image_quality = "low"
         self.gpt_image_model_qualities: dict[str, str] = {}
         self.masking_api_key = "clio-playground-web"
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0"
         self.sec_ch_ua = (
-            '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"'
+            '"Not=A?Brand";v="99", "Microsoft Edge";v="151", "Chromium";v="151"'
         )
 
         self.apply_config(config_manager.get_all())
@@ -613,13 +640,16 @@ class AdobeClient:
                 "x-api-key": self.api_key,
                 "content-type": "application/json",
                 "accept": "*/*",
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+                "priority": "u=1, i",
             }
         )
         nonce = _build_submit_nonce(token, prompt)
         if nonce:
             headers["x-nonce"] = nonce
-        arp_session_id = _arp_session_id_for_token(token) or _build_arp_session_id()
-        if arp_session_id:
+        arp_session_id = _arp_session_id_for_token(token) or _configured_arp_session_id()
+        if _looks_like_firefly_arp_session_id(arp_session_id):
             headers["x-arp-session-id"] = arp_session_id
         return headers
 
