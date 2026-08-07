@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -89,8 +90,24 @@ def _build_submit_nonce(token: str, prompt: str) -> str:
 def _build_arp_session_id() -> str:
     now_ms = int(time.time() * 1000)
     ftr = f"{os.urandom(16).hex()}_{now_ms}_{os.getpid()}_dUAL43-mnts-ants-d4_31ck__tt"
+    ark = (
+        f"{secrets.token_hex(8)}.{random.randint(1000000000, 9999999999)}"
+        "|r=ap-southeast-1"
+        "|meta=3"
+        "|metabgclr=transparent"
+        "|metaiconclr=%23757575"
+        "|guitextcolor=%23000000"
+        "|pk=BBCC314C-4937-4CCD-B0A3-FDF0F0F7603C"
+        "|at=40"
+        "|sup=1"
+        f"|rid={random.randint(1, 99)}"
+        "|ag=101"
+        "|cdn_url=https%3A%2F%2Farks-client.adobe.com%2Fcdn%2Ffc"
+        "|surl=https%3A%2F%2Farks-client.adobe.com"
+        "|smurl=https%3A%2F%2Farks-client.adobe.com%2Fcdn%2Ffc%2Fassets%2Fstyle-manager"
+    )
     raw = json.dumps(
-        {"sid": str(uuid.uuid4()), "ftr": ftr},
+        {"sid": str(uuid.uuid4()), "ark": ark, "ftr": ftr},
         separators=(",", ":"),
     )
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
@@ -648,7 +665,11 @@ class AdobeClient:
         nonce = _build_submit_nonce(token, prompt)
         if nonce:
             headers["x-nonce"] = nonce
-        arp_session_id = _arp_session_id_for_token(token) or _configured_arp_session_id()
+        arp_session_id = (
+            _arp_session_id_for_token(token)
+            or _configured_arp_session_id()
+            or _build_arp_session_id()
+        )
         if _looks_like_firefly_arp_session_id(arp_session_id):
             headers["x-arp-session-id"] = arp_session_id
         return headers
