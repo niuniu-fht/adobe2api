@@ -433,7 +433,7 @@ def test_images_endpoint_upscales_small_size_before_adobe_submit(monkeypatch):
     assert submitted_sizes == [{"width": 816, "height": 816}]
 
 
-def test_images_url_response_returns_presigned_url_without_download_path(monkeypatch):
+def test_images_url_response_downloads_to_local_image_host(monkeypatch):
     import app as app_module
 
     _patch_images_endpoint_token(monkeypatch, app_module)
@@ -441,26 +441,31 @@ def test_images_url_response_returns_presigned_url_without_download_path(monkeyp
 
     def generate(**kwargs):
         calls.append(kwargs)
-        return None, {"image_url": "https://assets.example/result.png?sig=short"}
+        return _png_bytes(), {"image_url": "https://assets.example/result.png?sig=short"}
 
     monkeypatch.setattr(app_module.client, "generate", generate)
     api_key = str(app_module.config_manager.get("api_key", "") or "")
     headers = {"X-API-Key": api_key} if api_key else {}
 
-    response = TestClient(app_module.app).post(
-        "/v1/images/generations",
-        headers=headers,
-        json={"model": "gpt-image-2", "prompt": "draw", "response_format": "url"},
-    )
+    try:
+        response = TestClient(app_module.app).post(
+            "/v1/images/generations",
+            headers=headers,
+            json={"model": "gpt-image-2", "prompt": "draw", "response_format": "url"},
+        )
 
-    assert response.status_code == 200
-    assert response.json()["data"] == [
-        {"url": "https://assets.example/result.png?sig=short"}
-    ]
-    assert len(calls) == 1
-    assert calls[0]["protocol_profile"] == "remote_adobe"
-    assert calls[0]["download_result"] is False
-    assert calls[0]["out_path"] is None
+        assert response.status_code == 200
+        image_url = response.json()["data"][0]["url"]
+        assert image_url.startswith("http://127.0.0.1:6001/generated/")
+        assert "assets.example" not in image_url
+        assert len(calls) == 1
+        assert calls[0]["protocol_profile"] == "remote_adobe"
+        assert calls[0]["download_result"] is True
+        assert calls[0]["out_path"].is_file()
+        assert calls[0]["out_path"].read_bytes() == _png_bytes()
+    finally:
+        if calls and calls[0].get("out_path") is not None:
+            calls[0]["out_path"].unlink(missing_ok=True)
 
 
 def test_images_base64_downloads_to_memory_without_output_path(monkeypatch):
@@ -493,7 +498,7 @@ def test_images_base64_downloads_to_memory_without_output_path(monkeypatch):
     assert calls[0]["out_path"] is None
 
 
-def test_images_edits_uses_remote_upload_and_returns_presigned_url(monkeypatch):
+def test_images_edits_uses_remote_upload_and_returns_local_image_host(monkeypatch):
     import app as app_module
 
     _patch_images_endpoint_token(monkeypatch, app_module)
@@ -506,32 +511,37 @@ def test_images_edits_uses_remote_upload_and_returns_presigned_url(monkeypatch):
 
     def generate(**kwargs):
         generate_calls.append(kwargs)
-        return None, {"image_url": "https://assets.example/edited.png"}
+        return _png_bytes(), {"image_url": "https://assets.example/edited.png"}
 
     monkeypatch.setattr(app_module.client, "upload_image", upload_image)
     monkeypatch.setattr(app_module.client, "generate", generate)
     api_key = str(app_module.config_manager.get("api_key", "") or "")
     headers = {"X-API-Key": api_key} if api_key else {}
 
-    response = TestClient(app_module.app).post(
-        "/v1/images/edits",
-        headers=headers,
-        data={
-            "model": "gpt-image-2",
-            "prompt": "edit",
-            "response_format": "url",
-        },
-        files={"image": ("reference.png", _png_bytes(), "image/png")},
-    )
+    try:
+        response = TestClient(app_module.app).post(
+            "/v1/images/edits",
+            headers=headers,
+            data={
+                "model": "gpt-image-2",
+                "prompt": "edit",
+                "response_format": "url",
+            },
+            files={"image": ("reference.png", _png_bytes(), "image/png")},
+        )
 
-    assert response.status_code == 200
-    assert response.json()["data"] == [
-        {"url": "https://assets.example/edited.png"}
-    ]
-    assert upload_calls[0]["protocol_profile"] == "remote_adobe"
-    assert generate_calls[0]["protocol_profile"] == "remote_adobe"
-    assert generate_calls[0]["download_result"] is False
-    assert generate_calls[0]["out_path"] is None
+        assert response.status_code == 200
+        image_url = response.json()["data"][0]["url"]
+        assert image_url.startswith("http://127.0.0.1:6001/generated/")
+        assert "assets.example" not in image_url
+        assert upload_calls[0]["protocol_profile"] == "remote_adobe"
+        assert generate_calls[0]["protocol_profile"] == "remote_adobe"
+        assert generate_calls[0]["download_result"] is True
+        assert generate_calls[0]["out_path"].is_file()
+        assert generate_calls[0]["out_path"].read_bytes() == _png_bytes()
+    finally:
+        if generate_calls and generate_calls[0].get("out_path") is not None:
+            generate_calls[0]["out_path"].unlink(missing_ok=True)
 
 
 def test_clarity_model_postprocesses_generated_image_to_transparent_png(monkeypatch):

@@ -1185,7 +1185,9 @@ def build_generation_router(
                 getattr(image_options, "transparent_background", False)
             )
             no_store = (
-                protocol_profile == "remote_adobe" and not transparent_background
+                protocol_profile == "remote_adobe"
+                and not transparent_background
+                and image_options.response_format == "b64_json"
             )
             job_id = uuid.uuid4().hex
             out_path = None if no_store else generated_dir / f"{job_id}.png"
