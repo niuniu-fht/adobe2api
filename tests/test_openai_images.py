@@ -12,7 +12,11 @@ from core.models.openai_images import (
     parse_openai_gemini_size,
     parse_response_format,
 )
-from core.models.payloads import build_image_payload_candidates, random_image_seed
+from core.models.payloads import (
+    build_image_payload_candidates,
+    build_remote_adobe_image_payload_candidates,
+    random_image_seed,
+)
 from core.models.image_limits import (
     MAX_TOTAL_IMAGE_BYTES,
     ImageInputLimitError,
@@ -131,6 +135,73 @@ def test_native_gpt_image_15_uses_version_15_and_supported_1k_size():
     assert payload["modelId"] == "gpt-image"
     assert payload["modelVersion"] == "1.5"
     assert payload["size"] == {"width": 1536, "height": 1024}
+
+
+def test_remote_gpt_payload_matches_express_shape():
+    payload = build_remote_adobe_image_payload_candidates(
+        prompt="draw",
+        aspect_ratio="3:2",
+        output_resolution="1K",
+        upstream_model_id="gpt-image",
+        upstream_model_version="1.5",
+        seed=123,
+        source_image_ids=["REF"],
+        requested_size={"width": 1536, "height": 1024},
+    )[0]
+
+    assert payload == {
+        "modelId": "gpt-image",
+        "modelVersion": "1.5",
+        "n": 1,
+        "prompt": "draw",
+        "seeds": [123],
+        "output": {"storeInputs": True},
+        "referenceBlobs": [{"id": "REF", "usage": "subject"}],
+        "generationMetadata": {
+            "module": "text2image",
+            "submodule": "ff-image-generate",
+        },
+        "modelSpecificPayload": {"size": "1536x1024"},
+        "generationSettings": {"detailLevel": 3},
+    }
+    assert "size" not in {key for key in payload if key != "modelSpecificPayload"}
+    assert "outputResolution" not in payload
+
+
+def test_remote_nano_payload_omits_rejected_fields_for_edits():
+    payload = build_remote_adobe_image_payload_candidates(
+        prompt="edit",
+        aspect_ratio="16:9",
+        output_resolution="2K",
+        upstream_model_id="gemini-flash",
+        upstream_model_version="nano-banana-3",
+        seed=456,
+        source_image_ids=["REF"],
+    )[0]
+
+    assert payload["size"] == {"width": 2752, "height": 1536}
+    assert payload["referenceBlobs"] == [{"id": "REF", "usage": "general"}]
+    assert payload["generationMetadata"]["module"] == "text2image"
+    assert payload["modelSpecificPayload"] == {
+        "parameters": {"addWatermark": False}
+    }
+    for key in ("skipCai", "outputResolution"):
+        assert key not in payload
+    for key in ("aspectRatio", "imageSize"):
+        assert key not in payload["modelSpecificPayload"]
+
+
+def test_remote_nano_uses_upstream_ratio_fallback():
+    payload = build_remote_adobe_image_payload_candidates(
+        prompt="draw",
+        aspect_ratio="3:2",
+        output_resolution="2K",
+        upstream_model_id="gemini-flash",
+        upstream_model_version="nano-banana-3",
+        seed=456,
+    )[0]
+
+    assert payload["size"] == {"width": 2752, "height": 1536}
 
 
 @pytest.mark.parametrize(

@@ -241,3 +241,79 @@ def build_image_payload_candidates(
         {"id": img_id, "usage": "general"} for img_id in source_image_ids
     ]
     return [edited]
+
+
+def build_remote_adobe_image_payload_candidates(
+    *,
+    prompt: str,
+    aspect_ratio: str,
+    output_resolution: str,
+    upstream_model_id: str,
+    upstream_model_version: str,
+    seed: Optional[int] = None,
+    source_image_ids: Optional[list[str]] = None,
+    requested_size: Optional[dict] = None,
+) -> list[dict]:
+    """Build the request shape used by Adobe's current Express image client."""
+    ratio = str(aspect_ratio or "1:1").strip() or "1:1"
+    resolution = str(output_resolution or "2K").strip().upper() or "2K"
+    effective_seed = int(seed) if seed is not None else random_image_seed()
+    references = list(source_image_ids or [])
+    model_id = str(upstream_model_id or "").strip()
+
+    if model_id.lower() == "gpt-image":
+        pixel_size = requested_size or gpt_image_pixels_from_ratio(ratio, resolution)
+        if pixel_size is None:
+            pixel_size = gpt_image_pixels_from_ratio("1:1", resolution)
+        payload = {
+            "modelId": model_id,
+            "modelVersion": upstream_model_version,
+            "n": 1,
+            "prompt": prompt,
+            "seeds": [effective_seed],
+            "output": {"storeInputs": True},
+            "referenceBlobs": [
+                {"id": image_id, "usage": "subject"} for image_id in references
+            ],
+            "generationMetadata": {
+                "module": "text2image",
+                "submodule": "ff-image-generate",
+            },
+            "modelSpecificPayload": {"size": gpt_image_size_string(pixel_size)},
+            "generationSettings": {"detailLevel": 3},
+        }
+        return [payload]
+
+    supported_default_ratios = {
+        "1:1",
+        "1:8",
+        "1:4",
+        "16:9",
+        "9:16",
+        "4:1",
+        "4:3",
+        "3:4",
+        "8:1",
+    }
+    effective_ratio = ratio if ratio in supported_default_ratios else "16:9"
+    payload = {
+        "modelId": model_id,
+        "modelVersion": upstream_model_version,
+        "n": 1,
+        "prompt": prompt,
+        "size": size_from_ratio(effective_ratio, resolution),
+        "seeds": [effective_seed],
+        "groundSearch": False,
+        "output": {"storeInputs": True},
+        "referenceBlobs": [
+            {"id": image_id, "usage": "general"} for image_id in references
+        ],
+        "generationMetadata": {
+            "module": "text2image",
+            "submodule": "ff-image-generate",
+        },
+        "modelSpecificPayload": {
+            "parameters": {"addWatermark": False},
+        },
+    }
+    return [payload]

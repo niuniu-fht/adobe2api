@@ -6,8 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import requests
-
 from core.config_mgr import config_manager
 from core.token_mgr import token_manager
 
@@ -19,7 +17,10 @@ PROFILE_FILE = CONFIG_DIR / "refresh_profile.json"
 
 class RefreshManager:
     DEFAULT_REFRESH_URL = "https://adobeid-na1.services.adobe.com/ims/check/v6/token?jslVersion=v2-v0.48.0-1-g1e322cb"
+    DEFAULT_CLIENT_ID = "projectx_webapp"
     DEFAULT_SCOPE = "AdobeID,firefly_api,openid"
+    DEFAULT_ORIGIN = "https://new.express.adobe.com"
+    DEFAULT_REFERER = "https://new.express.adobe.com/"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -98,13 +99,13 @@ class RefreshManager:
                 or "application/x-www-form-urlencoded;charset=UTF-8"
             ),
             "Cookie": str(headers.get("Cookie") or "").strip(),
-            "Origin": "https://new.express.adobe.com",
-            "Referer": "https://new.express.adobe.com/",
+            "Origin": RefreshManager.DEFAULT_ORIGIN,
+            "Referer": RefreshManager.DEFAULT_REFERER,
             "User-Agent": str(headers.get("User-Agent") or "Mozilla/5.0"),
         }
 
         normalized_form = {
-            "client_id": "projectx_webapp",
+            "client_id": RefreshManager.DEFAULT_CLIENT_ID,
             "guest_allowed": str(form.get("guest_allowed") or "true").strip() or "true",
             "scope": RefreshManager.DEFAULT_SCOPE,
         }
@@ -183,13 +184,6 @@ class RefreshManager:
     @classmethod
     def _refresh_interval_seconds(cls) -> int:
         return cls._refresh_interval_hours() * 3600
-
-    def _requests_proxies(self):
-        proxy = str(config_manager.get("proxy", "") or "").strip()
-        use_proxy = bool(config_manager.get("use_proxy", False))
-        if not (use_proxy and proxy):
-            return None
-        return {"http": proxy, "https": proxy}
 
     def _summary_locked(self, profile: Dict) -> Dict:
         endpoint = profile.get("endpoint", {})
@@ -339,7 +333,7 @@ class RefreshManager:
                     "url": self.DEFAULT_REFRESH_URL,
                     "method": "POST",
                     "form": {
-                        "client_id": "projectx_webapp",
+                        "client_id": self.DEFAULT_CLIENT_ID,
                         "guest_allowed": "true",
                         "scope": self.DEFAULT_SCOPE,
                     },
@@ -348,8 +342,8 @@ class RefreshManager:
                         "Accept-Language": "zh-CN,zh;q=0.9",
                         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
                         "Cookie": cookie,
-                        "Origin": "https://new.express.adobe.com",
-                        "Referer": "https://new.express.adobe.com/",
+                        "Origin": self.DEFAULT_ORIGIN,
+                        "Referer": self.DEFAULT_REFERER,
                         "User-Agent": "Mozilla/5.0",
                     },
                 }
@@ -530,51 +524,9 @@ class RefreshManager:
         token = str(access_token or "").strip()
         if not token:
             return {}
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        }
-        profile_urls = [
-            "https://ims-na1.adobelogin.com/ims/profile/v1",
-            "https://adobeid-na1.services.adobe.com/ims/profile/v1",
-        ]
-        for url in profile_urls:
-            try:
-                resp = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=15,
-                    proxies=self._requests_proxies(),
-                )
-            except Exception:
-                continue
-            if resp.status_code != 200:
-                continue
-            try:
-                data = resp.json()
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
+        from core.adobe_client import fetch_adobe_account_profile
 
-            display_name = str(
-                data.get("displayName")
-                or data.get("name")
-                or data.get("fullName")
-                or ""
-            ).strip()
-            email = str(data.get("email") or "").strip()
-            user_id = str(data.get("userId") or data.get("authId") or "").strip()
-            if not (display_name or email or user_id):
-                continue
-            return {
-                "display_name": display_name,
-                "email": email,
-                "user_id": user_id,
-                "source": "ims_profile_v1",
-                "updated_at": int(time.time()),
-            }
-        return {}
+        return fetch_adobe_account_profile(token)
 
     @staticmethod
     def _extract_account_id(access_token: str) -> str:
@@ -589,42 +541,16 @@ class RefreshManager:
         ).strip()
 
     def _fetch_credits_balance(self, access_token: str, account_id: str) -> Dict:
-        token = str(access_token or "").strip()
-        aid = str(account_id or "").strip()
-        if not token:
-            raise RuntimeError("empty access token")
-        if not aid:
-            raise RuntimeError("missing account id")
+        from core.adobe_client import fetch_adobe_credits_balance
 
-        resp = requests.get(
-            "https://firefly.adobe.io/v1/credits/balance",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "x-api-key": "SunbreakWebUI1",
-                "x-account-id": aid,
-                "Origin": "https://new.express.adobe.com",
-                "Referer": "https://new.express.adobe.com/",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            timeout=20,
-            proxies=self._requests_proxies(),
+        proxy = str(config_manager.get("proxy", "") or "").strip()
+        if not bool(config_manager.get("use_proxy", False)):
+            proxy = ""
+        return fetch_adobe_credits_balance(
+            access_token,
+            account_id,
+            proxy=proxy,
         )
-        if resp.status_code != 200:
-            raise RuntimeError(f"credits request failed: {resp.status_code}")
-        try:
-            payload = resp.json()
-        except Exception:
-            raise RuntimeError("credits response invalid json")
-        total_info = payload.get("total", {}) if isinstance(payload, dict) else {}
-        quota = total_info.get("quota", {}) if isinstance(total_info, dict) else {}
-        return {
-            "total": quota.get("total"),
-            "used": quota.get("used"),
-            "available": quota.get("available"),
-            "available_until": total_info.get("availableUntil"),
-            "updated_at": int(time.time()),
-        }
 
     def refresh_credits_for_token_id(self, token_id: str) -> Dict:
         token_info = token_manager.get_by_id(token_id)
@@ -634,6 +560,11 @@ class RefreshManager:
         account_id = self._extract_account_id(token_value)
         credits = self._fetch_credits_balance(token_value, account_id)
         token_manager.set_credits(token_id, credits)
+        if bool(credits.get("unknown")):
+            token_manager.set_credits_error(
+                token_id,
+                str(credits.get("error") or "credits unknown"),
+            )
         return {
             "token_id": token_id,
             "credits": credits,
@@ -673,44 +604,35 @@ class RefreshManager:
 
     def refresh_once(self, profile_id: str) -> Dict:
         snapshot = self._prepare_refresh(profile_id)
-        resp = requests.post(
-            snapshot["url"],
-            headers=snapshot["headers"],
-            data=snapshot["form"],
-            timeout=30,
-            proxies=self._requests_proxies(),
-        )
-
-        if resp.status_code != 200:
-            self._mark_failure(
-                profile_id,
-                f"refresh request failed: {resp.status_code} {resp.text[:200]}",
-                http_status=resp.status_code,
-            )
-            raise RuntimeError(
-                f"refresh request failed: {resp.status_code} {resp.text[:200]}"
-            )
-
         try:
-            data = resp.json()
-        except Exception:
+            from core.adobe_client import exchange_adobe_cookie
+
+            proxy = str(config_manager.get("proxy", "") or "").strip()
+            if not bool(config_manager.get("use_proxy", False)):
+                proxy = ""
+            exchange_result = exchange_adobe_cookie(
+                str(snapshot.get("headers", {}).get("Cookie") or ""),
+                proxy=proxy,
+            )
+            data = exchange_result.get("raw") or {}
+            token = str(exchange_result.get("access_token") or "").strip()
+        except Exception as exc:
             self._mark_failure(
                 profile_id,
-                "refresh response is not valid json",
-                http_status=resp.status_code,
+                str(exc),
             )
-            raise RuntimeError("refresh response is not valid json")
-
-        token = str(data.get("access_token") or "").strip()
+            raise
         if not token:
             self._mark_failure(
                 profile_id,
                 "refresh response missing access_token",
-                http_status=resp.status_code,
             )
             raise RuntimeError("refresh response missing access_token")
 
-        account = self._fetch_account_info(token)
+        try:
+            account = self._fetch_account_info(token)
+        except Exception:
+            account = {}
         if account:
             self._set_profile_account(profile_id, account)
 
@@ -733,12 +655,15 @@ class RefreshManager:
         token_id = str(token_record.get("id") or "").strip()
         if token_id:
             try:
-                self.refresh_credits_for_token_id(token_id)
+                credits_result = self.refresh_credits_for_token_id(token_id)
+                credits = credits_result.get("credits") or {}
+                if bool(credits.get("unknown")):
+                    credits_error = str(credits.get("error") or "credits unknown")
             except Exception as exc:
                 credits_error = str(exc)
                 token_manager.set_credits_error(token_id, credits_error)
 
-        self._mark_success(profile_id, http_status=resp.status_code)
+        self._mark_success(profile_id, http_status=200)
 
         return {
             "status": "ok",

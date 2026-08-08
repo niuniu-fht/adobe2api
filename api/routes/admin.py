@@ -792,18 +792,62 @@ def build_admin_router(
     ):
         require_admin_auth(request)
         try:
-            profile = refresh_manager.import_cookie(req.cookie, name=req.name)
+            cookie_payload = req.cookie
+            if not isinstance(cookie_payload, dict):
+                cookie_payload = {"cookie": cookie_payload}
+            else:
+                cookie_payload = dict(cookie_payload)
+            if req.headers:
+                cookie_payload["headers"] = req.headers
+            if req.firefly_headers:
+                cookie_payload["firefly_headers"] = req.firefly_headers
+            arp = (
+                str(req.arp_session_id or "").strip()
+                or str(req.x_arp_session_id or "").strip()
+            )
+            if arp:
+                cookie_payload["headers"] = {
+                    **(cookie_payload.get("headers") or {}),
+                    "x-arp-session-id": arp,
+                }
+            profile = refresh_manager.import_cookie(cookie_payload, name=req.name)
+            access_token = str(
+                req.access_token
+                or (
+                    cookie_payload.get("access_token")
+                    if isinstance(cookie_payload, dict)
+                    else ""
+                )
+                or ""
+            ).strip()
+            token_record = None
+            if access_token:
+                account = profile.get("account") if isinstance(profile, dict) else {}
+                token_record = token_manager.add(
+                    access_token,
+                    meta={
+                        "source": "cookie_import",
+                        "auto_refresh": True,
+                        "refresh_profile_id": str(profile.get("id") or ""),
+                        "refresh_profile_name": str(profile.get("name") or ""),
+                        "refresh_profile_email": str(
+                            (account or {}).get("email") or req.name or ""
+                        ),
+                    },
+                )
             refresh_result = None
             refresh_error = ""
-            try:
-                refresh_result = refresh_manager.refresh_once(
-                    str(profile.get("id") or "")
-                )
-            except Exception as exc:
-                refresh_error = str(exc)
+            if not access_token:
+                try:
+                    refresh_result = refresh_manager.refresh_once(
+                        str(profile.get("id") or "")
+                    )
+                except Exception as exc:
+                    refresh_error = str(exc)
             return {
                 "status": "ok" if not refresh_error else "partial",
                 "profile": profile,
+                "token": token_record,
                 "refresh_result": refresh_result,
                 "refresh_error": refresh_error,
             }
@@ -823,9 +867,34 @@ def build_admin_router(
         refreshed = []
         refresh_failed = []
 
+        def _cookie_import_payload(item):
+            cookie_value = item.cookie
+            if isinstance(cookie_value, dict):
+                return cookie_value
+            bundle: dict[str, Any] = {"cookie": cookie_value}
+            if item.headers:
+                bundle["headers"] = item.headers
+            if item.firefly_headers:
+                bundle["firefly_headers"] = item.firefly_headers
+            if item.access_token:
+                bundle["access_token"] = item.access_token
+            arp = (
+                str(item.arp_session_id or "").strip()
+                or str(item.x_arp_session_id or "").strip()
+            )
+            if arp:
+                bundle["headers"] = {
+                    **(bundle.get("headers") or {}),
+                    "x-arp-session-id": arp,
+                }
+            return bundle
+
         def import_one(idx: int, item):
             try:
-                profile = refresh_manager.import_cookie(item.cookie, name=item.name)
+                profile = refresh_manager.import_cookie(
+                    _cookie_import_payload(item),
+                    name=item.name,
+                )
             except ValueError as exc:
                 return {
                     "index": idx,
@@ -841,23 +910,47 @@ def build_admin_router(
 
             refreshed_item = None
             refresh_failed_item = None
-            try:
-                refresh_result = refresh_manager.refresh_once(
-                    str(profile.get("id") or "")
+            access_token = str(
+                item.access_token
+                or (
+                    item.cookie.get("access_token")
+                    if isinstance(item.cookie, dict)
+                    else ""
                 )
-                refreshed_item = {
-                    "index": idx,
-                    "profile_id": profile.get("id"),
-                    "profile_name": profile.get("name"),
-                    "result": refresh_result,
-                }
-            except Exception as exc:
-                refresh_failed_item = {
-                    "index": idx,
-                    "profile_id": profile.get("id"),
-                    "profile_name": profile.get("name"),
-                    "detail": str(exc),
-                }
+                or ""
+            ).strip()
+            if access_token:
+                account = profile.get("account") if isinstance(profile, dict) else {}
+                token_manager.add(
+                    access_token,
+                    meta={
+                        "source": "cookie_import",
+                        "auto_refresh": True,
+                        "refresh_profile_id": str(profile.get("id") or ""),
+                        "refresh_profile_name": str(profile.get("name") or ""),
+                        "refresh_profile_email": str(
+                            (account or {}).get("email") or item.name or ""
+                        ),
+                    },
+                )
+            else:
+                try:
+                    refresh_result = refresh_manager.refresh_once(
+                        str(profile.get("id") or "")
+                    )
+                    refreshed_item = {
+                        "index": idx,
+                        "profile_id": profile.get("id"),
+                        "profile_name": profile.get("name"),
+                        "result": refresh_result,
+                    }
+                except Exception as exc:
+                    refresh_failed_item = {
+                        "index": idx,
+                        "profile_id": profile.get("id"),
+                        "profile_name": profile.get("name"),
+                        "detail": str(exc),
+                    }
 
             return {
                 "index": idx,

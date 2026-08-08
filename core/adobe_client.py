@@ -16,7 +16,11 @@ from urllib.parse import quote, urlparse
 import requests
 
 from core.config_mgr import config_manager
-from core.models import build_image_payload_candidates, random_image_seed
+from core.models import (
+    build_image_payload_candidates,
+    build_remote_adobe_image_payload_candidates,
+    random_image_seed,
+)
 from core.request_trace import (
     RequestTrace,
     binary_summary,
@@ -39,6 +43,378 @@ except Exception:
 
 
 logger = logging.getLogger("adobe2api")
+
+ADOBE_REFRESH_URL = (
+    "https://adobeid-na1.services.adobe.com/ims/check/v6/token"
+    "?jslVersion=v2-v0.48.0-1-g1e322cb"
+)
+ADOBE_EXPRESS_CLIENT_ID = "projectx_webapp"
+ADOBE_EXPRESS_SCOPE = "AdobeID,firefly_api,openid"
+ADOBE_CLIO_CLIENT_ID = "clio-playground-web"
+ADOBE_CLIO_SCOPE = (
+    "AdobeID,firefly_api,openid,pps.read,pps.write,"
+    "additional_info.projectedProductContext,additional_info.ownerOrg,"
+    "uds_read,uds_write,ab.manage,read_organizations,additional_info.roles,"
+    "account_cluster.read,creative_production,tk_platform,tk_platform_sync,profile"
+)
+ADOBE_CREDITS_URL = "https://firefly.adobe.io/v1/credits/balance"
+ADOBE_CREDITS_API_KEY = "SunbreakWebUI1"
+ADOBE_PROFILE_URLS = (
+    "https://ims-na1.adobelogin.com/ims/profile/v1",
+    "https://adobeid-na1.services.adobe.com/ims/profile/v1",
+)
+
+_ADOBE_FINGERPRINTS = (
+    {
+        "impersonate": "chrome146",
+        "major": 146,
+        "platform": '"Windows"',
+        "os": "Windows NT 10.0; Win64; x64",
+        "sec_ch_ua": '"Chromium";v="146", "Google Chrome";v="146", "Not?A_Brand";v="24"',
+    },
+    {
+        "impersonate": "chrome146",
+        "major": 146,
+        "platform": '"macOS"',
+        "os": "Macintosh; Intel Mac OS X 10_15_7",
+        "sec_ch_ua": '"Chromium";v="146", "Google Chrome";v="146", "Not?A_Brand";v="24"',
+    },
+    {
+        "impersonate": "chrome145",
+        "major": 145,
+        "platform": '"Windows"',
+        "os": "Windows NT 10.0; Win64; x64",
+        "sec_ch_ua": '"Chromium";v="145", "Google Chrome";v="145", "Not?A_Brand";v="24"',
+    },
+    {
+        "impersonate": "chrome145",
+        "major": 145,
+        "platform": '"macOS"',
+        "os": "Macintosh; Intel Mac OS X 10_15_7",
+        "sec_ch_ua": '"Chromium";v="145", "Google Chrome";v="145", "Not?A_Brand";v="24"',
+    },
+    {
+        "impersonate": "chrome133a",
+        "major": 133,
+        "platform": '"Windows"',
+        "os": "Windows NT 10.0; Win64; x64",
+        "sec_ch_ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+    },
+    {
+        "impersonate": "chrome131",
+        "major": 131,
+        "platform": '"macOS"',
+        "os": "Macintosh; Intel Mac OS X 10_15_7",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    },
+)
+
+
+def _go_json_bytes(value: Any) -> bytes:
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    text = (
+        text.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+    return text.encode("utf-8")
+
+
+def _select_adobe_fingerprint() -> dict[str, Any]:
+    fingerprint = dict(random.choice(_ADOBE_FINGERPRINTS))
+    fingerprint["user_agent"] = (
+        f"Mozilla/5.0 ({fingerprint['os']}) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{fingerprint['major']}.0.0.0 Safari/537.36"
+    )
+    return fingerprint
+
+
+class _BorrowedSession:
+    def __init__(self, session: Any):
+        self._session = session
+
+    def __enter__(self):
+        return self._session
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def get(self, *args, **kwargs):
+        kwargs.setdefault("allow_redirects", False)
+        return self._session.get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        kwargs.setdefault("allow_redirects", False)
+        return self._session.post(*args, **kwargs)
+
+
+def exchange_adobe_cookie(cookie: str, *, proxy: str = "") -> dict[str, Any]:
+    cookie_value = str(cookie or "").strip()
+    if cookie_value.lower().startswith("cookie:"):
+        cookie_value = cookie_value.split(":", 1)[1].strip()
+    if not cookie_value:
+        raise ValueError("cookie is empty")
+
+    fingerprint = _select_adobe_fingerprint()
+    session = None
+    if CurlSession is not None:
+        kwargs: dict[str, Any] = {
+            "impersonate": fingerprint["impersonate"],
+            "timeout": 60,
+        }
+        session = CurlSession(**kwargs)
+
+    def exchange(form: dict[str, str], origin: str) -> dict[str, Any]:
+        headers = {
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "cookie": cookie_value,
+            "origin": origin,
+            "referer": f"{origin}/",
+            "user-agent": fingerprint["user_agent"],
+        }
+        if session is not None:
+            response = session.post(
+                ADOBE_REFRESH_URL,
+                headers=headers,
+                data=form,
+                allow_redirects=False,
+            )
+        else:
+            response = requests.post(
+                ADOBE_REFRESH_URL,
+                headers=headers,
+                data=form,
+                timeout=60,
+                allow_redirects=False,
+            )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"refresh request failed: {response.status_code} {response.text[:200]}"
+            )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError("refresh response is not valid json") from exc
+        if not isinstance(payload, dict) or not str(payload.get("access_token") or "").strip():
+            raise RuntimeError("refresh response missing access_token")
+        return payload
+
+    try:
+        express = exchange(
+            {
+                "client_id": ADOBE_EXPRESS_CLIENT_ID,
+                "guest_allowed": "true",
+                "scope": ADOBE_EXPRESS_SCOPE,
+            },
+            "https://new.express.adobe.com",
+        )
+        selected = express
+        used_clio = False
+        account_id = str(
+            _decode_jwt_payload(str(express.get("access_token") or "")).get("user_id")
+            or _decode_jwt_payload(str(express.get("access_token") or "")).get("aa_id")
+            or _decode_jwt_payload(str(express.get("access_token") or "")).get("sub")
+            or ""
+        ).strip()
+        if account_id:
+            try:
+                selected = exchange(
+                    {
+                        "client_id": ADOBE_CLIO_CLIENT_ID,
+                        "scope": ADOBE_CLIO_SCOPE,
+                        "user_id": account_id,
+                    },
+                    "https://firefly.adobe.com",
+                )
+                used_clio = True
+            except Exception as exc:
+                logger.warning("Adobe Clio token exchange failed; using Express token: %s", exc)
+        return {
+            "access_token": str(selected.get("access_token") or "").strip(),
+            "expires_in": selected.get("expires_in"),
+            "raw": selected,
+            "express_raw": express,
+            "used_clio": used_clio,
+        }
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
+def fetch_adobe_account_profile(access_token: str) -> dict[str, Any]:
+    token = str(access_token or "").strip()
+    if not token:
+        return {}
+
+    fingerprint = _select_adobe_fingerprint()
+    session = None
+    if CurlSession is not None:
+        session = CurlSession(
+            impersonate=fingerprint["impersonate"],
+            timeout=60,
+        )
+    headers = {
+        "authorization": f"Bearer {token}",
+        "accept": "application/json",
+        "user-agent": fingerprint["user_agent"],
+    }
+    try:
+        for url in ADOBE_PROFILE_URLS:
+            try:
+                if session is not None:
+                    response = session.get(
+                        url,
+                        headers=headers,
+                        allow_redirects=False,
+                    )
+                else:
+                    response = requests.get(
+                        url,
+                        headers=headers,
+                        timeout=60,
+                        allow_redirects=False,
+                    )
+            except Exception:
+                continue
+            if response.status_code != 200:
+                continue
+            try:
+                payload = response.json()
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            display_name = str(
+                payload.get("displayName")
+                or payload.get("name")
+                or payload.get("fullName")
+                or ""
+            ).strip()
+            email = str(payload.get("email") or "").strip()
+            user_id = str(
+                payload.get("userId") or payload.get("authId") or ""
+            ).strip()
+            if display_name or email or user_id:
+                return {
+                    "display_name": display_name,
+                    "email": email,
+                    "user_id": user_id,
+                    "source": "ims_profile_v1",
+                    "updated_at": int(time.time()),
+                }
+        return {}
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
+def fetch_adobe_credits_balance(
+    access_token: str, account_id: str, *, proxy: str = ""
+) -> dict[str, Any]:
+    token = str(access_token or "").strip()
+    aid = str(account_id or "").strip()
+    unknown = {
+        "total": None,
+        "used": None,
+        "available": None,
+        "available_until": None,
+        "plan": "",
+        "unknown": True,
+        "updated_at": int(time.time()),
+    }
+    if not token:
+        return {**unknown, "error": "empty token"}
+    if not aid:
+        return {**unknown, "error": "no account id"}
+
+    fingerprint = _select_adobe_fingerprint()
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    session = None
+    if CurlSession is not None:
+        kwargs: dict[str, Any] = {
+            "impersonate": fingerprint["impersonate"],
+            "timeout": 60,
+        }
+        if proxies:
+            kwargs["proxies"] = proxies
+        session = CurlSession(**kwargs)
+    headers = {
+        "authorization": f"Bearer {token}",
+        "x-api-key": ADOBE_CREDITS_API_KEY,
+        "x-account-id": aid,
+        "accept": "application/json",
+        "content-type": "application/json",
+        "user-agent": fingerprint["user_agent"],
+    }
+    try:
+        try:
+            if session is not None:
+                response = session.get(
+                    ADOBE_CREDITS_URL,
+                    headers=headers,
+                    allow_redirects=False,
+                )
+            else:
+                response = requests.get(
+                    ADOBE_CREDITS_URL,
+                    headers=headers,
+                    timeout=60,
+                    proxies=proxies,
+                    allow_redirects=False,
+                )
+        except Exception as exc:
+            return {**unknown, "error": f"network: {exc}"}
+        if response.status_code == 401:
+            raise AuthError(
+                "Adobe credits auth failed",
+                status_code=401,
+                error_type="auth",
+            )
+        if response.status_code != 200:
+            return {
+                **unknown,
+                "error": f"http {response.status_code}: {response.text[:160]}",
+            }
+        try:
+            payload = response.json()
+        except Exception:
+            return {**unknown, "error": "non-json"}
+        total_info = payload.get("total", {}) if isinstance(payload, dict) else {}
+        quota = total_info.get("quota", {}) if isinstance(total_info, dict) else {}
+        return {
+            "total": quota.get("total"),
+            "used": quota.get("used"),
+            "available": quota.get("available"),
+            "available_until": total_info.get("availableUntil"),
+            "plan": total_info.get("planCap"),
+            "unknown": False,
+            "error": None,
+            "updated_at": int(time.time()),
+        }
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 _generated_arp_cache_lock = threading.Lock()
 _generated_arp_cache: dict[str, tuple[str, float]] = {}
@@ -85,10 +461,10 @@ def _build_submit_nonce(token: str, prompt: str) -> str:
         or claims.get("sub")
         or ""
     ).strip()
-    prompt_prefix = str(prompt or "")[:256]
-    if not user_id or not prompt_prefix:
+    prompt_bytes = str(prompt or "").strip().encode("utf-8")[:256]
+    if not user_id or not prompt_bytes:
         return ""
-    nonce_input = f"{user_id}-{prompt_prefix}".encode("utf-8")
+    nonce_input = user_id.encode("utf-8") + b"-" + prompt_bytes
     return hashlib.sha256(nonce_input).hexdigest()
 
 
@@ -116,6 +492,47 @@ def _build_arp_session_id() -> str:
     )
     raw = json.dumps(
         {"sid": str(uuid.uuid4()), "ark": ark, "ftr": ftr},
+        separators=(",", ":"),
+    )
+    return base64.b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+_remote_arp_pid_lock = threading.Lock()
+_remote_arp_token_pid: dict[str, int] = {}
+_remote_arp_used_pids: set[int] = set()
+
+
+def _remote_arp_pid(token: str) -> int:
+    key = str(token or "").strip() or "default"
+    with _remote_arp_pid_lock:
+        if key in _remote_arp_token_pid:
+            return _remote_arp_token_pid[key]
+        while True:
+            pid = 1000 + secrets.randbelow(99000)
+            if pid not in _remote_arp_used_pids:
+                _remote_arp_used_pids.add(pid)
+                _remote_arp_token_pid[key] = pid
+                return pid
+
+
+def _build_remote_arp_session_id(token: str) -> str:
+    now_ms = int(time.time() * 1000)
+    ark = (
+        f"{os.urandom(9).hex()[:17]}.{1000000000 + secrets.randbelow(9000000000)}"
+        "|r=ap-southeast-1|meta=3|metabgclr=transparent"
+        "|metaiconclr=%23757575|guitextcolor=%23000000"
+        "|pk=BBCC314C-4937-4CCD-B0A3-FDF0F0F7603C|at=40|sup=1"
+        f"|rid={1 + secrets.randbelow(99)}|ag=101"
+        "|cdn_url=https%3A%2F%2Farks-client.adobe.com%2Fcdn%2Ffc"
+        "|surl=https%3A%2F%2Farks-client.adobe.com"
+        "|smurl=https%3A%2F%2Farks-client.adobe.com%2Fcdn%2Ffc%2Fassets%2Fstyle-manager"
+    )
+    ftr = (
+        f"{os.urandom(16).hex()}_{now_ms}_{_remote_arp_pid(token)}"
+        "_UDF43-m4_31ck__tt"
+    )
+    raw = json.dumps(
+        {"ark": ark, "ftr": ftr, "sid": str(uuid.uuid4())},
         separators=(",", ":"),
     )
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
@@ -169,6 +586,35 @@ def _configured_arp_session_id() -> str:
         or config_manager.get("firefly_x_arp_session_id", "")
         or ""
     ).strip()
+
+
+def _preferred_arp_region() -> str:
+    return str(os.getenv("ADOBE_FIREFLY_ARP_REGION") or "ap-southeast-1").strip()
+
+
+def _normalize_arp_session_region(value: str, region: Optional[str] = None) -> str:
+    raw_value = str(value or "").strip()
+    target_region = str(region if region is not None else _preferred_arp_region()).strip()
+    if not raw_value or not target_region:
+        return raw_value
+    try:
+        padding = (-len(raw_value)) % 4
+        decoded = base64.b64decode((raw_value + ("=" * padding)).encode("ascii"))
+        data = json.loads(decoded.decode("utf-8"))
+        if not isinstance(data, dict):
+            return raw_value
+        ark = str(data.get("ark") or "")
+        marker = "|r="
+        if marker not in ark:
+            return raw_value
+        prefix, tail = ark.split(marker, 1)
+        _, sep, suffix = tail.partition("|")
+        data["ark"] = f"{prefix}{marker}{target_region}{sep}{suffix}"
+        return base64.b64encode(
+            json.dumps(data, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+    except Exception:
+        return raw_value
 
 
 def _looks_like_firefly_arp_session_id(value: str) -> bool:
@@ -306,6 +752,9 @@ class AdobeClient:
     submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-images/generate-async"
     video_submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async"
     upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/image"
+    upload_video_url = "https://firefly-3p.ff.adobe.io/v2/storage/video"
+    upload_audio_url = "https://firefly-3p.ff.adobe.io/v2/storage/audio"
+    firefly_video_upload_url = "https://video-v1.ff.adobe.io/v2/storage/image"
     select_subject_url = "https://di-imaging.ff.adobe.io/v1/masking/select-subject"
     entity_api_base = "https://firefly-entity.adobe.io/api/entities/"
     platform_cs_index_url = "https://platform-cs-edge.adobe.io/index"
@@ -329,6 +778,7 @@ class AdobeClient:
         self.sec_ch_ua = (
             '"Not=A?Brand";v="99", "Microsoft Edge";v="151", "Chromium";v="151"'
         )
+        self._fingerprint_local = threading.local()
 
         self.apply_config(config_manager.get_all())
 
@@ -477,6 +927,12 @@ class AdobeClient:
         if not self.retry_enabled:
             return False
         if isinstance(exc, UpstreamTemporaryError):
+            if exc.error_type in {
+                "adobe_temporary",
+                "adobe_dead_upstream",
+                "adobe_download",
+            }:
+                return True
             if exc.status_code is not None:
                 try:
                     return int(exc.status_code) in set(self.retry_on_status_codes)
@@ -650,53 +1106,151 @@ class AdobeClient:
             return "connection"
         return "network"
 
-    def _requests_proxies(self) -> Optional[dict]:
-        if not self.proxy:
+    def _requests_proxies(self, *, use_proxy: bool = True) -> Optional[dict]:
+        if not use_proxy or not self.proxy:
             return None
         return {"http": self.proxy, "https": self.proxy}
 
-    def _session(self):
+    def _session(
+        self, *, use_proxy: bool = True, headers: Optional[dict] = None
+    ):
+        borrowed = getattr(self._fingerprint_local, "session_override", None)
+        if borrowed is not None:
+            return _BorrowedSession(borrowed)
         if CurlSession is None:
             return None
-        kwargs = {"impersonate": self.impersonate, "timeout": 60}
-        if self.proxy:
+        fingerprint = getattr(self._fingerprint_local, "current", None)
+        user_agent = str((headers or {}).get("user-agent") or (headers or {}).get("User-Agent") or "")
+        if user_agent and "Edg/" not in user_agent:
+            for candidate in _ADOBE_FINGERPRINTS:
+                if f"Chrome/{candidate['major']}." in user_agent:
+                    fingerprint = candidate
+                    break
+        impersonate = (
+            str(fingerprint.get("impersonate") or "")
+            if isinstance(fingerprint, dict)
+            else ""
+        )
+        kwargs = {"impersonate": impersonate or self.impersonate, "timeout": 60}
+        if use_proxy and self.proxy:
             kwargs["proxies"] = {"http": self.proxy, "https": self.proxy}
         return CurlSession(**kwargs)
 
-    def _browser_headers(self) -> dict:
+    def _new_remote_adobe_session(
+        self,
+        fingerprint: dict[str, Any],
+        *,
+        use_proxy: bool,
+    ) -> Any:
+        if CurlSession is None:
+            return None
+        kwargs: dict[str, Any] = {
+            "impersonate": str(fingerprint.get("impersonate") or self.impersonate),
+            "timeout": 60,
+        }
+        if use_proxy and self.proxy:
+            kwargs["proxies"] = {"http": self.proxy, "https": self.proxy}
+        return CurlSession(**kwargs)
+
+    def _set_session_override(self, session: Any) -> None:
+        self._fingerprint_local.session_override = session
+
+    def _clear_session_override(self) -> None:
+        self._fingerprint_local.session_override = None
+
+    def _browser_headers(
+        self,
+        *,
+        remote_profile: bool = False,
+        fingerprint: Optional[dict[str, Any]] = None,
+    ) -> dict:
+        if remote_profile:
+            fingerprint = fingerprint or _select_adobe_fingerprint()
+            self._fingerprint_local.current = fingerprint
+        else:
+            self._fingerprint_local.current = None
         return {
-            "user-agent": self.user_agent,
+            "user-agent": (
+                fingerprint["user_agent"] if fingerprint else self.user_agent
+            ),
             "origin": "https://new.express.adobe.com",
             "referer": "https://new.express.adobe.com/",
             "accept-language": "en-US,en;q=0.9",
-            "sec-ch-ua": self.sec_ch_ua,
+            "sec-ch-ua": fingerprint["sec_ch_ua"] if fingerprint else self.sec_ch_ua,
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-platform": (
+                fingerprint["platform"] if fingerprint else '"Windows"'
+            ),
             "sec-fetch-site": "cross-site",
             "sec-fetch-mode": "cors",
             "sec-fetch-dest": "empty",
         }
 
-    def _submit_headers(self, token: str, prompt: str = "") -> dict:
-        headers = self._browser_headers()
-        headers.update(
-            {
-                "origin": "https://firefly.adobe.com",
-                "referer": "https://firefly.adobe.com/",
-                "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    def _submit_headers(
+        self,
+        token: str,
+        prompt: str = "",
+        *,
+        protocol_profile: str = "",
+        fingerprint: Optional[dict[str, Any]] = None,
+    ) -> dict:
+        is_remote = protocol_profile == "remote_adobe"
+        if is_remote:
+            fingerprint = fingerprint or _select_adobe_fingerprint()
+            self._fingerprint_local.current = fingerprint
+            arp_session_id = _build_remote_arp_session_id(token)
+            headers = {
+                "authorization": f"Bearer {token}",
+                "x-api-key": ADOBE_EXPRESS_CLIENT_ID,
+                "x-arp-session-id": arp_session_id,
+                "content-type": "application/json",
+                "accept": "*/*",
+                "origin": "https://new.express.adobe.com",
+                "referer": "https://new.express.adobe.com/",
+                "accept-language": "en-US,en;q=0.9",
+                "sec-ch-ua": fingerprint["sec_ch_ua"],
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": fingerprint["platform"],
+                "sec-fetch-site": "cross-site",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-dest": "empty",
+                "user-agent": fingerprint["user_agent"],
             }
+            nonce = _build_submit_nonce(token, prompt)
+            if nonce:
+                headers["x-nonce"] = nonce
+            return headers
+
+        headers = self._browser_headers(
+            remote_profile=is_remote,
+            fingerprint=fingerprint,
         )
+        if not is_remote:
+            headers.update(
+                {
+                    "origin": "https://firefly.adobe.com",
+                    "referer": "https://firefly.adobe.com/",
+                    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+                }
+            )
         headers.update(
             {
                 "Authorization": f"Bearer {token}",
-                "x-api-key": self.api_key,
+                "x-api-key": (
+                    ADOBE_EXPRESS_CLIENT_ID if is_remote else self.api_key
+                ),
                 "content-type": "application/json",
                 "accept": "*/*",
-                "cache-control": "no-cache",
-                "pragma": "no-cache",
-                "priority": "u=1, i",
             }
         )
+        if not is_remote:
+            headers.update(
+                {
+                    "cache-control": "no-cache",
+                    "pragma": "no-cache",
+                    "priority": "u=1, i",
+                }
+            )
         nonce = _build_submit_nonce(token, prompt)
         if nonce:
             headers["x-nonce"] = nonce
@@ -705,6 +1259,7 @@ class AdobeClient:
             or _configured_arp_session_id()
             or _generated_arp_session_id_for_token(token)
         )
+        arp_session_id = _normalize_arp_session_region(arp_session_id)
         if _looks_like_firefly_arp_session_id(arp_session_id):
             headers["x-arp-session-id"] = arp_session_id
         return headers
@@ -729,7 +1284,23 @@ class AdobeClient:
         )
         return headers
 
-    def _poll_headers(self, token: str) -> dict:
+    def _poll_headers(
+        self,
+        token: str,
+        *,
+        protocol_profile: str = "",
+        fingerprint: Optional[dict[str, Any]] = None,
+    ) -> dict:
+        if protocol_profile == "remote_adobe":
+            fingerprint = fingerprint or _select_adobe_fingerprint()
+            self._fingerprint_local.current = fingerprint
+            return {
+                "authorization": f"Bearer {token}",
+                "accept": "*/*",
+                "origin": "https://new.express.adobe.com",
+                "referer": "https://new.express.adobe.com/",
+                "user-agent": fingerprint["user_agent"],
+            }
         return {
             "Authorization": f"Bearer {token}",
             "accept": "*/*",
@@ -774,14 +1345,17 @@ class AdobeClient:
         payload: dict,
         *,
         legacy_451_fallback: bool = True,
+        go_json: bool = False,
     ):
-        session = self._session()
+        session = self._session(headers=headers)
+        encoded_payload = _go_json_bytes(payload) if go_json else None
         if session is None:
             try:
                 return requests.post(
                     url,
                     headers=headers,
-                    json=payload,
+                    json=None if go_json else payload,
+                    data=encoded_payload,
                     timeout=60,
                     proxies=self._requests_proxies(),
                 )
@@ -803,7 +1377,10 @@ class AdobeClient:
                 )
         try:
             with session:
-                resp = session.post(url, headers=headers, json=payload)
+                if go_json:
+                    resp = session.post(url, headers=headers, data=encoded_payload)
+                else:
+                    resp = session.post(url, headers=headers, json=payload)
         except Exception as exc:
             raise UpstreamTemporaryError(
                 f"upstream session error: {exc}",
@@ -866,7 +1443,9 @@ class AdobeClient:
                 f"upstream request error: {exc}", error_type="network"
             ) from exc
 
-    def _post_image_json(self, url: str, headers: dict, payload: dict):
+    def _post_image_json(
+        self, url: str, headers: dict, payload: dict, *, strict_transport: bool = False
+    ):
         primary_response = None
         primary_error: Optional[Exception] = None
         try:
@@ -875,11 +1454,15 @@ class AdobeClient:
                 headers,
                 payload,
                 legacy_451_fallback=False,
+                go_json=strict_transport,
             )
         except ContentPolicyError:
             raise
         except Exception as exc:
             primary_error = exc
+
+        if strict_transport and primary_response is not None:
+            return primary_response
 
         if primary_response is not None:
             self._raise_if_image_unsafe(primary_response, param="prompt")
@@ -898,6 +1481,15 @@ class AdobeClient:
                 ):
                     return primary_response
 
+        if strict_transport:
+            if primary_response is not None:
+                return primary_response
+            if primary_error is not None:
+                raise primary_error
+            raise UpstreamTemporaryError(
+                "upstream session returned no response", error_type="network"
+            )
+
         logger.warning(
             "image submit primary transport failed; retrying with requests status=%s error=%s",
             getattr(primary_response, "status_code", None),
@@ -907,8 +1499,10 @@ class AdobeClient:
         self._raise_if_image_unsafe(fallback_response, param="prompt")
         return fallback_response
 
-    def _post_bytes(self, url: str, headers: dict, payload: bytes):
-        session = self._session()
+    def _post_bytes(
+        self, url: str, headers: dict, payload: bytes, *, use_proxy: bool = True
+    ):
+        session = self._session(use_proxy=use_proxy, headers=headers)
         if session is None:
             try:
                 return requests.post(
@@ -916,7 +1510,7 @@ class AdobeClient:
                     headers=headers,
                     data=payload,
                     timeout=60,
-                    proxies=self._requests_proxies(),
+                    proxies=self._requests_proxies(use_proxy=use_proxy),
                 )
             except requests.Timeout as exc:
                 raise UpstreamTemporaryError(
@@ -981,15 +1575,17 @@ class AdobeClient:
             )
         return resp
 
-    def _get(self, url: str, headers: dict, timeout: int = 60):
-        session = self._session()
+    def _get(
+        self, url: str, headers: dict, timeout: int = 60, *, use_proxy: bool = True
+    ):
+        session = self._session(use_proxy=use_proxy, headers=headers)
         if session is None:
             try:
                 return requests.get(
                     url,
                     headers=headers,
                     timeout=timeout,
-                    proxies=self._requests_proxies(),
+                    proxies=self._requests_proxies(use_proxy=use_proxy),
                 )
             except requests.Timeout as exc:
                 raise UpstreamTemporaryError(
@@ -1079,6 +1675,7 @@ class AdobeClient:
         out_path: Path,
         timeout: int = 60,
         chunk_size: int = 1024 * 1024,
+        use_proxy: bool = True,
     ) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         total = 0
@@ -1087,7 +1684,7 @@ class AdobeClient:
                 url,
                 headers=headers or {},
                 timeout=timeout,
-                proxies=self._requests_proxies(),
+                proxies=self._requests_proxies(use_proxy=use_proxy),
                 stream=True,
             ) as resp:
                 resp.raise_for_status()
@@ -1153,11 +1750,20 @@ class AdobeClient:
         token: str,
         *,
         io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
+        protocol_profile: str = "",
+        fingerprint: Optional[dict[str, Any]] = None,
     ) -> str:
         resp = self._run_image_io(
             io_call,
             lambda: self._get(
-                poll_url, headers=self._poll_headers(token), timeout=60
+                poll_url,
+                headers=self._poll_headers(
+                    token,
+                    protocol_profile=protocol_profile,
+                    fingerprint=fingerprint,
+                ),
+                timeout=60,
+                use_proxy=(protocol_profile != "remote_adobe"),
             ),
         )
         self._raise_if_image_unsafe(resp, param="prompt")
@@ -1186,9 +1792,80 @@ class AdobeClient:
         cancel_check: Optional[Callable[[], None]],
         io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
         wait_cb: Optional[Callable[[float], None]] = None,
+        protocol_profile: str = "",
+        fingerprint: Optional[dict[str, Any]] = None,
+        session: Any = None,
     ) -> Optional[bytes]:
+        if protocol_profile == "remote_adobe":
+            download_fingerprint = fingerprint or _select_adobe_fingerprint()
+            self._fingerprint_local.current = download_fingerprint
+            headers = {
+                "accept": "*/*",
+                "user-agent": download_fingerprint["user_agent"],
+            }
+            deadline = time.monotonic() + 180.0
+            last_error: Optional[Exception] = None
+            waits = (0.0, 1.0, 2.0, 5.0, 10.0)
+            for attempt, delay in enumerate(waits, start=1):
+                if delay:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(delay, remaining))
+                if time.monotonic() >= deadline:
+                    break
+                response = None
+                try:
+                    self._set_session_override(session)
+                    response = self._run_image_io(
+                        io_call,
+                        lambda: self._get(
+                            image_url,
+                            headers=headers,
+                            timeout=max(
+                                1,
+                                min(60, int(deadline - time.monotonic())),
+                            ),
+                            use_proxy=False,
+                        ),
+                    )
+                except UpstreamTemporaryError as exc:
+                    last_error = exc
+                    continue
+                finally:
+                    self._clear_session_override()
+                status_code = int(getattr(response, "status_code", 0) or 0)
+                if status_code != 200:
+                    last_error = AdobeRequestError(
+                        f"adobe download failed: {status_code} {response.text[:200]}",
+                        status_code=status_code,
+                        error_type="download",
+                    )
+                    if status_code >= 500:
+                        continue
+                    raise last_error
+                image_bytes = bytes(response.content or b"")
+                if out_path is not None:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_bytes(image_bytes)
+                    return None
+                return image_bytes
+            raise UpstreamTemporaryError(
+                f"download failed after {len(waits)} attempts: {last_error}",
+                status_code=502,
+                error_type="adobe_download",
+            )
+
+        download_fingerprint = None
+        if protocol_profile == "remote_adobe":
+            download_fingerprint = fingerprint or _select_adobe_fingerprint()
+            self._fingerprint_local.current = download_fingerprint
         attempts = self._image_download_attempts()
-        delays = (1.0, 2.0, 4.0, 8.0)
+        delays = (
+            (1.0, 2.0, 5.0, 10.0)
+            if protocol_profile == "remote_adobe"
+            else (1.0, 2.0, 4.0, 8.0)
+        )
         current_url = str(image_url or "")
         last_error: Optional[Exception] = None
         part_path = out_path.with_name(f"{out_path.name}.part") if out_path else None
@@ -1206,6 +1883,8 @@ class AdobeClient:
                     }
                 )
             download_headers = {"accept": "*/*"}
+            if download_fingerprint is not None:
+                download_headers["user-agent"] = download_fingerprint["user_agent"]
             download_stage_id = None
             if trace is not None:
                 download_stage_id = trace.start_stage(
@@ -1224,14 +1903,24 @@ class AdobeClient:
             try:
                 if part_path is not None:
                     part_path.unlink(missing_ok=True)
-                    downloaded_size = self._run_image_io(
-                        io_call,
-                        lambda: self._download_to_file(
+                    if protocol_profile == "remote_adobe":
+                        download_file = lambda: self._download_to_file(
+                            current_url,
+                            headers=download_headers,
+                            out_path=part_path,
+                            timeout=(60 if protocol_profile == "remote_adobe" else 30),
+                            use_proxy=False,
+                        )
+                    else:
+                        download_file = lambda: self._download_to_file(
                             current_url,
                             headers=download_headers,
                             out_path=part_path,
                             timeout=30,
-                        ),
+                        )
+                    downloaded_size = self._run_image_io(
+                        io_call,
+                        download_file,
                     )
                     self._validate_downloaded_image(image_path=part_path)
                     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1252,7 +1941,10 @@ class AdobeClient:
                 response = self._run_image_io(
                     io_call,
                     lambda: self._get(
-                        current_url, headers=download_headers, timeout=30
+                        current_url,
+                        headers=download_headers,
+                        timeout=(60 if protocol_profile == "remote_adobe" else 30),
+                        use_proxy=(protocol_profile != "remote_adobe"),
                     ),
                 )
                 response.raise_for_status()
@@ -1317,7 +2009,11 @@ class AdobeClient:
                 if should_refresh_url:
                     try:
                         refreshed_url = self._refresh_image_result_url(
-                            poll_url, token, io_call=io_call
+                            poll_url,
+                            token,
+                            io_call=io_call,
+                            protocol_profile=protocol_profile,
+                            fingerprint=download_fingerprint,
                         )
                         if refreshed_url:
                             current_url = refreshed_url
@@ -1350,15 +2046,123 @@ class AdobeClient:
         cancel_check: Optional[Callable[[], None]] = None,
         io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
         wait_cb: Optional[Callable[[float], None]] = None,
+        protocol_profile: str = "",
+        engine: str = "",
     ) -> str:
         if not image_bytes:
             raise AdobeRequestError("image is empty")
 
+        if protocol_profile == "remote_adobe":
+            endpoint = self.upload_url
+            if str(engine or "").strip() == "firefly-video":
+                endpoint = self.firefly_video_upload_url
+            elif str(mime_type or "").lower().startswith("video/"):
+                endpoint = self.upload_video_url
+            elif str(mime_type or "").lower().startswith("audio/"):
+                endpoint = self.upload_audio_url
+
+            last_error: Optional[Exception] = None
+            last_response = None
+            for attempt in range(6):
+                if cancel_check is not None:
+                    cancel_check()
+                fingerprint = _select_adobe_fingerprint()
+                self._fingerprint_local.current = fingerprint
+                upload_session = self._new_remote_adobe_session(
+                    fingerprint,
+                    use_proxy=False,
+                )
+                headers = {
+                    "authorization": f"Bearer {token}",
+                    "x-api-key": ADOBE_EXPRESS_CLIENT_ID,
+                    "content-type": mime_type or "image/png",
+                    "accept": "*/*",
+                    "user-agent": fingerprint["user_agent"],
+                }
+                try:
+                    self._set_session_override(upload_session)
+                    last_response = self._run_image_io(
+                        io_call,
+                        lambda: self._post_bytes(
+                            endpoint,
+                            headers=headers,
+                            payload=image_bytes,
+                            use_proxy=False,
+                        ),
+                    )
+                except UpstreamTemporaryError as exc:
+                    last_error = exc
+                    if attempt < 5:
+                        continue
+                    raise AdobeRequestError(f"adobe upload request: {exc}") from exc
+                finally:
+                    self._clear_session_override()
+                    if upload_session is not None:
+                        upload_session.close()
+
+                status_code = int(last_response.status_code or 0)
+                if status_code in (401, 403):
+                    raise AuthError(
+                        f"Adobe upload auth failed: {status_code} "
+                        f"{last_response.headers.get('x-access-error') or ''} "
+                        f"{last_response.text[:300]}",
+                        status_code=status_code,
+                        error_type="auth",
+                    )
+                if status_code == 429:
+                    raise SubmitRateLimitedError()
+                if status_code == 451 or status_code >= 500:
+                    last_error = AdobeRequestError(
+                        f"adobe upload failed: {status_code} {last_response.text[:300]}",
+                        status_code=status_code,
+                        error_type="status",
+                    )
+                    if attempt < 5:
+                        continue
+                    raise last_error
+                if status_code != 200:
+                    raise AdobeRequestError(
+                        f"adobe upload failed: {status_code} {last_response.text[:300]}",
+                        status_code=status_code,
+                        error_type="status",
+                    )
+
+                try:
+                    data = last_response.json()
+                except Exception as exc:
+                    raise AdobeRequestError("adobe upload bad response") from exc
+                image_id = str(data.get("id") or "").strip()
+                if not image_id:
+                    for key in (
+                        "images",
+                        "videos",
+                        "audios",
+                        "audio",
+                        "assets",
+                        "files",
+                    ):
+                        items = data.get(key)
+                        if isinstance(items, list) and items and isinstance(items[0], dict):
+                            image_id = str(items[0].get("id") or "").strip()
+                            if image_id:
+                                break
+                if not image_id:
+                    raise AdobeRequestError(
+                        f"adobe upload missing blob id: {last_response.text[:300]}"
+                    )
+                return image_id
+
+            raise AdobeRequestError(f"adobe upload failed: {last_error}")
+
         headers = {
             "authorization": f"Bearer {token}",
-            "x-api-key": self.api_key,
+            "x-api-key": (
+                ADOBE_EXPRESS_CLIENT_ID
+                if protocol_profile == "remote_adobe"
+                else self.api_key
+            ),
             "content-type": mime_type,
-            "accept": "application/json",
+            "accept": "*/*" if protocol_profile == "remote_adobe" else "application/json",
         }
         trace_stage_id = None
         if trace is not None:
@@ -1390,11 +2194,18 @@ class AdobeClient:
         while True:
             if cancel_check is not None:
                 cancel_check()
+            if protocol_profile == "remote_adobe":
+                upload_fingerprint = _select_adobe_fingerprint()
+                self._fingerprint_local.current = upload_fingerprint
+                headers["user-agent"] = upload_fingerprint["user_agent"]
             try:
                 resp = self._run_image_io(
                     io_call,
                     lambda: self._post_bytes(
-                        self.upload_url, headers=headers, payload=image_bytes
+                        self.upload_url,
+                        headers=headers,
+                        payload=image_bytes,
+                        use_proxy=(protocol_profile != "remote_adobe"),
                     ),
                 )
             except UpstreamTemporaryError as exc:
@@ -2028,7 +2839,19 @@ class AdobeClient:
         seed: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
         requested_size: Optional[dict] = None,
+        protocol_profile: str = "",
     ) -> list[dict]:
+        if protocol_profile == "remote_adobe":
+            return build_remote_adobe_image_payload_candidates(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                output_resolution=output_resolution,
+                upstream_model_id=upstream_model_id,
+                upstream_model_version=upstream_model_version,
+                seed=seed,
+                source_image_ids=source_image_ids,
+                requested_size=requested_size,
+            )
         return build_image_payload_candidates(
             prompt=prompt,
             aspect_ratio=aspect_ratio,
@@ -2148,7 +2971,7 @@ class AdobeClient:
             return raw_url
         try:
             parsed = urlparse(raw_url)
-            host = parsed.netloc
+            host = str(parsed.hostname or "")
             path_parts = [p for p in parsed.path.split("/") if p]
             if not host or not path_parts:
                 return raw_url
@@ -2158,10 +2981,13 @@ class AdobeClient:
             if not job_id:
                 return raw_url
             host_suffix = host[len("firefly-epo") :].split(".", 1)[0]
-            shard = host_suffix[:4].strip()
+            shard = host_suffix.strip()
             if len(shard) != 4 or not shard.isdigit():
                 return raw_url
-            return f"https://bks-epo{shard}.adobe.io/v2/jobs/result/{job_id}?host={host}/"
+            return (
+                f"https://bks-epo{shard}.adobe.io/v2/jobs/result/{job_id}"
+                f"?host={parsed.netloc}/"
+            )
         except Exception:
             return raw_url
 
@@ -2180,7 +3006,7 @@ class AdobeClient:
     def _extract_result_link(submit_resp, submit_data: Any) -> str:
         poll_url = str(submit_resp.headers.get("x-override-status-link") or "").strip()
         if poll_url:
-            return poll_url
+            return AdobeClient._normalize_video_poll_url(poll_url)
 
         links = submit_data.get("links") if isinstance(submit_data, dict) else {}
         if not isinstance(links, dict):
@@ -2188,9 +3014,11 @@ class AdobeClient:
 
         result_link = links.get("result")
         if isinstance(result_link, str):
-            return result_link.strip()
+            return AdobeClient._normalize_video_poll_url(result_link.strip())
         if isinstance(result_link, dict):
-            return str(result_link.get("href") or "").strip()
+            return AdobeClient._normalize_video_poll_url(
+                str(result_link.get("href") or "").strip()
+            )
         return ""
 
     @staticmethod
@@ -2558,6 +3386,194 @@ class AdobeClient:
                 raise AdobeRequestError("video generation timed out")
             time.sleep(3.0)
 
+    @staticmethod
+    def _is_adobe_overload_text(value: Any) -> bool:
+        text = str(value or "").lower()
+        return "system under load" in text or "timeout_error" in text
+
+    @staticmethod
+    def _is_adobe_content_rejection(status_code: int, value: Any) -> bool:
+        if int(status_code or 0) != 451:
+            return False
+        text = str(value or "").lower()
+        return "unsafe" in text or "privacy_error" in text
+
+    def _submit_remote_adobe_image_job(
+        self,
+        *,
+        token: str,
+        prompt: str,
+        aspect_ratio: str,
+        output_resolution: str,
+        upstream_model_id: str,
+        upstream_model_version: str,
+        quality_level: Optional[str],
+        detail_level: Optional[int],
+        seed: Optional[int],
+        source_image_ids: Optional[list[str]],
+        requested_size: Optional[dict],
+        progress_cb: Optional[Callable[[dict], None]],
+        trace: Optional[RequestTrace],
+        trace_parent_id: Optional[str],
+        cancel_check: Optional[Callable[[], None]],
+    ) -> dict:
+        payload_candidates = self._build_payload_candidates(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            output_resolution=output_resolution,
+            upstream_model_id=upstream_model_id,
+            upstream_model_version=upstream_model_version,
+            quality_level=quality_level,
+            detail_level=detail_level,
+            seed=seed,
+            source_image_ids=source_image_ids,
+            requested_size=requested_size,
+            protocol_profile="remote_adobe",
+        )
+        submit_fingerprint = _select_adobe_fingerprint()
+        direct_fingerprint = _select_adobe_fingerprint()
+        submit_session = self._new_remote_adobe_session(
+            submit_fingerprint,
+            use_proxy=True,
+        )
+        direct_session = self._new_remote_adobe_session(
+            direct_fingerprint,
+            use_proxy=False,
+        )
+        last_error: Optional[Exception] = None
+
+        try:
+            for candidate_index, payload in enumerate(payload_candidates, start=1):
+                if cancel_check is not None:
+                    cancel_check()
+                if progress_cb is not None:
+                    progress_cb({"task_status": "SUBMITTING"})
+                headers = self._submit_headers(
+                    token,
+                    prompt=prompt,
+                    protocol_profile="remote_adobe",
+                    fingerprint=submit_fingerprint,
+                )
+                stage_id = None
+                if trace is not None:
+                    stage_id = trace.start_stage(
+                        layer="adobe",
+                        kind="submit",
+                        name="提交 Adobe 图片任务",
+                        parent_id=trace_parent_id,
+                        attempt={
+                            "candidate": candidate_index,
+                            "candidate_count": len(payload_candidates),
+                        },
+                        request={
+                            "method": "POST",
+                            "url": sanitize_url(self.submit_url),
+                            "headers": sanitize_headers(headers),
+                            "body": sanitize_trace_value(payload),
+                        },
+                    )
+                try:
+                    self._set_session_override(submit_session)
+                    response = self._post_image_json(
+                        self.submit_url,
+                        headers=headers,
+                        payload=payload,
+                        strict_transport=True,
+                    )
+                except UpstreamTemporaryError as exc:
+                    last_error = exc
+                    if trace is not None:
+                        trace.finish_stage(stage_id, status="failed", error=exc)
+                    continue
+                finally:
+                    self._clear_session_override()
+
+                body = str(getattr(response, "text", "") or "")
+                status_code = int(getattr(response, "status_code", 0) or 0)
+                if trace is not None:
+                    trace.finish_stage(
+                        stage_id,
+                        status="succeeded" if status_code == 200 else "failed",
+                        response=response_snapshot(response),
+                    )
+                if status_code in (401, 403):
+                    access_error = str(response.headers.get("x-access-error") or "")
+                    if access_error.lower() == "taste_exhausted":
+                        raise QuotaExhaustedError("Adobe quota exhausted for this account")
+                    raise AuthError(
+                        f"Adobe submit auth failed: {status_code} {access_error} {body[:300]}",
+                        status_code=status_code,
+                        error_type=(
+                            "user_not_entitled"
+                            if access_error.lower() == "user_not_entitled"
+                            else "auth"
+                        ),
+                    )
+                if self._is_adobe_overload_text(body):
+                    last_error = UpstreamTemporaryError(
+                        f"Adobe upstream temporary error: {body[:300]}",
+                        status_code=status_code or None,
+                        error_type="adobe_temporary",
+                    )
+                    continue
+                if self._is_adobe_content_rejection(status_code, body):
+                    raise ContentPolicyError(body, param="prompt")
+                if status_code == 429 or status_code == 451 or status_code >= 500:
+                    last_error = UpstreamTemporaryError(
+                        f"submit failed: {status_code} {body[:300]}",
+                        status_code=status_code,
+                        error_type="adobe_dead_upstream",
+                    )
+                    continue
+                if status_code != 200:
+                    last_error = AdobeRequestError(
+                        f"submit rejected: {status_code} {body[:300]}",
+                        status_code=status_code,
+                        error_type="status",
+                    )
+                    continue
+                try:
+                    submit_data = response.json()
+                except Exception:
+                    last_error = AdobeRequestError("submit response is not valid json")
+                    continue
+                poll_url = self._extract_result_link(response, submit_data)
+                if not poll_url:
+                    last_error = AdobeRequestError("submit ok but no poll url")
+                    continue
+                upstream_job_id = self._extract_job_id(poll_url)
+                if progress_cb is not None:
+                    progress_cb(
+                        {
+                            "task_status": "IN_PROGRESS",
+                            "task_progress": 0.0,
+                            "upstream_job_id": upstream_job_id,
+                            "retry_after": None,
+                        }
+                    )
+                return {
+                    "poll_url": poll_url,
+                    "upstream_job_id": upstream_job_id,
+                    "latest": submit_data,
+                    "submitted_at": time.time(),
+                    "sleep_time": 3.0,
+                    "protocol_profile": "remote_adobe",
+                    "direct_fingerprint": direct_fingerprint,
+                    "_direct_session": direct_session,
+                }
+
+            if last_error is not None:
+                raise last_error
+            raise AdobeRequestError("submit failed: no response")
+        except BaseException:
+            if direct_session is not None:
+                direct_session.close()
+            raise
+        finally:
+            self._clear_session_override()
+            if submit_session is not None:
+                submit_session.close()
+
     def submit_image_job(
         self,
         *,
@@ -2576,8 +3592,27 @@ class AdobeClient:
         trace: Optional[RequestTrace] = None,
         trace_parent_id: Optional[str] = None,
         cancel_check: Optional[Callable[[], None]] = None,
+        protocol_profile: str = "",
     ) -> dict:
         """Submit an image task and return poll metadata without entering poll wait."""
+        if protocol_profile == "remote_adobe":
+            return self._submit_remote_adobe_image_job(
+                token=token,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                output_resolution=output_resolution,
+                upstream_model_id=upstream_model_id,
+                upstream_model_version=upstream_model_version,
+                quality_level=quality_level,
+                detail_level=detail_level,
+                seed=seed,
+                source_image_ids=source_image_ids,
+                requested_size=requested_size,
+                progress_cb=progress_cb,
+                trace=trace,
+                trace_parent_id=trace_parent_id,
+                cancel_check=cancel_check,
+            )
         submit_resp = None
         first_error = ""
         first_error_status: Optional[int] = None
@@ -2592,9 +3627,12 @@ class AdobeClient:
             seed=seed,
             source_image_ids=source_image_ids,
             requested_size=requested_size,
+            protocol_profile=protocol_profile,
         )
         for candidate_index, payload in enumerate(payload_candidates, start=1):
-            submit_headers = self._submit_headers(token, prompt=prompt)
+            submit_headers = self._submit_headers(
+                token, prompt=prompt, protocol_profile=protocol_profile
+            )
             submit_stage_id = None
             if trace is not None:
                 submit_stage_id = trace.start_stage(
@@ -2637,6 +3675,7 @@ class AdobeClient:
                         self.submit_url,
                         headers=submit_headers,
                         payload=payload,
+                        strict_transport=(protocol_profile == "remote_adobe"),
                     )
                 except ContentPolicyError:
                     if trace is not None:
@@ -2708,7 +3747,9 @@ class AdobeClient:
                             details={"fallback": "auto_size_no_aspect_ratio"},
                         )
                     payload = self._auto_size_fallback_payload(payload)
-                    submit_headers = self._submit_headers(token, prompt=prompt)
+                    submit_headers = self._submit_headers(
+                        token, prompt=prompt, protocol_profile=protocol_profile
+                    )
                     continue
                 is_rate_limited = (
                     submit_resp.status_code == 429
@@ -2841,7 +3882,123 @@ class AdobeClient:
             "sleep_time": 3.0,
             "poll_network_started": None,
             "poll_retry_count": 0,
+            "protocol_profile": protocol_profile,
+            "direct_fingerprint": (
+                _select_adobe_fingerprint()
+                if protocol_profile == "remote_adobe"
+                else None
+            ),
         }
+
+    def _poll_remote_adobe_image_job_once(
+        self,
+        *,
+        token: str,
+        poll_url: str,
+        state: dict,
+        timeout: int,
+        progress_cb: Optional[Callable[[dict], None]],
+        trace: Optional[RequestTrace],
+        trace_parent_id: Optional[str],
+        cancel_check: Optional[Callable[[], None]],
+    ) -> dict:
+        if cancel_check is not None:
+            cancel_check()
+        submitted_at = float(state.get("submitted_at") or time.time())
+        if time.time() - submitted_at > timeout:
+            raise AdobeRequestError("generation timed out")
+        upstream_job_id = str(
+            state.get("upstream_job_id") or self._extract_job_id(poll_url)
+        )
+        fingerprint = state.get("direct_fingerprint")
+        if not isinstance(fingerprint, dict):
+            fingerprint = _select_adobe_fingerprint()
+            state["direct_fingerprint"] = fingerprint
+        headers = self._poll_headers(
+            token,
+            protocol_profile="remote_adobe",
+            fingerprint=fingerprint,
+        )
+        started = time.perf_counter()
+        try:
+            self._set_session_override(state.get("_direct_session"))
+            response = self._get(
+                poll_url,
+                headers=headers,
+                timeout=60,
+                use_proxy=False,
+            )
+        except UpstreamTemporaryError:
+            raise
+        finally:
+            self._clear_session_override()
+        snapshot = response_snapshot(response)
+        body = str(getattr(response, "text", "") or "")
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if trace is not None:
+            trace.record_poll(
+                parent_id=trace_parent_id,
+                status_key=str(status_code),
+                request={
+                    "method": "GET",
+                    "url": sanitize_url(poll_url),
+                    "headers": sanitize_headers(headers),
+                },
+                response=snapshot,
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                failed=status_code != 200,
+            )
+        if self._is_adobe_overload_text(body):
+            raise UpstreamTemporaryError(
+                f"Adobe upstream temporary error: {body[:300]}",
+                status_code=status_code or None,
+                error_type="adobe_temporary",
+            )
+        if self._is_adobe_content_rejection(status_code, body):
+            raise ContentPolicyError(body, param="prompt")
+        if status_code == 429 or status_code == 451 or status_code >= 500:
+            raise UpstreamTemporaryError(
+                f"poll failed: {status_code} {body[:300]}",
+                status_code=status_code,
+                error_type="adobe_dead_upstream",
+            )
+        if status_code != 200:
+            raise AdobeRequestError(
+                f"poll failed: {status_code} {body[:300]}",
+                status_code=status_code,
+                error_type="status",
+            )
+        try:
+            latest = response.json()
+        except Exception as exc:
+            raise AdobeRequestError("poll response is not valid json") from exc
+        state["latest"] = latest
+        outputs = latest.get("outputs") if isinstance(latest, dict) else None
+        if isinstance(outputs, list) and outputs:
+            first = outputs[0] if isinstance(outputs[0], dict) else {}
+            image = first.get("image") if isinstance(first.get("image"), dict) else {}
+            image_url = str(image.get("presignedUrl") or "").strip()
+            if image_url:
+                return {
+                    "status": "completed",
+                    "image_url": image_url,
+                    "latest": latest,
+                    "upstream_job_id": upstream_job_id,
+                }
+        status = str(latest.get("status") or "").strip().upper()
+        if status in {"FAILED", "CANCELLED", "ERROR"}:
+            raise AdobeRequestError(f"image job failed: {body[:300]}")
+        progress = self._extract_progress_percent(latest, response)
+        if progress_cb is not None:
+            progress_cb(
+                {
+                    "task_status": "WAITING_POLL",
+                    "task_progress": progress if progress is not None else 0.0,
+                    "upstream_job_id": upstream_job_id,
+                    "retry_after": 3,
+                }
+            )
+        return {"status": "pending", "retry_after": 3.0, "latest": latest}
 
     def poll_image_job_once(
         self,
@@ -2855,14 +4012,38 @@ class AdobeClient:
         trace_parent_id: Optional[str] = None,
         cancel_check: Optional[Callable[[], None]] = None,
     ) -> dict:
+        if str(state.get("protocol_profile") or "") == "remote_adobe":
+            return self._poll_remote_adobe_image_job_once(
+                token=token,
+                poll_url=poll_url,
+                state=state,
+                timeout=timeout,
+                progress_cb=progress_cb,
+                trace=trace,
+                trace_parent_id=trace_parent_id,
+                cancel_check=cancel_check,
+            )
         if cancel_check is not None:
             cancel_check()
         upstream_job_id = str(state.get("upstream_job_id") or self._extract_job_id(poll_url))
         started_at = float(state.get("submitted_at") or time.time())
-        poll_headers = self._poll_headers(token)
+        protocol_profile = str(state.get("protocol_profile") or "")
+        direct_fingerprint = state.get("direct_fingerprint")
+        poll_headers = self._poll_headers(
+            token,
+            protocol_profile=protocol_profile,
+            fingerprint=(
+                direct_fingerprint if isinstance(direct_fingerprint, dict) else None
+            ),
+        )
         poll_started = time.perf_counter()
         try:
-            poll_resp = self._get(poll_url, headers=poll_headers, timeout=60)
+            poll_resp = self._get(
+                poll_url,
+                headers=poll_headers,
+                timeout=60,
+                use_proxy=(protocol_profile != "remote_adobe"),
+            )
         except UpstreamTemporaryError as exc:
             if trace is not None:
                 trace.add_stage(
@@ -3072,6 +4253,9 @@ class AdobeClient:
         trace_parent_id: Optional[str],
         upstream_job_id: str,
         cancel_check: Optional[Callable[[], None]],
+        protocol_profile: str = "",
+        fingerprint: Optional[dict[str, Any]] = None,
+        session: Any = None,
     ) -> Optional[bytes]:
         return self._download_image_result(
             image_url=image_url,
@@ -3085,6 +4269,9 @@ class AdobeClient:
             cancel_check=cancel_check,
             io_call=None,
             wait_cb=None,
+            protocol_profile=protocol_profile,
+            fingerprint=fingerprint,
+            session=session,
         )
 
     def _generate_once(
@@ -3108,7 +4295,70 @@ class AdobeClient:
         cancel_check: Optional[Callable[[], None]] = None,
         io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
         wait_cb: Optional[Callable[[float], None]] = None,
+        protocol_profile: str = "",
+        download_result: bool = True,
     ) -> tuple[Optional[bytes], dict]:
+        if protocol_profile == "remote_adobe":
+            state = self.submit_image_job(
+                token=token,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                output_resolution=output_resolution,
+                upstream_model_id=upstream_model_id,
+                upstream_model_version=upstream_model_version,
+                quality_level=quality_level,
+                detail_level=detail_level,
+                seed=seed,
+                source_image_ids=source_image_ids,
+                requested_size=requested_size,
+                progress_cb=progress_cb,
+                trace=trace,
+                trace_parent_id=trace_parent_id,
+                cancel_check=cancel_check,
+                protocol_profile=protocol_profile,
+            )
+            while True:
+                result = self.poll_image_job_once(
+                    token=token,
+                    poll_url=str(state["poll_url"]),
+                    state=state,
+                    timeout=timeout,
+                    progress_cb=progress_cb,
+                    trace=trace,
+                    trace_parent_id=trace_parent_id,
+                    cancel_check=cancel_check,
+                )
+                if result.get("status") == "completed":
+                    latest = result.get("latest") or {}
+                    image_url = str(result.get("image_url") or "")
+                    latest["image_url"] = image_url
+                    if not download_result:
+                        direct_session = state.get("_direct_session")
+                        if direct_session is not None:
+                            direct_session.close()
+                        return None, latest
+                    data = self._download_image_result(
+                        image_url=image_url,
+                        poll_url=str(state["poll_url"]),
+                        token=token,
+                        out_path=out_path,
+                        progress_cb=progress_cb,
+                        trace=trace,
+                        trace_parent_id=trace_parent_id,
+                        upstream_job_id=str(state.get("upstream_job_id") or ""),
+                        cancel_check=cancel_check,
+                        io_call=io_call,
+                        wait_cb=wait_cb,
+                        protocol_profile=protocol_profile,
+                        fingerprint=state.get("direct_fingerprint"),
+                        session=state.get("_direct_session"),
+                    )
+                    direct_session = state.get("_direct_session")
+                    if direct_session is not None:
+                        direct_session.close()
+                    return data, latest
+                time.sleep(3.0)
+
         submit_resp = None
         first_error = ""
         first_error_status: Optional[int] = None
@@ -3123,9 +4373,12 @@ class AdobeClient:
             seed=seed,
             source_image_ids=source_image_ids,
             requested_size=requested_size,
+            protocol_profile=protocol_profile,
         )
         for candidate_index, payload in enumerate(payload_candidates, start=1):
-            submit_headers = self._submit_headers(token, prompt=prompt)
+            submit_headers = self._submit_headers(
+                token, prompt=prompt, protocol_profile=protocol_profile
+            )
             submit_stage_id = None
             if trace is not None:
                 submit_stage_id = trace.start_stage(
@@ -3171,6 +4424,7 @@ class AdobeClient:
                             self.submit_url,
                             headers=submit_headers,
                             payload=payload,
+                            strict_transport=(protocol_profile == "remote_adobe"),
                         ),
                     )
                 except ContentPolicyError:
@@ -3245,7 +4499,9 @@ class AdobeClient:
                             details={"fallback": "auto_size_no_aspect_ratio"},
                         )
                     payload = self._auto_size_fallback_payload(payload)
-                    submit_headers = self._submit_headers(token, prompt=prompt)
+                    submit_headers = self._submit_headers(
+                        token, prompt=prompt, protocol_profile=protocol_profile
+                    )
                     continue
                 is_rate_limited = (
                     submit_resp.status_code == 429
@@ -3393,16 +4649,28 @@ class AdobeClient:
         poll_rate_limit_started: Optional[float] = None
         poll_rate_limit_retry_used = False
         poll_retry_count = 0
+        direct_fingerprint = (
+            _select_adobe_fingerprint()
+            if protocol_profile == "remote_adobe"
+            else None
+        )
         while True:
             if cancel_check is not None:
                 cancel_check()
-            poll_headers = self._poll_headers(token)
+            poll_headers = self._poll_headers(
+                token,
+                protocol_profile=protocol_profile,
+                fingerprint=direct_fingerprint,
+            )
             poll_started = time.perf_counter()
             try:
                 poll_resp = self._run_image_io(
                     io_call,
                     lambda: self._get(
-                        poll_url, headers=poll_headers, timeout=60
+                        poll_url,
+                        headers=poll_headers,
+                        timeout=60,
+                        use_proxy=(protocol_profile != "remote_adobe"),
                     ),
                 )
             except UpstreamTemporaryError as exc:
@@ -3581,6 +4849,18 @@ class AdobeClient:
                 image_url = ((outputs[0] or {}).get("image") or {}).get("presignedUrl")
                 if not image_url:
                     raise AdobeRequestError("job finished without image url")
+                latest["image_url"] = image_url
+                if not download_result:
+                    if progress_cb:
+                        progress_cb(
+                            {
+                                "task_status": "COMPLETED",
+                                "task_progress": 100.0,
+                                "upstream_job_id": upstream_job_id,
+                                "retry_after": None,
+                            }
+                        )
+                    return None, latest
                 image_bytes = self._download_image_result(
                     image_url=image_url,
                     poll_url=poll_url,
@@ -3593,6 +4873,8 @@ class AdobeClient:
                     cancel_check=cancel_check,
                     io_call=io_call,
                     wait_cb=wait_cb,
+                    protocol_profile=protocol_profile,
+                    fingerprint=direct_fingerprint,
                 )
                 if progress_cb:
                     try:
@@ -3691,6 +4973,8 @@ class AdobeClient:
         cancel_check: Optional[Callable[[], None]] = None,
         io_call: Optional[Callable[[Callable[[], Any]], Any]] = None,
         wait_cb: Optional[Callable[[float], None]] = None,
+        protocol_profile: str = "",
+        download_result: bool = True,
     ) -> tuple[Optional[bytes], dict]:
         is_gpt_image = str(upstream_model_id or "").strip().lower() == "gpt-image"
         fixed_seed = (
@@ -3718,5 +5002,7 @@ class AdobeClient:
             cancel_check=cancel_check,
             io_call=io_call,
             wait_cb=wait_cb,
+            protocol_profile=protocol_profile,
+            download_result=download_result,
         )
 

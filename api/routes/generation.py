@@ -1072,6 +1072,7 @@ def build_generation_router(
         distributed_tokens: bool = False,
         result_cache: Optional[dict[int, dict]] = None,
         seed_cache: Optional[dict[int, int]] = None,
+        protocol_profile: str = "",
     ) -> list[dict]:
         source_image_ids = source_image_ids or []
         result_cache = result_cache if result_cache is not None else {}
@@ -1180,11 +1181,17 @@ def build_generation_router(
             if cached is not None:
                 return response_index, cached
 
+            transparent_background = bool(
+                getattr(image_options, "transparent_background", False)
+            )
+            no_store = (
+                protocol_profile == "remote_adobe" and not transparent_background
+            )
             job_id = uuid.uuid4().hex
-            out_path = generated_dir / f"{job_id}.png"
+            out_path = None if no_store else generated_dir / f"{job_id}.png"
             old_size = 0
             try:
-                if out_path.exists():
+                if out_path is not None and out_path.exists():
                     old_size = int(out_path.stat().st_size)
             except Exception:
                 old_size = 0
@@ -1237,6 +1244,12 @@ def build_generation_router(
                     requested_size=image_options.requested_size,
                     timeout=client.generate_timeout,
                     out_path=out_path,
+                    protocol_profile=protocol_profile,
+                    download_result=(
+                        image_options.response_format == "b64_json"
+                        or transparent_background
+                        or not no_store
+                    ),
                     progress_cb=lambda update: _image_progress_cb(
                         response_index, selected_token, update
                     ),
@@ -1258,11 +1271,15 @@ def build_generation_router(
                             queue_id, delay
                         ),
                     )
-                if getattr(image_options, "transparent_background", False):
+                if transparent_background:
                     source_bytes = (
                         image_bytes
                         if image_bytes is not None
-                        else (out_path.read_bytes() if out_path.exists() else b"")
+                        else (
+                            out_path.read_bytes()
+                            if out_path is not None and out_path.exists()
+                            else b""
+                        )
                     )
                     transparent_bytes, _mask_meta = client.make_transparent_subject(
                         selected_token,
@@ -1282,6 +1299,32 @@ def build_generation_router(
                         ),
                     )
                     image_bytes = transparent_bytes
+            if no_store:
+                image_url = str((_meta or {}).get("image_url") or "").strip()
+                if image_options.response_format == "url" and not image_url:
+                    raise AdobeRequestError("job finished without image url")
+                if image_options.response_format == "b64_json" and not image_bytes:
+                    raise AdobeRequestError("job finished without image bytes")
+                if image_url:
+                    set_request_preview(request, image_url, kind="image")
+                item = encode_image_response_item(
+                    image_bytes or b"",
+                    image_url=image_url,
+                    response_format=image_options.response_format,
+                    output_format=image_options.output_format,
+                    output_compression=image_options.output_compression,
+                )
+                with cache_lock:
+                    result_cache[response_index] = item
+                image_task_coordinator.update_output(
+                    queue_id,
+                    response_index,
+                    state="COMPLETED",
+                    token=selected_token,
+                )
+                return response_index, item
+
+            assert out_path is not None
             if image_bytes is not None:
                 out_path.write_bytes(image_bytes)
             new_size = int(out_path.stat().st_size) if out_path.exists() else 0
@@ -1459,6 +1502,7 @@ def build_generation_router(
         token: str,
         input_images: list[tuple[Any, str]],
         request: Request,
+        protocol_profile: str = "",
     ) -> list[str]:
         if not input_images:
             return []
@@ -1549,6 +1593,7 @@ def build_generation_router(
                         wait_cb=lambda delay: image_task_coordinator.wait(
                             queue_id, delay
                         ),
+                        protocol_profile=protocol_profile,
                     )
                 if not str(image_id or "").strip():
                     raise AdobeRequestError(
@@ -1996,6 +2041,7 @@ def build_generation_router(
                     image_options=image_options,
                     model_conf=model_conf,
                     distributed_tokens=True,
+                    protocol_profile="remote_adobe",
                 )
             )
             result = {
@@ -2656,6 +2702,7 @@ def build_generation_router(
                         token,
                         spooled_input_images,
                         request,
+                        protocol_profile="remote_adobe",
                     )
                 source_image_ids = list(source_image_ids_cache)
                 if len(source_image_ids) != len(input_images) or any(
@@ -2676,6 +2723,7 @@ def build_generation_router(
                         source_image_ids=ids,
                         result_cache=result_cache,
                         seed_cache=seed_cache,
+                        protocol_profile="remote_adobe",
                     )
 
                 response_items, source_image_ids = generate_with_reference_recovery(
@@ -2683,9 +2731,10 @@ def build_generation_router(
                     expected_image_count=len(spooled_input_images),
                     generate_with_ids=generate_with_ids,
                     reupload_all=lambda: _upload_edit_source_images(
-                            token,
-                            spooled_input_images,
-                            request,
+                        token,
+                        spooled_input_images,
+                        request,
+                        protocol_profile="remote_adobe",
                     ),
                     cancel_check=lambda: image_task_coordinator.raise_if_cancelled(
                         queue_id

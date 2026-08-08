@@ -9,6 +9,7 @@ from PIL import Image
 from fastapi.testclient import TestClient
 
 from api.routes.generation import generate_with_reference_recovery
+import core.adobe_client as adobe_client_module
 from core.adobe_client import (
     AdobeClient,
     AdobeRequestError,
@@ -22,6 +23,7 @@ from core.adobe_client import (
     UpstreamTemporaryError,
 )
 from core.image_queue import ImageTaskCancelled, ImageTaskCoordinator
+from core.image_engine import ImageGenerationEngine
 
 
 class FakeResponse:
@@ -34,6 +36,93 @@ class FakeResponse:
 
     def json(self):
         return self._body
+
+
+def test_async_engine_url_mode_finishes_without_download():
+    class FakeAdobeClient:
+        def submit_image_job(self, **kwargs):
+            assert kwargs["protocol_profile"] == "remote_adobe"
+            return {
+                "poll_url": "https://example.test/jobs/1",
+                "upstream_job_id": "1",
+                "submitted_at": time.time(),
+                "protocol_profile": kwargs["protocol_profile"],
+            }
+
+        def poll_image_job_once(self, **_kwargs):
+            return {
+                "status": "completed",
+                "image_url": "https://assets.example/result.png",
+                "latest": {"status": "SUCCEEDED"},
+            }
+
+        def download_image_result(self, **_kwargs):
+            pytest.fail("URL mode must finish before the download stage")
+
+    engine = ImageGenerationEngine()
+    image_bytes, meta = engine.generate(
+        FakeAdobeClient(),
+        token="TOKEN",
+        prompt="draw",
+        protocol_profile="remote_adobe",
+        download_result=False,
+    )
+
+    assert image_bytes is None
+    assert meta["image_url"] == "https://assets.example/result.png"
+
+
+def test_remote_upload_and_poll_bypass_configured_proxy(monkeypatch):
+    client = AdobeClient()
+    client.proxy = "http://proxy.test"
+    upload_calls = []
+    poll_calls = []
+
+    def post_bytes(url, headers, payload, *, use_proxy=True):
+        upload_calls.append((url, headers, payload, use_proxy))
+        return FakeResponse(200, {"images": [{"id": "REF"}]})
+
+    def get(url, headers, timeout=60, *, use_proxy=True):
+        poll_calls.append((url, headers, timeout, use_proxy))
+        return FakeResponse(
+            200,
+            {
+                "outputs": [
+                    {"image": {"presignedUrl": "https://assets.example/result.png"}}
+                ]
+            },
+        )
+
+    monkeypatch.setattr(client, "_post_bytes", post_bytes)
+    monkeypatch.setattr(client, "_get", get)
+
+    assert client.upload_image(
+        "TOKEN", b"image", protocol_profile="remote_adobe"
+    ) == "REF"
+    result = client.poll_image_job_once(
+        token="TOKEN",
+        poll_url="https://example.test/jobs/1",
+        state={
+            "upstream_job_id": "1",
+            "submitted_at": time.time(),
+            "protocol_profile": "remote_adobe",
+        },
+        timeout=30,
+    )
+
+    assert upload_calls[0][1]["x-api-key"] == "projectx_webapp"
+    assert upload_calls[0][1]["accept"] == "*/*"
+    assert upload_calls[0][3] is False
+    assert poll_calls[0][3] is False
+    assert set(poll_calls[0][1]) == {
+        "authorization",
+        "accept",
+        "origin",
+        "referer",
+        "user-agent",
+    }
+    assert poll_calls[0][1]["origin"] == "https://new.express.adobe.com"
+    assert result["image_url"] == "https://assets.example/result.png"
 
 
 def _submit_success(job_id="job-1"):
@@ -342,6 +431,107 @@ def test_images_endpoint_upscales_small_size_before_adobe_submit(monkeypatch):
 
     assert response.status_code == 200
     assert submitted_sizes == [{"width": 816, "height": 816}]
+
+
+def test_images_url_response_returns_presigned_url_without_download_path(monkeypatch):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    calls = []
+
+    def generate(**kwargs):
+        calls.append(kwargs)
+        return None, {"image_url": "https://assets.example/result.png?sig=short"}
+
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+
+    response = TestClient(app_module.app).post(
+        "/v1/images/generations",
+        headers=headers,
+        json={"model": "gpt-image-2", "prompt": "draw", "response_format": "url"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == [
+        {"url": "https://assets.example/result.png?sig=short"}
+    ]
+    assert len(calls) == 1
+    assert calls[0]["protocol_profile"] == "remote_adobe"
+    assert calls[0]["download_result"] is False
+    assert calls[0]["out_path"] is None
+
+
+def test_images_base64_downloads_to_memory_without_output_path(monkeypatch):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    calls = []
+
+    def generate(**kwargs):
+        calls.append(kwargs)
+        return _png_bytes(), {"image_url": "https://assets.example/result.png"}
+
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+
+    response = TestClient(app_module.app).post(
+        "/v1/images/generations",
+        headers=headers,
+        json={
+            "model": "gpt-image-2",
+            "prompt": "draw",
+            "response_format": "b64_json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert base64.b64decode(response.json()["data"][0]["b64_json"])
+    assert calls[0]["download_result"] is True
+    assert calls[0]["out_path"] is None
+
+
+def test_images_edits_uses_remote_upload_and_returns_presigned_url(monkeypatch):
+    import app as app_module
+
+    _patch_images_endpoint_token(monkeypatch, app_module)
+    upload_calls = []
+    generate_calls = []
+
+    def upload_image(*_args, **kwargs):
+        upload_calls.append(kwargs)
+        return "reference-image-id"
+
+    def generate(**kwargs):
+        generate_calls.append(kwargs)
+        return None, {"image_url": "https://assets.example/edited.png"}
+
+    monkeypatch.setattr(app_module.client, "upload_image", upload_image)
+    monkeypatch.setattr(app_module.client, "generate", generate)
+    api_key = str(app_module.config_manager.get("api_key", "") or "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+
+    response = TestClient(app_module.app).post(
+        "/v1/images/edits",
+        headers=headers,
+        data={
+            "model": "gpt-image-2",
+            "prompt": "edit",
+            "response_format": "url",
+        },
+        files={"image": ("reference.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == [
+        {"url": "https://assets.example/edited.png"}
+    ]
+    assert upload_calls[0]["protocol_profile"] == "remote_adobe"
+    assert generate_calls[0]["protocol_profile"] == "remote_adobe"
+    assert generate_calls[0]["download_result"] is False
+    assert generate_calls[0]["out_path"] is None
 
 
 def test_clarity_model_postprocesses_generated_image_to_transparent_png(monkeypatch):
@@ -873,6 +1063,145 @@ def test_image_submit_retry_budgets_default_to_60_seconds():
     assert client._image_submit_rate_limit_wait_seconds() == 60
     assert client._image_network_retry_seconds() == 180
     assert client._image_rate_limit_wait_seconds() == 180
+
+
+def test_remote_poll_pending_uses_fixed_three_seconds(monkeypatch):
+    client = AdobeClient()
+    monkeypatch.setattr(
+        client,
+        "_get",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {"status": "IN_PROGRESS"},
+            headers={"retry-after": "19"},
+        ),
+    )
+
+    result = client.poll_image_job_once(
+        token="TOKEN",
+        poll_url="https://example.test/jobs/1",
+        state={
+            "submitted_at": time.time(),
+            "protocol_profile": "remote_adobe",
+        },
+        timeout=30,
+    )
+
+    assert result["status"] == "pending"
+    assert result["retry_after"] == 3.0
+
+
+def test_remote_poll_network_error_is_not_retried_in_place(monkeypatch):
+    client = AdobeClient()
+    calls = []
+
+    def poll(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise UpstreamTemporaryError("connection reset", error_type="connection")
+
+    monkeypatch.setattr(client, "_get", poll)
+    with pytest.raises(UpstreamTemporaryError):
+        client.poll_image_job_once(
+            token="TOKEN",
+            poll_url="https://example.test/jobs/1",
+            state={
+                "submitted_at": time.time(),
+                "protocol_profile": "remote_adobe",
+            },
+            timeout=30,
+        )
+
+    assert len(calls) == 1
+
+
+def test_remote_upload_retries_451_or_5xx_six_times_without_wait(monkeypatch):
+    client = AdobeClient()
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(
+        client,
+        "_post_bytes",
+        lambda *args, **kwargs: calls.append(kwargs)
+        or FakeResponse(503, {"error": "busy"}),
+    )
+    monkeypatch.setattr(adobe_client_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(AdobeRequestError):
+        client.upload_image(
+            "TOKEN",
+            _png_bytes(),
+            "image/png",
+            protocol_profile="remote_adobe",
+        )
+
+    assert len(calls) == 6
+    assert sleeps == []
+    assert all(call["use_proxy"] is False for call in calls)
+
+
+def test_remote_download_retries_only_5xx_with_upstream_delays(monkeypatch):
+    client = AdobeClient()
+    success = FakeResponse(200)
+    success.content = _png_bytes()
+    responses = [FakeResponse(503, {"error": "busy"}), success]
+    sleeps = []
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return responses.pop(0)
+
+    monkeypatch.setattr(client, "_get", get)
+    monkeypatch.setattr(adobe_client_module.time, "sleep", sleeps.append)
+    result = client._download_image_result(
+        image_url="https://example.test/image.png",
+        poll_url="https://example.test/jobs/1",
+        token="TOKEN",
+        out_path=None,
+        progress_cb=None,
+        trace=None,
+        trace_parent_id=None,
+        upstream_job_id="job-1",
+        cancel_check=lambda: (_ for _ in ()).throw(AssertionError("cancel check")),
+        protocol_profile="remote_adobe",
+    )
+
+    assert result == _png_bytes()
+    assert len(calls) == 2
+    assert sleeps == [1.0]
+
+
+def test_remote_download_does_not_refresh_client_error_url(monkeypatch):
+    client = AdobeClient()
+    calls = []
+    monkeypatch.setattr(
+        client,
+        "_get",
+        lambda *args, **kwargs: calls.append((args, kwargs))
+        or FakeResponse(403, {"error": "expired"}),
+    )
+    monkeypatch.setattr(
+        client,
+        "_refresh_image_result_url",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("refresh")),
+    )
+
+    with pytest.raises(AdobeRequestError) as error_info:
+        client._download_image_result(
+            image_url="https://example.test/expired.png",
+            poll_url="https://example.test/jobs/1",
+            token="TOKEN",
+            out_path=None,
+            progress_cb=None,
+            trace=None,
+            trace_parent_id=None,
+            upstream_job_id="job-1",
+            cancel_check=None,
+            protocol_profile="remote_adobe",
+        )
+
+    assert error_info.value.status_code == 403
+    assert len(calls) == 1
 
 
 def _png_bytes():

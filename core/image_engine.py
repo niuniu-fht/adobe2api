@@ -36,6 +36,8 @@ class ImageEngineJob:
     requested_size: Optional[dict]
     timeout: int
     out_path: Optional[Path]
+    protocol_profile: str
+    download_result: bool
     progress_cb: Optional[Callable[[dict], None]]
     trace: Any
     trace_parent_id: Optional[str]
@@ -119,6 +121,12 @@ class ImageGenerationEngine:
         result: Optional[tuple[Optional[bytes], dict]] = None,
         error: Optional[BaseException] = None,
     ) -> None:
+        direct_session = job.poll_state.pop("_direct_session", None)
+        if direct_session is not None:
+            try:
+                direct_session.close()
+            except Exception:
+                pass
         with self._lock:
             if job.id not in self._jobs:
                 return
@@ -184,6 +192,7 @@ class ImageGenerationEngine:
                 trace=job.trace,
                 trace_parent_id=job.trace_parent_id,
                 cancel_check=job.cancel_check,
+                protocol_profile=job.protocol_profile,
             )
             job.poll_url = str(meta.get("poll_url") or "")
             job.upstream_job_id = str(meta.get("upstream_job_id") or "")
@@ -214,6 +223,20 @@ class ImageGenerationEngine:
             if status == "completed":
                 job.poll_state["latest"] = result.get("latest") or {}
                 job.poll_state["image_url"] = result.get("image_url") or ""
+                latest = dict(job.poll_state.get("latest") or {})
+                latest["image_url"] = job.poll_state["image_url"]
+                if not job.download_result:
+                    if job.progress_cb:
+                        job.progress_cb(
+                            {
+                                "task_status": "COMPLETED",
+                                "task_progress": 100.0,
+                                "upstream_job_id": job.upstream_job_id,
+                                "retry_after": None,
+                            }
+                        )
+                    self._finish_job(job, result=(None, latest))
+                    return
                 self._set_stage(job, "DOWNLOADING")
                 self._download_executor.submit(self._download_job, job)
                 return
@@ -236,8 +259,16 @@ class ImageGenerationEngine:
                 trace_parent_id=job.trace_parent_id,
                 upstream_job_id=job.upstream_job_id,
                 cancel_check=job.cancel_check,
+                protocol_profile=job.protocol_profile,
+                fingerprint=(
+                    job.poll_state.get("direct_fingerprint")
+                    if isinstance(job.poll_state.get("direct_fingerprint"), dict)
+                    else None
+                ),
+                session=job.poll_state.get("_direct_session"),
             )
             latest = dict(job.poll_state.get("latest") or {})
+            latest["image_url"] = str(job.poll_state.get("image_url") or "")
             if job.progress_cb:
                 try:
                     job.progress_cb(
@@ -277,6 +308,8 @@ class ImageGenerationEngine:
             requested_size=kwargs.get("requested_size"),
             timeout=int(kwargs.get("timeout") or 180),
             out_path=kwargs.get("out_path"),
+            protocol_profile=str(kwargs.get("protocol_profile") or ""),
+            download_result=bool(kwargs.get("download_result", True)),
             progress_cb=kwargs.get("progress_cb"),
             trace=kwargs.get("trace"),
             trace_parent_id=kwargs.get("trace_parent_id"),

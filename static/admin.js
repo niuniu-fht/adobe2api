@@ -1273,30 +1273,63 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function toCookieBatchItems(value) {
+    const headersFromItem = (item) => {
+      const headers = {};
+      const copyHeaders = (src) => {
+        if (!src || typeof src !== "object") return;
+        for (const [key, raw] of Object.entries(src)) {
+          if (String(key || "").trim().toLowerCase() === "x-arp-session-id") {
+            const val = String(raw || "").trim();
+            if (val) headers["x-arp-session-id"] = val;
+          }
+        }
+      };
+      copyHeaders(item.headers);
+      copyHeaders(item.firefly_headers);
+      const arp =
+        String(item.arp_session_id || "").trim() ||
+        String(item.x_arp_session_id || "").trim() ||
+        String(item["x-arp-session-id"] || "").trim();
+      if (arp) headers["x-arp-session-id"] = arp;
+      return Object.keys(headers).length ? headers : null;
+    };
+
+    const normalizeImportedItem = (item, idx) => {
+      if (!item || typeof item !== "object") {
+        throw new Error(`第 ${idx + 1} 项不是对象`);
+      }
+      const cookie = cookieToHeaderString(item.cookie != null ? item.cookie : item.cookies != null ? item.cookies : item);
+      if (!cookie) {
+        throw new Error(`第 ${idx + 1} 项缺少 cookie`);
+      }
+      const headers = headersFromItem(item);
+      const normalized = {
+        name: String(item.name || item.email || "").trim() || null,
+        cookie,
+      };
+      if (headers) normalized.headers = headers;
+      const accessToken = String(item.access_token || item.token || "").trim();
+      if (accessToken) normalized.access_token = accessToken;
+      return normalized;
+    };
+
     if (Array.isArray(value)) {
       if (value.length > 0 && value.every((item) => item && typeof item === "object" && "name" in item && "value" in item)) {
         const cookie = cookieToHeaderString(value);
         return cookie ? [{ name: null, cookie }] : [];
       }
-      return value.map((item, idx) => {
-        if (!item || typeof item !== "object") {
-          throw new Error(`第 ${idx + 1} 项不是对象`);
-        }
-        const cookie = cookieToHeaderString(item.cookie != null ? item.cookie : item.cookies != null ? item.cookies : item);
-        if (!cookie) {
-          throw new Error(`第 ${idx + 1} 项缺少 cookie`);
-        }
-        return {
-          name: String(item.name || item.email || "").trim() || null,
-          cookie,
-        };
-      });
+      return value.map((item, idx) => normalizeImportedItem(item, idx));
     }
     if (value && typeof value === "object") {
       if (Array.isArray(value.items)) return toCookieBatchItems(value.items);
       const cookie = cookieToHeaderString(value.cookie != null ? value.cookie : value.cookies != null ? value.cookies : value);
       if (!cookie) throw new Error("cookie 内容为空");
-      return [{ name: String(value.name || value.email || "").trim() || null, cookie }];
+      const headers = headersFromItem(value);
+      const normalized = { name: String(value.name || value.email || "").trim() || null, cookie };
+      if (headers) normalized.headers = headers;
+      const accessToken = String(value.access_token || value.token || "").trim();
+      if (accessToken) normalized.access_token = accessToken;
+      return [normalized];
     }
     const cookie = cookieToHeaderString(value);
     if (!cookie) throw new Error("cookie 内容为空");
@@ -1352,10 +1385,20 @@ document.addEventListener("DOMContentLoaded", async () => {
       };
 
       const importOne = async (item) => {
+        const cookiePayload = item.headers
+          ? { cookie: item.cookie, headers: item.headers }
+          : item.cookie;
+        if (item.access_token && cookiePayload && typeof cookiePayload === "object") {
+          cookiePayload.access_token = item.access_token;
+        }
         const res = await fetch("/api/v1/refresh-profiles/import-cookie", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ cookie: item.cookie, name: item.name || null }),
+          body: JSON.stringify({
+            cookie: cookiePayload,
+            name: item.name || null,
+            access_token: item.access_token || null,
+          }),
         });
         if (!res.ok) {
           let detailText = "Cookie 导入失败";

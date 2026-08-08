@@ -60,11 +60,21 @@ class ConfigUpdateRequest(BaseModel):
 class RefreshCookieImportRequest(BaseModel):
     cookie: Any
     name: Optional[str] = None
+    access_token: Optional[str] = None
+    headers: Optional[dict[str, Any]] = None
+    firefly_headers: Optional[dict[str, Any]] = None
+    arp_session_id: Optional[str] = None
+    x_arp_session_id: Optional[str] = None
 
 
 class RefreshCookieBatchImportItem(BaseModel):
     cookie: Any
     name: Optional[str] = None
+    access_token: Optional[str] = None
+    headers: Optional[dict[str, Any]] = None
+    firefly_headers: Optional[dict[str, Any]] = None
+    arp_session_id: Optional[str] = None
+    x_arp_session_id: Optional[str] = None
 
 
 class RefreshCookieBatchImportRequest(BaseModel):
