@@ -1374,6 +1374,28 @@ def test_reference_recovery_rejects_partial_reupload_before_generate():
     assert attempts == [["old-1", "old-2"]] * 4
 
 
+def test_coordinator_clears_transient_output_error_on_non_failed_update():
+    coordinator = ImageTaskCoordinator(io_workers=2)
+    request_id = coordinator.register_request(
+        log_id="log-transient",
+        path="/v1/images/generations",
+        model="gpt-image-2",
+        prompt_preview="draw",
+        output_count=1,
+    )
+
+    coordinator.update_output(
+        request_id, 0, state="FAILED", error="Adobe upstream temporary error"
+    )
+    assert coordinator.snapshot()["items"][0]["outputs"][0]["last_error"]
+
+    coordinator.update_output(request_id, 0, state="SUBMITTING")
+
+    output = coordinator.snapshot()["items"][0]["outputs"][0]
+    assert output["state"] == "SUBMITTING"
+    assert "last_error" not in output
+
+
 def test_coordinator_enforces_token_limit_and_preserves_output_order():
     coordinator = ImageTaskCoordinator(io_workers=8)
     request_id = coordinator.register_request(

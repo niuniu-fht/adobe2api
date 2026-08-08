@@ -402,13 +402,35 @@ def build_generation_router(
             and client.is_gpt_image_model_alias(model_id)
         )
 
+    def _normalize_gpt_image_quality(value: Any) -> str | None:
+        quality = str(value or "").strip().lower()
+        if quality in {"low", "medium", "high"}:
+            return quality
+        if quality in {"standard", "sd"}:
+            return "low"
+        if quality in {"hd", "highest"}:
+            return "high"
+        return None
+
     def _gpt_image_quality_for_model(
-        model_conf: dict, model_id: str | None
+        model_conf: dict,
+        model_id: str | None,
+        request_quality: Any = None,
     ) -> str | None:
         if str(model_conf.get("upstream_model_id") or "") != "gpt-image":
             return None
+        model_id_norm = str(model_id or "").strip()
+        model_quality = str(model_conf.get("gpt_image_quality") or "").strip().lower()
+        if (
+            model_id_norm
+            and model_id_norm != "gpt-image-2"
+            and client.is_gpt_image_model_alias(model_id_norm)
+            and model_quality in {"low", "medium", "high"}
+        ):
+            return model_quality
         return str(
-            model_conf.get("gpt_image_quality")
+            _normalize_gpt_image_quality(request_quality)
+            or model_quality
             or client.get_gpt_image_quality(model_id)
             or client.gpt_image_quality
         )
@@ -1073,6 +1095,7 @@ def build_generation_router(
         result_cache: Optional[dict[int, dict]] = None,
         seed_cache: Optional[dict[int, int]] = None,
         protocol_profile: str = "",
+        request_quality: Any = None,
     ) -> list[dict]:
         source_image_ids = source_image_ids or []
         result_cache = result_cache if result_cache is not None else {}
@@ -1105,6 +1128,7 @@ def build_generation_router(
                 image_task_coordinator.note_token_cooldown(
                     selected_token, float(retry_after)
                 )
+            visible_error = update.get("error") if queue_state == "FAILED" else None
             image_task_coordinator.update_output(
                 queue_id,
                 output_index,
@@ -1119,7 +1143,7 @@ def build_generation_router(
                 ),
                 rate_limit_wait_seconds=update.get("rate_limit_wait_seconds"),
                 download_attempt=update.get("download_attempt"),
-                error=update.get("error"),
+                error=visible_error,
             )
             set_request_task_progress(
                 request,
@@ -1127,7 +1151,7 @@ def build_generation_router(
                 task_progress=update.get("task_progress"),
                 upstream_job_id=update.get("upstream_job_id"),
                 retry_after=retry_after,
-                error=update.get("error"),
+                error=visible_error,
             )
 
         def _wait_for_token_cooldown(output_index: int, selected_token: str) -> None:
@@ -1238,7 +1262,7 @@ def build_generation_router(
                         model_conf.get("upstream_model_version") or "nano-banana-2"
                     ),
                     quality_level=_gpt_image_quality_for_model(
-                        model_conf, image_options.response_model
+                        model_conf, image_options.response_model, request_quality
                     ),
                     detail_level=model_conf.get("detail_level"),
                     seed=fixed_seed,
@@ -2044,6 +2068,7 @@ def build_generation_router(
                     model_conf=model_conf,
                     distributed_tokens=True,
                     protocol_profile="remote_adobe",
+                    request_quality=data.get("quality"),
                 )
             )
             result = {
@@ -2726,6 +2751,7 @@ def build_generation_router(
                         result_cache=result_cache,
                         seed_cache=seed_cache,
                         protocol_profile="remote_adobe",
+                        request_quality=data.get("quality"),
                     )
 
                 response_items, source_image_ids = generate_with_reference_recovery(
@@ -2991,7 +3017,7 @@ def build_generation_router(
                         upstream_model_version=str(
                             model_conf.get("upstream_model_version") or "nano-banana-2"
                         ),
-                        quality_level=_gpt_image_quality_for_model(model_conf, data.model),
+                        quality_level=_gpt_image_quality_for_model(model_conf, data.model, getattr(data, "quality", None)),
                         detail_level=model_conf.get("detail_level"),
                         out_path=out_path,
                     )
@@ -3278,7 +3304,7 @@ def build_generation_router(
                             image_model_conf.get("upstream_model_version")
                             or "nano-banana-2"
                         ),
-                        quality_level=_gpt_image_quality_for_model(image_model_conf, resolved_model_id),
+                        quality_level=_gpt_image_quality_for_model(image_model_conf, resolved_model_id, data.get("quality")),
                         detail_level=image_model_conf.get("detail_level"),
                         source_image_ids=source_image_ids,
                         requested_size=(

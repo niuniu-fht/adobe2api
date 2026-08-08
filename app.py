@@ -1404,11 +1404,13 @@ def _run_with_token_retries(
                 delay,
                 client.token_rotation_strategy,
             )
+            request.state.log_last_retry_error = (
+                retry_error_text or f"retry attempt {attempt}: {retry_reason}"
+            )
             _set_request_task_progress(
                 request,
                 task_status="IN_PROGRESS",
                 retry_after=int(round(delay)) if delay > 0 else None,
-                error=retry_error_text or f"retry attempt {attempt}: {retry_reason}",
             )
             if delay > 0:
                 time.sleep(delay)
@@ -1764,10 +1766,14 @@ def _scan_generated_dir() -> tuple[list[tuple[Path, int, float]], int, int]:
     files: list[tuple[Path, int, float]] = []
     total_bytes = 0
     file_count = 0
-    for item in GENERATED_DIR.iterdir():
-        if not item.is_file():
-            continue
+    try:
+        iterator = GENERATED_DIR.rglob("*")
+    except Exception:
+        iterator = iter(())
+    for item in iterator:
         try:
+            if not item.is_file():
+                continue
             st = item.stat()
             size = int(st.st_size)
             mtime = float(st.st_mtime)
@@ -1812,10 +1818,10 @@ def _on_generated_file_written(file_path: Path, old_size: int, new_size: int) ->
         elif safe_old_size > 0 and safe_new_size == 0:
             _generated_file_count = max(0, _generated_file_count - 1)
 
-    _prune_generated_files_if_needed()
+    _prune_generated_files_if_needed(force_reconcile=True)
 
 
-def _prune_generated_files_if_needed() -> None:
+def _prune_generated_files_if_needed(*, force_reconcile: bool = True) -> None:
     global _generated_usage_bytes, _generated_file_count, _generated_last_reconcile_ts
 
     def _conf_int(key: str, default: int) -> int:
@@ -1840,7 +1846,7 @@ def _prune_generated_files_if_needed() -> None:
     max_bytes = max_size_mb * 1024 * 1024
     prune_bytes = prune_size_mb * 1024 * 1024
 
-    _reconcile_generated_storage(force=False)
+    _reconcile_generated_storage(force=force_reconcile)
     with _generated_storage_lock:
         cached_usage = int(_generated_usage_bytes)
     if cached_usage <= max_bytes:
@@ -1858,17 +1864,15 @@ def _prune_generated_files_if_needed() -> None:
                 _generated_last_reconcile_ts = time.time()
             return
 
-        newest_file_path = max(files, key=lambda row: row[2])[0]
         files.sort(key=lambda row: row[2])
         removed_bytes = 0
         current_bytes = total_bytes
         current_count = file_count
+        target_bytes = max(0, max_bytes - prune_bytes)
 
         for path, size, _mtime in files:
-            if current_bytes <= max_bytes and removed_bytes >= prune_bytes:
+            if current_bytes <= target_bytes:
                 break
-            if path == newest_file_path:
-                continue
             try:
                 path.unlink(missing_ok=True)
                 current_bytes -= size
@@ -1883,13 +1887,19 @@ def _prune_generated_files_if_needed() -> None:
             _generated_last_reconcile_ts = time.time()
 
         logger.info(
-            "pruned generated files: before=%s after=%s removed=%s",
+            "pruned generated files: before=%s after=%s removed=%s target=%s max=%s",
             total_bytes,
             max(current_bytes, 0),
             removed_bytes,
+            target_bytes,
+            max_bytes,
         )
     finally:
         _generated_prune_lock.release()
+
+
+def _prune_generated_storage_now() -> None:
+    _prune_generated_files_if_needed(force_reconcile=True)
 
 
 def _get_generated_storage_stats() -> dict[str, int | float]:
@@ -1973,6 +1983,7 @@ app.include_router(
         is_ops_authenticated=_is_ops_authenticated,
         apply_client_config=_apply_client_config,
         get_generated_storage_stats=_get_generated_storage_stats,
+        prune_generated_storage=_prune_generated_storage_now,
     )
 )
 

@@ -2848,6 +2848,8 @@ class AdobeClient:
                 output_resolution=output_resolution,
                 upstream_model_id=upstream_model_id,
                 upstream_model_version=upstream_model_version,
+                quality_level=quality_level,
+                detail_level=detail_level,
                 seed=seed,
                 source_image_ids=source_image_ids,
                 requested_size=requested_size,

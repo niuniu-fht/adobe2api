@@ -162,9 +162,25 @@ def test_remote_gpt_payload_matches_express_shape():
             "submodule": "ff-image-generate",
         },
         "modelSpecificPayload": {"size": "1536x1024"},
-        "generationSettings": {"detailLevel": 3},
+        "generationSettings": {"detailLevel": 1},
     }
     assert "size" not in {key for key in payload if key != "modelSpecificPayload"}
+    assert "outputResolution" not in payload
+
+
+def test_remote_gpt_payload_uses_configured_quality():
+    payload = build_remote_adobe_image_payload_candidates(
+        prompt="draw",
+        aspect_ratio="auto",
+        output_resolution="auto",
+        upstream_model_id="gpt-image",
+        upstream_model_version="2",
+        quality_level="high",
+        seed=123,
+    )[0]
+
+    assert payload["modelSpecificPayload"] == {"size": "auto"}
+    assert payload["generationSettings"] == {"detailLevel": 5}
     assert "outputResolution" not in payload
 
 

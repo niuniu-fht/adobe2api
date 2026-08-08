@@ -233,6 +233,8 @@ class ImageTaskCoordinator:
                 output["download_attempt"] = max(0, int(download_attempt))
             if error is not None:
                 output["last_error"] = str(error)[:500]
+            elif state is not None and str(state).upper() not in {"FAILED", "CANCELLED"}:
+                output.pop("last_error", None)
             output["updated_at"] = time.time()
             item["updated_at"] = output["updated_at"]
             if item.get("state") not in TERMINAL_STATES:

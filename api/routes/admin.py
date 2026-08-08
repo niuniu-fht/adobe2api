@@ -39,6 +39,7 @@ def build_admin_router(
     is_ops_authenticated: Callable[[Request], bool],
     apply_client_config: Callable[[], None],
     get_generated_storage_stats: Callable[[], dict[str, Any]],
+    prune_generated_storage: Callable[[], None] | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -742,8 +743,17 @@ def build_admin_router(
                 status_code=400,
                 detail="generated_prune_size_mb must be smaller than generated_max_size_mb",
             )
+        storage_limit_changed = any(
+            key in update_data
+            for key in ("generated_max_size_mb", "generated_prune_size_mb")
+        )
         config_manager.update_all(update_data)
         apply_client_config()
+        if storage_limit_changed and prune_generated_storage is not None:
+            try:
+                prune_generated_storage()
+            except Exception:
+                pass
         return config_response(request, config_manager.get_all())
 
     @router.get("/api/v1/refresh-profiles")

@@ -250,6 +250,8 @@ def build_remote_adobe_image_payload_candidates(
     output_resolution: str,
     upstream_model_id: str,
     upstream_model_version: str,
+    quality_level: Optional[str] = None,
+    detail_level: Optional[int] = None,
     seed: Optional[int] = None,
     source_image_ids: Optional[list[str]] = None,
     requested_size: Optional[dict] = None,
@@ -262,9 +264,15 @@ def build_remote_adobe_image_payload_candidates(
     model_id = str(upstream_model_id or "").strip()
 
     if model_id.lower() == "gpt-image":
-        pixel_size = requested_size or gpt_image_pixels_from_ratio(ratio, resolution)
-        if pixel_size is None:
+        is_auto_size = requested_size is None and str(ratio or "").strip().lower() == "auto"
+        pixel_size = None if is_auto_size else (
+            requested_size or gpt_image_pixels_from_ratio(ratio, resolution)
+        )
+        if not is_auto_size and pixel_size is None:
             pixel_size = gpt_image_pixels_from_ratio("1:1", resolution)
+        effective_detail_level = detail_level
+        if effective_detail_level is None:
+            effective_detail_level = gpt_image_detail_level_from_quality(quality_level)
         payload = {
             "modelId": model_id,
             "modelVersion": upstream_model_version,
@@ -279,8 +287,10 @@ def build_remote_adobe_image_payload_candidates(
                 "module": "text2image",
                 "submodule": "ff-image-generate",
             },
-            "modelSpecificPayload": {"size": gpt_image_size_string(pixel_size)},
-            "generationSettings": {"detailLevel": 3},
+            "modelSpecificPayload": {
+                "size": "auto" if is_auto_size else gpt_image_size_string(pixel_size)
+            },
+            "generationSettings": {"detailLevel": int(effective_detail_level)},
         }
         return [payload]
 
